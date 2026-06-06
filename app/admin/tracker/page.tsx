@@ -80,6 +80,11 @@ export default function TrackerPage() {
             <p className="text-[10px] text-slate-500 uppercase tracking-widest">KaisifOS Pipeline</p>
           </div>
         </div>
+        <div className="flex space-x-4">
+            <Link href="/admin/digest" className="text-xs text-slate-400 hover:text-emerald-400 font-mono transition-colors border border-slate-800 px-3 py-1.5 rounded bg-slate-900 hover:border-emerald-500/30">
+                View Digest
+            </Link>
+        </div>
       </header>
 
       <main className="flex-1 p-8 grid grid-cols-12 gap-6 overflow-hidden">
@@ -128,8 +133,8 @@ export default function TrackerPage() {
                   <th className="px-6 py-3 font-semibold">Date</th>
                   <th className="px-6 py-3 font-semibold">Company / Role</th>
                   <th className="px-6 py-3 font-semibold">Match Score</th>
-                  <th className="px-6 py-3 font-semibold">Draft Snippet</th>
                   <th className="px-6 py-3 font-semibold text-center">Status</th>
+                  <th className="px-6 py-3 font-semibold">Draft Snippet</th>
                   <th className="px-6 py-3 font-semibold text-right">Action</th>
                 </tr>
               </thead>
@@ -159,20 +164,20 @@ export default function TrackerPage() {
                       <td className="px-6 py-4 whitespace-nowrap">
                         <MetricBar score={job.score} />
                       </td>
-                      <td className="px-6 py-4 max-w-[200px]">
-                         <div className="text-[10px] text-slate-400 italic truncate" title={job.dm}>
-                            {job.dm || '-'}
-                         </div>
-                      </td>
                       <td className="px-6 py-4 whitespace-nowrap text-center">
                         <select 
                           value={job.status} 
                           onChange={(e) => updateStatus(job.rowId, e.target.value)}
                           className="bg-transparent text-xs font-bold uppercase focus:ring-0 cursor-pointer p-1 rounded opacity-0 absolute w-16 -ml-4 z-20"
                         >
-                           {['NEW', 'APPLIED', 'REPLIED', 'INTERVIEW', 'REJECTED'].map(s => <option className="bg-slate-900 text-slate-300" key={s} value={s}>{s}</option>)}
+                           {['NEW', 'APPLIED', 'REPLIED', 'INTERVIEW', 'REJECTED'].map(s => <option className="bg-slate-900 text-slate-500" key={s} value={s}>{s}</option>)}
                         </select>
-                        <div className="relative z-10"><StatusBadge status={job.status} /></div>
+                        <div className="relative z-10 inline-flex items-center justify-center"><StatusBadge status={job.status} /></div>
+                      </td>
+                      <td className="px-6 py-4 max-w-[200px]">
+                         <div className="text-[10px] text-slate-400 italic truncate" title={job.dm}>
+                            {job.dm || '-'}
+                         </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                         <a href={job.url} target="_blank" rel="noreferrer" className="text-emerald-500 hover:text-emerald-400 text-xs hover:underline transition-colors">

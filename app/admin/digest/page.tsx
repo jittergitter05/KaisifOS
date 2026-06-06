@@ -37,7 +37,7 @@ export default function DigestPage() {
 
   return (
     <div className="flex flex-col h-screen overflow-y-auto w-full bg-slate-900 text-slate-50">
-      <header className="h-16 border-b border-slate-800 px-8 flex items-center justify-between bg-slate-900/50 backdrop-blur-md shrink-0">
+      <header className="h-16 border-b border-slate-800 px-8 flex items-center justify-between bg-slate-900/50 backdrop-blur-md shrink-0 sticky top-0 z-50">
         <div className="flex items-center space-x-4">
           <Link href="/">
             <div className="w-8 h-8 bg-emerald-500 rounded flex items-center justify-center font-bold text-white font-mono text-xl">K</div>

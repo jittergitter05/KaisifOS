@@ -1,7 +1,19 @@
 import { google } from 'googleapis';
 import dotenv from 'dotenv';
+import fetch from 'node-fetch';
 
 dotenv.config();
+
+function getAuthWithoutSubject() {
+  if (!process.env.GOOGLE_SERVICE_KEY_BASE64) {
+       throw new Error('Missing GOOGLE_SERVICE_KEY_BASE64');
+  }
+  const credentials = JSON.parse(Buffer.from(process.env.GOOGLE_SERVICE_KEY_BASE64, 'base64').toString('utf8'));
+  return new google.auth.GoogleAuth({
+     credentials,
+     scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/gmail.readonly'],
+  });
+}
 
 function getAuth() {
   if (!process.env.GOOGLE_SERVICE_KEY_BASE64) {
@@ -12,19 +24,8 @@ function getAuth() {
     credentials,
     scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/gmail.readonly'],
     clientOptions: {
-      subject: process.env.GMAIL_USER_EMAIL, // Required for domain-wide delegation, but we can try without if just accessing service account itself, though Gmail usually needs subject impersonation if not using regular OAuth.
+      subject: process.env.GMAIL_USER_EMAIL, 
     }
-  });
-}
-
-function getAuthWithoutSubject() {
-  if (!process.env.GOOGLE_SERVICE_KEY_BASE64) {
-       throw new Error('Missing GOOGLE_SERVICE_KEY_BASE64');
-  }
-  const credentials = JSON.parse(Buffer.from(process.env.GOOGLE_SERVICE_KEY_BASE64, 'base64').toString('utf8'));
-  return new google.auth.GoogleAuth({
-     credentials,
-     scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/gmail.readonly'],
   });
 }
 
@@ -41,25 +42,18 @@ async function sendDiscordAlert(content) {
 
 async function main() {
   try {
-    console.log('Starting reply tracker...');
-    
     let auth;
     try {
-        // try with impersonation if setting up domain-wide delegation
         auth = getAuth();
         await auth.getClient();
     } catch(e) {
-        // fallback to standard service account
         auth = getAuthWithoutSubject();
     }
 
     const sheets = google.sheets('v4');
     const gmail = google.gmail('v1');
-    
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
     
-    // STEP 1 - READ SHEET
-    console.log('Reading sheet data...');
     const response = await sheets.spreadsheets.values.get({
       auth,
       spreadsheetId,
@@ -68,11 +62,9 @@ async function main() {
     
     const rows = response.data.values || [];
     if (rows.length === 0) {
-      console.log('No rows found in sheet.');
       return;
     }
     
-    // Assume columns: Date(0)|ID(1)|Title(2)|Company(3)|Score(4)|Reasons(5)|Gap(6)|URL(7)|DM(8)|ResumeAngle(9)|Status(10)|ReplyDate(11)
     const pendingRows = [];
     const lowerCompanies = new Map();
     
@@ -83,12 +75,8 @@ async function main() {
       }
     });
     
-    console.log(`Found ${pendingRows.length} 'APPLIED' jobs.`);
     if (pendingRows.length === 0) return;
     
-    // STEP 2 - SCAN GMAIL
-    console.log('Scanning Gmail inbox...');
-    // We use the service account mail or impersonate
     let listRes;
     try {
        listRes = await gmail.users.messages.list({
@@ -97,7 +85,7 @@ async function main() {
         q: 'in:inbox newer_than:2d',
       });
     } catch (gerr) {
-        throw new Error(`Gmail API Error: ${gerr.message}. Make sure Gmail API is enabled and service account has access.`);
+        throw new Error(`Gmail API Error: ${gerr.message}`);
     }
 
     const messages = listRes.data.messages || [];
@@ -121,10 +109,8 @@ async function main() {
        const lowerFrom = from.toLowerCase();
        const lowerSubj = subject.toLowerCase();
        
-       // Check if company matches
        for (const [companyLowerCase, rowIndex] of lowerCompanies.entries()) {
           if (!matchedIndices.has(rowIndex)) {
-             // simplified matching
              if (lowerFrom.includes(companyLowerCase) || lowerSubj.includes(companyLowerCase)) {
                 matchedIndices.add(rowIndex);
                 hits.push({
@@ -139,16 +125,10 @@ async function main() {
        }
     }
     
-    // STEP 3 - UPDATE + NOTIFY
     if (hits.length > 0) {
-      console.log(`Found ${hits.length} replies.`);
       const today = new Date().toISOString().split('T')[0];
-      
       for (const hit of hits) {
-         // Update Status -> REPLIED (col K, index 10)
-         // Add Reply Date (col L, index 11)
-         const rowToUpdate = hit.rowIndex + 1; // 1-based index
-         
+         const rowToUpdate = hit.rowIndex + 1; 
          await sheets.spreadsheets.values.update({
             auth,
             spreadsheetId,
@@ -158,17 +138,11 @@ async function main() {
               values: [['REPLIED', today]]
             }
          });
-         
          const alertMsg = `📩 REPLY DETECTED\nCompany: ${hit.company}\nFrom: ${hit.from}\nSubject: ${hit.subject}\nDate: ${hit.dateStr}\n→ Update your tracker and respond within 2 hours.`;
          await sendDiscordAlert(alertMsg);
       }
-    } else {
-        console.log('No new replies detected.');
-    }
-    
-    console.log('Reply tracker completed successfully.');
+    } 
   } catch (error) {
-    console.error('Tracker failure:', error);
     await sendDiscordAlert(`🚨 Reply tracker failed today: ${error.message}`);
     process.exit(1);
   }

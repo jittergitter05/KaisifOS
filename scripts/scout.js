@@ -31,21 +31,18 @@ async function getExistingJobIds(sheets, auth) {
     const response = await sheets.spreadsheets.values.get({
       auth,
       spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: 'Sheet1!B:B', // Column B is Job ID
+      range: 'Sheet1!B:B',
     });
     const rows = response.data.values;
     if (!rows || rows.length === 0) return new Set();
-    // Skip header row if it exists, but putting all in set is fine
     return new Set(rows.map((row) => row[0]));
   } catch (error) {
     console.error('Error fetching existing job IDs:', error.message);
-    // If sheet doesn't exist or is empty, we must handle it. Return empty set.
     return new Set();
   }
 }
 
 async function fetchAdzunaJobs(profile) {
-  const { APP_ID, API_KEY } = process.env;
   if (!process.env.ADZUNA_APP_ID || !process.env.ADZUNA_API_KEY) {
      throw new Error("Missing ADZUNA env variables");
   }
@@ -75,7 +72,7 @@ async function fetchAdzunaJobs(profile) {
         } catch (error) {
              console.error(`Fetch error for ${role} in ${city}:`, error.message);
         }
-        await delay(500); // polite delay
+        await delay(500); 
     }
   }
   return jobs;
@@ -149,14 +146,7 @@ async function sendDiscordDigest(matches, resumeUrl) {
     content += "No new matches above 70 today.";
   } else {
     matches.forEach((m, idx) => {
-      content += `
-${idx + 1}. **${m.job.title}** @ **${m.job.company?.display_name || 'Unknown'}**
-🎯 Match: ${m.scoreData.score}/100
-✅ Why: ${m.scoreData.match_reasons.join(" | ")}
-⚠️ Gap: ${m.scoreData.gap}
-📝 DM: ${m.scoreData.dm_draft}
-🔗 ${m.job.redirect_url}
-─────────────────────────────`;
+      content += `\n${idx + 1}. **${m.job.title}** @ **${m.job.company?.display_name || 'Unknown'}**\n🎯 Match: ${m.scoreData.score}/100\n✅ Why: ${m.scoreData.match_reasons.join(" | ")}\n⚠️ Gap: ${m.scoreData.gap}\n📝 DM: ${m.scoreData.dm_draft}\n🔗 ${m.job.redirect_url}\n─────────────────────────────`;
     });
     content += `\n${matches.length} matches above 70 today.\nResume synthesizer: ${resumeUrl}\n⏱ Send DMs before 11AM IST.`;
   }
@@ -164,7 +154,7 @@ ${idx + 1}. **${m.job.title}** @ **${m.job.company?.display_name || 'Unknown'}**
   const res = await fetch(webhookUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content: content.substring(0, 2000) }), // Discord limit
+    body: JSON.stringify({ content: content.substring(0, 2000) }),
   });
   
   if (!res.ok) {
@@ -174,23 +164,13 @@ ${idx + 1}. **${m.job.title}** @ **${m.job.company?.display_name || 'Unknown'}**
 
 async function main() {
   try {
-    console.log('Starting job scout...');
     const profile = JSON.parse(fs.readFileSync(PROFILE_PATH, 'utf8'));
-    
-    console.log('Authenticating with Google...');
     const auth = await getAuth();
     const sheets = google.sheets('v4');
-    
-    console.log('Fetching existing jobs from Sheet...');
     const existingIds = await getExistingJobIds(sheets, auth);
-    
-    console.log('Fetching Adzuna jobs...');
     const rawJobs = await fetchAdzunaJobs(profile);
-    
     const newJobs = rawJobs.filter(j => j.id && !existingIds.has(String(j.id)));
-    console.log(`Found ${newJobs.length} new jobs to score.`);
     
-    // Deduplicate array by id just in case adzuna returns duplicates
     const uniqueNewJobsMap = new Map();
     newJobs.forEach(j => uniqueNewJobsMap.set(j.id, j));
     const uniqueNewJobs = Array.from(uniqueNewJobsMap.values());
@@ -201,14 +181,13 @@ async function main() {
       if (scoreData && typeof scoreData.score === 'number' && scoreData.score >= 70) {
         scoredJobs.push({ job, scoreData });
       }
-      await delay(1000); // 1 second delay between gemini calls
+      await delay(1000); 
     }
     
     scoredJobs.sort((a, b) => b.scoreData.score - a.scoreData.score);
     const topMatches = scoredJobs.slice(0, 5);
     
     if (topMatches.length > 0) {
-      console.log(`Writing ${topMatches.length} top matches to Sheets...`);
       const dateStr = new Date().toISOString().split('T')[0];
       const rows = topMatches.map(m => [
         dateStr,
@@ -221,12 +200,11 @@ async function main() {
         m.job.redirect_url || '',
         m.scoreData.dm_draft || '',
         m.scoreData.resume_angle || '',
-        'NEW' // Status
+        'NEW' 
       ]);
       await appendToSheet(sheets, auth, rows);
     }
     
-    console.log('Sending Discord digest...');
     await sendDiscordDigest(topMatches, profile.resume_synthesizer_url);
     console.log('Scout completed successfully!');
   } catch (error) {
