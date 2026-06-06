@@ -1,0 +1,29 @@
+name: Reply Tracker
+on:
+  schedule:
+    - cron: '30 3 * * 1-5' # 9:00 AM IST (3:30 AM UTC) weekdays
+  workflow_dispatch:
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm install
+        
+      - name: Run Reply Tracker
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SERVICE_KEY_BASE64: ${{ secrets.GOOGLE_SERVICE_KEY_BASE64 }}
+          GMAIL_USER_EMAIL: ${{ secrets.GMAIL_USER_EMAIL }}
+        run: node scripts/reply-tracker.js
