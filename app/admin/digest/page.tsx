@@ -6,10 +6,20 @@ import Link from 'next/link';
 export default function DigestPage() {
   const [jobs, setJobs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/admin/sheet-sync').then(res => res.json()).then(data => {
-        if (data.rows) {
+    fetch('/api/admin/sheet-sync')
+      .then(async res => {
+        if (res.status === 401) {
+          window.location.href = '/login';
+          return null;
+        }
+        if (!res.ok) throw new Error('Failed to fetch data');
+        return res.json();
+      })
+      .then(data => {
+        if (data && data.rows) {
           const todayStr = new Date().toISOString().split('T')[0];
           const parsedJobs = data.rows.map((r: any[], i: number) => ({
             rowId: i + 1, Date: r[0] || '', Title: r[2] || '', Company: r[3] || '',
@@ -19,7 +29,12 @@ export default function DigestPage() {
           setJobs(parsedJobs.sort((a,b) => b.Score - a.Score));
         }
         setLoading(false);
-      }).catch(() => setLoading(false));
+      })
+      .catch((err) => {
+        console.error(err);
+        setError('Failed to load digest data.');
+        setLoading(false);
+      });
   }, []);
 
   return (
@@ -33,6 +48,7 @@ export default function DigestPage() {
       </header>
       <main className="flex-1 py-8 px-4 sm:px-6 lg:px-8 max-w-4xl mx-auto w-full pb-24">
         {loading ? <div className="text-center py-12 text-slate-500 font-mono text-xs">Loading today's matches...</div> :
+         error ? <div className="text-center py-12 text-slate-500 font-mono text-xs text-red-400">{error}</div> :
          jobs.length === 0 ? <div className="text-center py-12 bg-slate-900 rounded-xl shadow-sm border border-slate-800 text-slate-400 gap-4 flex flex-col items-center"><p className="text-sm font-medium text-white">No top matches found today.</p><p className="text-[10px] font-mono text-slate-500 tracking-wider">Cron will run again tomorrow at 08:00 UTC</p></div> :
          <div className="space-y-6 pb-12">{jobs.map(job => <JobCard key={job.rowId} job={job} />)}</div>}
       </main>

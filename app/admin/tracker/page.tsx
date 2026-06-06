@@ -15,9 +15,20 @@ export default function TrackerPage() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('ALL');
 
+  const [error, setError] = useState<string | null>(null);
+
   useEffect(() => {
-    fetch('/api/admin/sheet-sync').then(res => res.json()).then(data => {
-        if (data.rows) {
+    fetch('/api/admin/sheet-sync')
+      .then(async res => {
+        if (res.status === 401) {
+          window.location.href = '/login';
+          return null;
+        }
+        if (!res.ok) throw new Error('Failed to fetch data');
+        return res.json();
+      })
+      .then(data => {
+        if (data && data.rows) {
           const parsedJobs = data.rows.map((r: any[], i: number) => ({
             rowId: i + 1, date: r[0] || '', id: r[1] || '', title: r[2] || '', company: r[3] || '',
             score: parseInt(r[4] || '0', 10), url: r[7] || '', dm: r[8] || '', status: r[10] || 'NEW',
@@ -25,7 +36,12 @@ export default function TrackerPage() {
           setJobs(parsedJobs.reverse());
         }
         setLoading(false);
-      }).catch(() => setLoading(false));
+      })
+      .catch((err) => {
+        console.error(err);
+        setError('Failed to load tracker data. Please check your connection.');
+        setLoading(false);
+      });
   }, []);
 
   const updateStatus = async (rowId: number, newStatus: string) => {
@@ -161,6 +177,8 @@ export default function TrackerPage() {
               <tbody className="divide-y divide-slate-800">
                 {loading ? (
                   <tr><td colSpan={5} className="px-6 py-12 text-center text-sm font-mono text-slate-500">Loading tracker data...</td></tr>
+                ) : error ? (
+                  <tr><td colSpan={5} className="px-6 py-12 text-center text-sm font-mono text-red-400">{error}</td></tr>
                 ) : filteredJobs.length === 0 ? (
                   <tr><td colSpan={5} className="px-6 py-12 text-center text-sm font-mono text-slate-500">No jobs found.</td></tr>
                 ) : (
