@@ -76,7 +76,7 @@ export default async function Home() {
     const stats = await getStats();
 
     return (
-        <div className="flex flex-col min-h-screen w-full bg-slate-900 text-slate-50">
+        <div className="flex flex-col flex-1 w-full bg-slate-900 text-slate-50">
             <header className="h-16 border-b border-slate-800 px-8 flex items-center justify-between bg-slate-900/50 backdrop-blur-md shrink-0">
                 <div className="flex items-center space-x-4">
                     <div className="w-8 h-8 bg-emerald-500 rounded flex items-center justify-center font-bold text-white font-mono text-xl">K</div>
@@ -86,20 +86,20 @@ export default async function Home() {
                 </div>
             </header>
             
-            <main className="flex-1 overflow-auto">
-                <div className="max-w-4xl mx-auto py-16 px-6">
-                    <div className="text-center mb-16">
-                        <h2 className="text-3xl sm:text-4xl font-bold tracking-tight mb-4 text-white">Automated Job Hunting Engine</h2>
-                        <p className="text-base sm:text-lg text-slate-400 max-w-2xl mx-auto">
+            <main className="flex-1 w-full pb-24">
+                <div className="max-w-4xl mx-auto py-10 sm:py-16 px-4 sm:px-6">
+                    <div className="text-center mb-10 sm:mb-16">
+                        <h2 className="text-3xl sm:text-4xl font-bold tracking-tight mb-3 sm:mb-4 text-white">Automated Job Hunting Engine</h2>
+                        <p className="text-sm sm:text-base md:text-lg text-slate-400 max-w-2xl mx-auto px-2">
                             This is an AI-powered job hunting agent built by Kaisif while actively job searching. 
                         </p>
                     </div>
 
-                    <div className="grid md:grid-cols-2 gap-8 mb-16">
-                         <div className="bg-slate-900 border border-slate-800 p-8 rounded-2xl relative overflow-hidden group hover:border-slate-700 transition-colors">
+                    <div className="grid md:grid-cols-2 gap-6 md:gap-8 mb-10 sm:mb-16">
+                         <div className="bg-slate-900 border border-slate-800 p-6 sm:p-8 rounded-2xl relative overflow-hidden group hover:border-slate-700 transition-colors">
                              <div className="absolute top-0 left-0 w-1 h-full bg-blue-500"></div>
-                             <h3 className="text-xl font-bold mb-3 text-white">What it does</h3>
-                             <ul className="text-slate-400 space-y-2 text-sm">
+                             <h3 className="text-lg sm:text-xl font-bold mb-3 text-white">What it does</h3>
+                             <ul className="text-slate-400 space-y-2 text-xs sm:text-sm">
                                  <li className="flex items-start"><span className="text-blue-500 mr-2">✓</span> Runs a daily scout agent using GitHub Actions</li>
                                  <li className="flex items-start"><span className="text-blue-500 mr-2">✓</span> Scores job fit using Gemini 2.5 Flash</li>
                                  <li className="flex items-start"><span className="text-blue-500 mr-2">✓</span> Tracks active applications via Google Sheets</li>
@@ -107,16 +107,16 @@ export default async function Home() {
                              </ul>
                          </div>
 
-                         <div className="bg-slate-900 border border-slate-800 p-8 rounded-2xl relative overflow-hidden group hover:border-slate-700 transition-colors">
+                         <div className="bg-slate-900 border border-slate-800 p-6 sm:p-8 rounded-2xl relative overflow-hidden group hover:border-slate-700 transition-colors">
                              <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>
-                             <h3 className="text-xl font-bold mb-3 text-white">Why it was built</h3>
-                             <p className="text-slate-400 text-sm leading-relaxed">
+                             <h3 className="text-lg sm:text-xl font-bold mb-3 text-white">Why it was built</h3>
+                             <p className="text-slate-400 text-xs sm:text-sm leading-relaxed">
                                 Built for transparency, automation, and accountability. Job hunting is a numbers game, but quality of applications matters. KaisifOS ensures no high-fit opportunity is missed, drafts contextual outreach messages, and maintains a strict analytics pipeline without manual data entry.
                              </p>
                          </div>
                     </div>
 
-                    <div className="mb-16">
+                    <div className="mb-10 sm:mb-16">
                         <h3 className="text-sm font-mono text-slate-500 uppercase tracking-widest text-center mb-8">System Decision Logic</h3>
                         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 relative">
                             <div className="flex flex-col md:flex-row items-center justify-between space-y-6 md:space-y-0 relative z-10">

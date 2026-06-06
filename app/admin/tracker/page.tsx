@@ -76,7 +76,7 @@ export default function TrackerPage() {
   const avgScore = jobs.length > 0 ? Math.round(jobs.reduce((a, b) => a + b.score, 0) / jobs.length) : 0;
 
   return (
-    <div className="flex flex-col h-screen w-full bg-slate-900 text-slate-50">
+    <div className="flex flex-col flex-1 w-full bg-slate-900 text-slate-50">
       <header className="h-16 border-b border-slate-800 px-8 flex items-center justify-between bg-slate-900/50 backdrop-blur-md shrink-0">
         <div className="flex items-center space-x-4">
           <Link href="/"><div className="w-8 h-8 bg-emerald-500 rounded flex items-center justify-center font-bold text-white font-mono text-xl">K</div></Link>
@@ -87,49 +87,51 @@ export default function TrackerPage() {
         </div>
       </header>
 
-      <main className="flex-1 p-8 grid grid-cols-12 gap-6 overflow-hidden">
-        <div className="col-span-3 flex flex-col space-y-6 overflow-y-auto pr-2 pb-10">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-            <div className="text-xs text-slate-500 uppercase tracking-widest mb-4 font-semibold">Total Leads</div>
-            <div className="text-2xl font-mono text-white">{jobs.length}</div>
-          </div>
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-            <div className="text-xs text-slate-500 uppercase tracking-widest mb-4 font-semibold">Applied</div>
-            <div className="text-2xl font-mono text-blue-400">{appliedCount}</div>
-          </div>
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-            <div className="text-xs text-slate-500 uppercase tracking-widest mb-4 font-semibold">Interviews</div>
-            <div className="text-2xl font-mono text-purple-400">{intCount}</div>
-            <div className="text-[10px] text-purple-500 mt-1">{intRate}% rate</div>
-          </div>
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-            <div className="text-xs text-slate-500 uppercase tracking-widest mb-4 font-semibold">Avg Match</div>
-            <div className="text-2xl font-mono text-emerald-400">{avgScore}</div>
-          </div>
-          
-          {chartData.length > 0 && (
-             <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-               <div className="text-xs text-slate-500 uppercase tracking-widest mb-4 font-semibold">Match Trend (30d)</div>
-               <div className="h-32 w-full">
-                 <ResponsiveContainer width="100%" height="100%">
-                   <LineChart data={chartData}>
-                     <XAxis dataKey="date" hide />
-                     <YAxis hide domain={['dataMin - 5', 100]} />
-                     <Tooltip 
-                       contentStyle={{ backgroundColor: '#1E293B', border: '1px solid #334155', borderRadius: '8px', fontSize: '10px' }}
-                       itemStyle={{ color: '#10B981' }}
-                       labelStyle={{ color: '#94A3B8', marginBottom: '4px' }}
-                     />
-                     <Line type="monotone" dataKey="avgScore" name="Avg Score" stroke="#10B981" strokeWidth={2} dot={false} />
-                   </LineChart>
-                 </ResponsiveContainer>
+      <main className="flex-1 p-4 sm:p-8 flex flex-col lg:grid lg:grid-cols-12 gap-6 pb-24">
+        <div className="lg:col-span-3 flex-shrink-0">
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-1 gap-4 lg:gap-6">
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5">
+              <div className="text-[10px] sm:text-xs text-slate-500 uppercase tracking-widest mb-2 sm:mb-4 font-semibold">Total Leads</div>
+              <div className="text-xl sm:text-2xl font-mono text-white">{jobs.length}</div>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5">
+              <div className="text-[10px] sm:text-xs text-slate-500 uppercase tracking-widest mb-2 sm:mb-4 font-semibold">Applied</div>
+              <div className="text-xl sm:text-2xl font-mono text-blue-400">{appliedCount}</div>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5">
+              <div className="text-[10px] sm:text-xs text-slate-500 uppercase tracking-widest mb-2 sm:mb-4 font-semibold">Interviews</div>
+              <div className="text-xl sm:text-2xl font-mono text-purple-400">{intCount}</div>
+              <div className="text-[9px] sm:text-[10px] text-purple-500 mt-1">{intRate}% rate</div>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5">
+              <div className="text-[10px] sm:text-xs text-slate-500 uppercase tracking-widest mb-2 sm:mb-4 font-semibold">Avg Match</div>
+              <div className="text-xl sm:text-2xl font-mono text-emerald-400">{avgScore}</div>
+            </div>
+            
+            {chartData.length > 0 && (
+               <div className="col-span-2 sm:col-span-4 lg:col-span-1 bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5 mb-4 lg:mb-10">
+                 <div className="text-[10px] sm:text-xs text-slate-500 uppercase tracking-widest mb-2 sm:mb-4 font-semibold">Match Trend (30d)</div>
+                 <div className="h-24 sm:h-32 w-full">
+                   <ResponsiveContainer width="100%" height="100%">
+                     <LineChart data={chartData}>
+                       <XAxis dataKey="date" hide />
+                       <YAxis hide domain={['dataMin - 5', 100]} />
+                       <Tooltip 
+                         contentStyle={{ backgroundColor: '#1E293B', border: '1px solid #334155', borderRadius: '8px', fontSize: '10px' }}
+                         itemStyle={{ color: '#10B981' }}
+                         labelStyle={{ color: '#94A3B8', marginBottom: '4px' }}
+                       />
+                       <Line type="monotone" dataKey="avgScore" name="Avg Score" stroke="#10B981" strokeWidth={2} dot={false} />
+                     </LineChart>
+                   </ResponsiveContainer>
+                 </div>
                </div>
-             </div>
-          )}
+            )}
+          </div>
         </div>
 
-        <div className="col-span-9 flex flex-col bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-          <div className="p-4 border-b border-slate-800 flex items-center justify-between shrink-0">
+        <div className="lg:col-span-9 flex flex-col bg-slate-900 border border-slate-800 rounded-xl">
+          <div className="p-3 sm:p-4 border-b border-slate-800 items-center justify-between shrink-0 overflow-x-auto whitespace-nowrap hide-scrollbar">
             <div className="flex space-x-2">
               {['ALL', 'NEW', 'APPLIED', 'REPLIED', 'INTERVIEW', 'REJECTED'].map(f => (
                 <button
@@ -145,8 +147,8 @@ export default function TrackerPage() {
             </div>
           </div>
 
-          <div className="flex-1 overflow-auto">
-            <table className="w-full text-left border-collapse">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse min-w-[700px]">
               <thead className="text-[10px] text-slate-500 uppercase tracking-wider bg-slate-950/50 sticky top-0 z-10">
                 <tr className="border-b border-slate-800">
                   <th className="px-6 py-3 font-semibold">Date</th>

@@ -10,7 +10,6 @@
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
-    "@vercel/analytics": "^2.0.1",
     "googleapis": "^140.0.0",
     "lucide-react": "^0.471.0",
     "next": "^15.5.19",
@@ -24,6 +23,8 @@
     "@types/react": "^19.0.5",
     "@types/react-dom": "^19.0.3",
     "autoprefixer": "^10.4.19",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "^16.2.7",
     "postcss": "^8.4.38",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.7.3"

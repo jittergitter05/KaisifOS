@@ -1,6 +1,5 @@
 import type {Metadata} from 'next';
 import { Inter, JetBrains_Mono } from 'next/font/google';
-import { Analytics } from '@vercel/analytics/next';
 import './globals.css'; 
 
 const inter = Inter({
@@ -21,9 +20,8 @@ export const metadata: Metadata = {
 export default function RootLayout({children}: {children: React.ReactNode}) {
   return (
     <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable}`}>
-       <body className="bg-[#0F172A] text-[#F8FAFC] font-sans antialiased h-screen overflow-hidden" suppressHydrationWarning>
+       <body className="bg-[#0F172A] text-[#F8FAFC] font-sans antialiased min-h-screen flex flex-col" suppressHydrationWarning>
         {children}
-        <Analytics />
       </body>
     </html>
   );

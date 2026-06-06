@@ -9,13 +9,15 @@ interface JobData {
 
 export default function JobCard({ job }: { job: JobData }) {
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 hover:border-slate-700 transition-colors shadow-sm">
-      <div className="flex justify-between items-start mb-4">
+    <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 sm:p-6 hover:border-slate-700 transition-colors shadow-sm">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-4 sm:gap-0">
         <div>
-           <h3 className="text-lg font-medium text-white">{job.Title}</h3>
+           <h3 className="text-base sm:text-lg font-medium text-white">{job.Title}</h3>
            <p className="text-xs text-slate-500">{job.Company}</p>
         </div>
-        <MetricBar score={job.Score} />
+        <div className="shrink-0">
+          <MetricBar score={job.Score} />
+        </div>
       </div>
       <div className="space-y-4 pt-2">
           <div><h4 className="text-[10px] font-bold tracking-wider text-slate-500 uppercase mb-1">Match Reasons</h4><p className="text-sm text-slate-300">{job.Reasons}</p></div>
