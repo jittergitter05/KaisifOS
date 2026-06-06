@@ -1,13 +1,10 @@
 import React from 'react';
-
 export default function MetricBar({ score }: { score: number }) {
   const isHighMatch = score >= 85;
   const isMedMatch = score >= 70 && score < 85;
-  
   let barColor = 'bg-slate-600';
   if (isHighMatch) barColor = 'bg-emerald-500';
   else if (isMedMatch) barColor = 'bg-yellow-500';
-
   let textColor = 'text-slate-400';
   if (isHighMatch) textColor = 'text-emerald-500';
   else if (isMedMatch) textColor = 'text-yellow-500';

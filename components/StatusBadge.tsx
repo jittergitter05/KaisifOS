@@ -1,8 +1,6 @@
 import React from 'react';
-
 export default function StatusBadge({ status }: { status: string }) {
   const tStatus = status.toLowerCase();
-  
   let classes = "";
   if (tStatus === "new") classes = "status-new";
   else if (tStatus === "applied") classes = "status-applied";

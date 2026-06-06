@@ -84,9 +84,6 @@ export default async function Home() {
                         <h1 className="text-lg font-bold tracking-tight">KaisifOS <span className="text-xs font-mono text-emerald-500 ml-2 font-normal">Public</span></h1>
                     </div>
                 </div>
-                <Link href="/admin/tracker" className="text-xs text-slate-400 hover:text-emerald-400 font-mono transition-colors">
-                    Admin Login &rarr;
-                </Link>
             </header>
             
             <main className="flex-1 overflow-auto">
@@ -120,6 +117,45 @@ export default async function Home() {
                     </div>
 
                     <div className="mb-16">
+                        <h3 className="text-sm font-mono text-slate-500 uppercase tracking-widest text-center mb-8">System Decision Logic</h3>
+                        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 relative">
+                            <div className="flex flex-col md:flex-row items-center justify-between space-y-6 md:space-y-0 relative z-10">
+                                <div className="text-center group w-full">
+                                    <div className="w-12 h-12 bg-slate-800 border border-slate-700 rounded-xl flex items-center justify-center mx-auto mb-3 text-blue-400 group-hover:scale-110 transition-transform">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                                    </div>
+                                    <h4 className="text-sm font-bold text-white mb-1">1. Scout</h4>
+                                    <p className="text-xs text-slate-400 max-w-[150px] mx-auto">Adzuna API fetches daily roles based on profile</p>
+                                </div>
+                                <div className="hidden md:block w-full h-[1px] bg-slate-800"></div>
+                                <div className="text-center group w-full">
+                                    <div className="w-12 h-12 bg-slate-800 border border-slate-700 rounded-xl flex items-center justify-center mx-auto mb-3 text-emerald-400 group-hover:scale-110 transition-transform">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+                                    </div>
+                                    <h4 className="text-sm font-bold text-white mb-1">2. Score</h4>
+                                    <p className="text-xs text-slate-400 max-w-[150px] mx-auto">Gemini 2.5 grades fit &amp; drafts outreach</p>
+                                </div>
+                                <div className="hidden md:block w-full h-[1px] bg-slate-800"></div>
+                                <div className="text-center group w-full">
+                                    <div className="w-12 h-12 bg-slate-800 border border-slate-700 rounded-xl flex items-center justify-center mx-auto mb-3 text-purple-400 group-hover:scale-110 transition-transform">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M3 15h6"/><path d="m6 12 3 3-3 3"/></svg>
+                                    </div>
+                                    <h4 className="text-sm font-bold text-white mb-1">3. Track</h4>
+                                    <p className="text-xs text-slate-400 max-w-[150px] mx-auto">&gt;70 scores yield Google Sheet entry &amp; Discord ping</p>
+                                </div>
+                                <div className="hidden md:block w-full h-[1px] bg-slate-800"></div>
+                                <div className="text-center group w-full">
+                                    <div className="w-12 h-12 bg-slate-800 border border-slate-700 rounded-xl flex items-center justify-center mx-auto mb-3 text-orange-400 group-hover:scale-110 transition-transform">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+                                    </div>
+                                    <h4 className="text-sm font-bold text-white mb-1">4. Act</h4>
+                                    <p className="text-xs text-slate-400 max-w-[150px] mx-auto">Gmail API monitors automated threads &amp; replies</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="mb-16">
                         <h3 className="text-sm font-mono text-slate-500 uppercase tracking-widest text-center mb-8">Live Anonymized Stats</h3>
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                             <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 text-center shadow-sm hover:border-slate-700 transition-colors">
@@ -144,7 +180,7 @@ export default async function Home() {
                     <div className="bg-slate-800/30 border border-slate-800 rounded-xl p-8 text-center max-w-2xl mx-auto shadow-sm">
                         <h3 className="text-lg font-bold text-white mb-2">Want to build your own?</h3>
                         <p className="text-sm text-slate-400 mb-6">Fork the open source engine and set up your own automated job scout for zero cost using GitHub Actions and Vercel.</p>
-                        <a href="https://github.com/shaikkaisifbasha" target="_blank" rel="noreferrer" className="inline-flex items-center px-4 py-2 border border-slate-700 bg-slate-900 hover:bg-slate-800 text-white text-sm font-medium rounded-lg transition-colors">
+                        <a href="https://github.com/jittergitter05" target="_blank" rel="noreferrer" className="inline-flex items-center px-4 py-2 border border-slate-700 bg-slate-900 hover:bg-slate-800 text-white text-sm font-medium rounded-lg transition-colors">
                             View on GitHub
                         </a>
                     </div>

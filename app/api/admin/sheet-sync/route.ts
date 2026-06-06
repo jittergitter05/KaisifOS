@@ -6,20 +6,17 @@ export async function GET() {
     if (!process.env.GOOGLE_SERVICE_KEY_BASE64 || !process.env.GOOGLE_SHEET_ID) {
       return NextResponse.json({ rows: [] }); 
     }
-
     const creds = JSON.parse(Buffer.from(process.env.GOOGLE_SERVICE_KEY_BASE64, 'base64').toString('utf8'));
     const auth = new google.auth.GoogleAuth({
       credentials: creds,
       scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
     });
-
     const sheets = google.sheets('v4');
     const response = await sheets.spreadsheets.values.get({
       auth,
       spreadsheetId: process.env.GOOGLE_SHEET_ID,
       range: 'Sheet1!A:M', 
     });
-
     const rows = response.data.values || [];
     return NextResponse.json({ rows });
   } catch (error: any) {
