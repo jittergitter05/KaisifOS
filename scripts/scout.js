@@ -9,7 +9,6 @@ dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const PROFILE_PATH = path.join(__dirname, '../data/profile.json');
 
 const AI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -164,7 +163,9 @@ async function sendDiscordDigest(matches, resumeUrl) {
 
 async function main() {
   try {
-    const profile = JSON.parse(fs.readFileSync(PROFILE_PATH, 'utf8'));
+    const profile = await fetch(
+      'https://portjitterglitter.vercel.app/api/profile'
+    ).then(r => r.json());
     const auth = await getAuth();
     const sheets = google.sheets('v4');
     const existingIds = await getExistingJobIds(sheets, auth);
@@ -174,9 +175,10 @@ async function main() {
     const uniqueNewJobsMap = new Map();
     newJobs.forEach(j => uniqueNewJobsMap.set(j.id, j));
     const uniqueNewJobs = Array.from(uniqueNewJobsMap.values());
+    const jobsToScore = uniqueNewJobs.slice(0, 30)
 
     const scoredJobs = [];
-    for (const job of uniqueNewJobs) {
+    for (const job of jobsToScore) {
       const scoreData = await scoreJob(job, profile);
       if (scoreData && typeof scoreData.score === 'number' && scoreData.score >= 70) {
         scoredJobs.push({ job, scoreData });

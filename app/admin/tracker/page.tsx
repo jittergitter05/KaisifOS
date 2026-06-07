@@ -3,7 +3,9 @@ import React, { useEffect, useState, useMemo } from 'react';
 import StatusBadge from '@/components/StatusBadge';
 import MetricBar from '@/components/MetricBar';
 import Link from 'next/link';
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
+import dynamic from 'next/dynamic';
+
+const ClientChart = dynamic(() => import('@/components/ClientChart'), { ssr: false });
 
 interface JobRow {
   rowId: number; date: string; id: string; title: string; company: string; score: number;
@@ -18,7 +20,7 @@ export default function TrackerPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/admin/sheet-sync')
+    fetch('/api/sheet-sync')
       .then(async res => {
         if (res.status === 401) {
           window.location.href = '/login';
@@ -48,7 +50,7 @@ export default function TrackerPage() {
     const originalJobs = [...jobs];
     setJobs(jobs.map(j => j.rowId === rowId ? { ...j, status: newStatus } : j));
     try {
-      await fetch('/api/admin/sheet-update', {
+      await fetch('/api/sheet-sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rowId, status: newStatus }),
@@ -128,18 +130,7 @@ export default function TrackerPage() {
                <div className="col-span-2 sm:col-span-4 lg:col-span-1 bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5 mb-4 lg:mb-10">
                  <div className="text-[10px] sm:text-xs text-slate-500 uppercase tracking-widest mb-2 sm:mb-4 font-semibold">Match Trend (30d)</div>
                  <div className="h-24 sm:h-32 w-full">
-                   <ResponsiveContainer width="100%" height="100%">
-                     <LineChart data={chartData}>
-                       <XAxis dataKey="date" hide />
-                       <YAxis hide domain={['dataMin - 5', 100]} />
-                       <Tooltip 
-                         contentStyle={{ backgroundColor: '#1E293B', border: '1px solid #334155', borderRadius: '8px', fontSize: '10px' }}
-                         itemStyle={{ color: '#10B981' }}
-                         labelStyle={{ color: '#94A3B8', marginBottom: '4px' }}
-                       />
-                       <Line type="monotone" dataKey="avgScore" name="Avg Score" stroke="#10B981" strokeWidth={2} dot={false} />
-                     </LineChart>
-                   </ResponsiveContainer>
+                   <ClientChart data={chartData} />
                  </div>
                </div>
             )}

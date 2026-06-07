@@ -2,6 +2,7 @@
   "name": "kaisifos",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -10,21 +11,22 @@
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
+    "dotenv": "^16.0.0",
     "googleapis": "^140.0.0",
     "lucide-react": "^0.471.0",
-    "next": "^15.5.19",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
+    "next": "15.1.0",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
     "recharts": "^2.15.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.0.0",
     "@types/node": "^22.10.6",
-    "@types/react": "^19.0.5",
-    "@types/react-dom": "^19.0.3",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
     "autoprefixer": "^10.4.19",
-    "eslint": "^9.39.4",
-    "eslint-config-next": "^16.2.7",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "15.1.0",
     "postcss": "^8.4.38",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.7.3"

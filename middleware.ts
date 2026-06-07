@@ -1,32 +1,39 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server'
 
-export function middleware(req: NextRequest) {
-  const isProtectedPath = 
-    req.nextUrl.pathname.startsWith('/admin') || 
-    req.nextUrl.pathname.startsWith('/api/admin');
+export function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl
 
-  if (!isProtectedPath) {
-    return NextResponse.next();
+  if (!pathname.startsWith('/admin')) {
+    return NextResponse.next()
   }
 
-  const authCookie = req.cookies.get('kaisifos_auth')?.value;
+  const auth = request.headers.get('authorization')
+
+  if (!auth || !auth.startsWith('Basic ')) {
+    return new NextResponse(null, {
+      status: 401,
+      headers: {
+        'WWW-Authenticate': 'Basic realm="KaisifOS Admin"'
+      }
+    })
+  }
+
+  const decoded = Buffer.from(
+    auth.split(' ')[1], 'base64'
+  ).toString('utf-8')
   
-  if (authCookie === 'authenticated') {
-    return NextResponse.next();
+  const [user, pass] = decoded.split(':')
+
+  if (
+    user !== process.env.ADMIN_USER ||
+    pass !== process.env.ADMIN_PASS
+  ) {
+    return new NextResponse(null, { status: 401 })
   }
 
-  // If doing an API request, return 401 JSON so the client can handle it
-  if (req.nextUrl.pathname.startsWith('/api/')) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  // Otherwise, redirect to login page
-  const url = req.nextUrl.clone();
-  url.pathname = '/login';
-  // Optional: url.searchParams.set('redirect', req.nextUrl.pathname);
-  return NextResponse.redirect(url);
+  return NextResponse.next()
 }
 
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|login|api/auth).*)'],
-};
+  matcher: ['/admin/:path*']
+}

@@ -180,7 +180,7 @@ export default async function Home() {
                     <div className="bg-slate-800/30 border border-slate-800 rounded-xl p-8 text-center max-w-2xl mx-auto shadow-sm">
                         <h3 className="text-lg font-bold text-white mb-2">Want to build your own?</h3>
                         <p className="text-sm text-slate-400 mb-6">Fork the open source engine and set up your own automated job scout for zero cost using GitHub Actions and Vercel.</p>
-                        <a href="https://github.com/jittergitter05" target="_blank" rel="noreferrer" className="inline-flex items-center px-4 py-2 border border-slate-700 bg-slate-900 hover:bg-slate-800 text-white text-sm font-medium rounded-lg transition-colors">
+                        <a href="https://github.com/jittergitter05/kaisif-os" target="_blank" rel="noreferrer" className="inline-flex items-center px-4 py-2 border border-slate-700 bg-slate-900 hover:bg-slate-800 text-white text-sm font-medium rounded-lg transition-colors">
                             View on GitHub
                         </a>
                     </div>
