@@ -166,6 +166,9 @@ async function main() {
     const profile = await fetch(
       'https://portjitterglitter.vercel.app/api/profile'
     ).then(r => r.json());
+    if (!profile || !profile.name) {
+      throw new Error('Profile fetch succeeded but returned invalid data')
+    }
     const auth = await getAuth();
     const sheets = google.sheets('v4');
     const existingIds = await getExistingJobIds(sheets, auth);
@@ -207,7 +210,10 @@ async function main() {
       await appendToSheet(sheets, auth, rows);
     }
     
-    await sendDiscordDigest(topMatches, profile.resume_synthesizer_url);
+    await sendDiscordDigest(
+      topMatches, 
+      profile.portfolio || 'https://portjitterglitter.vercel.app'
+    );
     console.log('Scout completed successfully!');
   } catch (error) {
     console.error('Scout failure:', error);
