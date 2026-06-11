@@ -142,7 +142,10 @@ async function main() {
       }
     } 
   } catch (error) {
-    await sendDiscordAlert(`🚨 Reply tracker failed today: ${error.message}`);
+    const errorMessage = error.stack || error.message || String(error);
+    const safeError = errorMessage.substring(0, 1500);
+    const payload = `🚨 **Reply Tracker Failed** 🚨\n\n**Error Trace:**\n\`\`\`js\n${safeError}\n\`\`\``;
+    await sendDiscordAlert(payload);
     process.exit(1);
   }
 }

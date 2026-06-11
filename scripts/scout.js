@@ -238,10 +238,17 @@ async function main() {
     console.error('Scout failure:', error);
     const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
     if (webhookUrl) {
+      const errorMessage = error.stack || error.message || String(error);
+      const safeError = errorMessage.substring(0, 1500);
+      
+      const payload = { 
+        content: `🚨 **Scout Agent Failed** 🚨\n\n**Error Trace:**\n\`\`\`js\n${safeError}\n\`\`\`` 
+      };
+      
       await fetch(webhookUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: `🚨 Scout agent failed today: ${error.message}` }),
+        body: JSON.stringify(payload),
       });
     }
     process.exit(1);
