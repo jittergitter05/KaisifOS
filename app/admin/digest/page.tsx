@@ -9,7 +9,7 @@ export default function DigestPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/admin/sheet-sync')
+    fetch('/api/sheet-sync')
       .then(async res => {
         if (res.status === 401) {
           window.location.href = '/login';

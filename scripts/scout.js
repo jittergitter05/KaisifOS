@@ -61,15 +61,27 @@ async function fetchAdzunaJobs(profile) {
             url.searchParams.append('salary_min', minSalary);
             url.searchParams.append('content-type', 'application/json');
 
-            const res = await fetch(url.toString());
-            if (res.ok) {
-              const data = await res.json();
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 10000);
+
+            const res = await fetch(url.toString(), { signal: controller.signal });
+            clearTimeout(timeout);
+
+            if (!res.ok) {
+              const errBody = await res.text();
+              throw new Error(`Adzuna API error HTTP ${res.status}: ${errBody.substring(0, 200)}`);
+            }
+            
+            const textBody = await res.text();
+            try {
+              const data = JSON.parse(textBody);
               jobs.push(...(data.results || []));
-            } else {
-              console.error(`Adzuna error for ${role} in ${city}: ${res.statusText}`);
+            } catch (err) {
+              throw new Error(`Adzuna JSON parse error: ${textBody.substring(0, 200)}`);
             }
         } catch (error) {
              console.error(`Fetch error for ${role} in ${city}:`, error.message);
+             throw error;
         }
         await delay(500); 
     }
@@ -163,11 +175,18 @@ async function sendDiscordDigest(matches, resumeUrl) {
 
 async function main() {
   try {
-    const profile = await fetch(
-      'https://portjitterglitter.vercel.app/api/profile'
-    ).then(r => r.json());
-    if (!profile || !profile.name) {
-      throw new Error('Profile fetch succeeded but returned invalid data')
+    let profile;
+    try {
+      const response = await fetch('https://portjitterglitter.vercel.app/api/profile');
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const text = await response.text();
+      profile = JSON.parse(text);
+      if (!profile || !profile.name) {
+        throw new Error('Invalid data format');
+      }
+    } catch (err) {
+      console.warn('Remote profile fetch failed, falling back to local profile.json:', err.message);
+      profile = JSON.parse(fs.readFileSync(path.join(__dirname, '../data/profile.json'), 'utf8'));
     }
     const auth = await getAuth();
     const sheets = google.sheets('v4');

@@ -26,7 +26,7 @@ export async function GET(request: NextRequest) {
       isPublic 
         ? { jobs_scouted_this_week: 0, avg_match_score: 0, 
             applications_sent: 0, response_rate: '0%' }
-        : []
+        : { rows: [] }
     )
   }
 
@@ -76,21 +76,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Full data for admin only
-    const jobs = dataRows.map(row => ({
-      date: row[0] || '',
-      id: row[1] || '',
-      title: row[2] || '',
-      company: row[3] || '',
-      score: parseInt(row[4] || '0', 10),
-      match_reasons: row[5] || '',
-      gap: row[6] || '',
-      url: row[7] || '',
-      dm_draft: row[8] || '',
-      resume_angle: row[9] || '',
-      status: row[10] || 'NEW',
-    }))
-
-    return NextResponse.json(jobs)
+    return NextResponse.json({ rows })
 
   } catch (e) {
     console.error(e)
@@ -98,18 +84,18 @@ export async function GET(request: NextRequest) {
       isPublic 
         ? { jobs_scouted_this_week: 0, avg_match_score: 0,
             applications_sent: 0, response_rate: '0%' }
-        : []
+        : { rows: [] }
     )
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const { rowIndex, status } = await request.json()
+    const { rowId, status } = await request.json()
 
-    if (!rowIndex || !status) {
+    if (!rowId || !status) {
       return NextResponse.json(
-        { error: 'Missing rowIndex or status' }, 
+        { error: 'Missing rowId or status' }, 
         { status: 400 }
       )
     }
@@ -117,11 +103,12 @@ export async function POST(request: NextRequest) {
     const auth = await getAuth()
     const sheets = google.sheets('v4')
 
-    // rowIndex is 0-based data row, +2 for header + 1-based
+    // rowId is i+1 where i is the original data array index (0 is header).
+    // so rowId = 2 corresponds to Google Sheets row 2.
     await sheets.spreadsheets.values.update({
       auth,
       spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: `Sheet1!K${rowIndex + 2}`,
+      range: `Sheet1!K${rowId}`,
       valueInputOption: 'USER_ENTERED',
       requestBody: { values: [[status]] },
     })

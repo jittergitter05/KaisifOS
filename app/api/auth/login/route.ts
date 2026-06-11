@@ -4,8 +4,8 @@ export async function POST(req: NextRequest) {
   try {
     const { username, password } = await req.json();
 
-    const adminUser = process.env.ADMIN_USERNAME;
-    const adminPass = process.env.ADMIN_PASSWORD;
+    const adminUser = process.env.ADMIN_USER;
+    const adminPass = process.env.ADMIN_PASS;
 
     if (!adminUser || !adminPass) {
       return NextResponse.json({ error: 'Server configuration error' }, { status: 500 });
