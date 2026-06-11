@@ -18,9 +18,7 @@ export function middleware(request: NextRequest) {
     })
   }
 
-  const decoded = Buffer.from(
-    auth.split(' ')[1], 'base64'
-  ).toString('utf-8')
+  const decoded = atob(auth.split(' ')[1])
   
   const [user, pass] = decoded.split(':')
 

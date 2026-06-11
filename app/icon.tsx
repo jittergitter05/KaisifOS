@@ -1,6 +1,5 @@
 import { ImageResponse } from 'next/og';
 
-export const runtime = 'edge';
 export const size = { width: 512, height: 512 };
 export const contentType = 'image/png';
 
@@ -18,7 +17,7 @@ export default function Icon() {
           borderRadius: 128,
         }}
       >
-        <div style={{ position: 'relative', width: 256, height: 384 }}>
+        <div style={{ display: 'flex', position: 'relative', width: 256, height: 384 }}>
           {/* Vertical line passing down */}
           <div
             style={{
