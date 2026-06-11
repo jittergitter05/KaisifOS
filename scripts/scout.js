@@ -175,19 +175,8 @@ async function sendDiscordDigest(matches, resumeUrl) {
 
 async function main() {
   try {
-    let profile;
-    try {
-      const response = await fetch('https://portjitterglitter.vercel.app/api/profile');
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const text = await response.text();
-      profile = JSON.parse(text);
-      if (!profile || !profile.name) {
-        throw new Error('Invalid data format');
-      }
-    } catch (err) {
-      console.warn('Remote profile fetch failed, falling back to local profile.json:', err.message);
-      profile = JSON.parse(fs.readFileSync(path.join(__dirname, '../data/profile.json'), 'utf8'));
-    }
+    const profilePath = path.join(__dirname, '../data/profile.json');
+    const profile = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
     const auth = await getAuth();
     const sheets = google.sheets('v4');
     const existingIds = await getExistingJobIds(sheets, auth);
