@@ -89,6 +89,50 @@ async function fetchAdzunaJobs(profile) {
   return jobs;
 }
 
+async function fetchJSearchJobs(profile) {
+  if (!process.env.RAPIDAPI_KEY) {
+     console.warn("Missing RAPIDAPI_KEY env variable, skipping JSearch.");
+     return [];
+  }
+
+  const jobs = [];
+  try {
+    const query = `${profile.target_roles.join(' OR ')} in ${profile.target_cities.join(', ')}, India`;
+    const url = new URL('https://jsearch.p.rapidapi.com/search');
+    url.searchParams.append('query', query);
+    url.searchParams.append('num_pages', '1');
+
+    const res = await fetch(url.toString(), {
+      headers: {
+        'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
+        'X-RapidAPI-Host': 'jsearch.p.rapidapi.com'
+      }
+    });
+
+    if (!res.ok) {
+        console.warn(`JSearch API error HTTP ${res.status}`);
+        return [];
+    }
+
+    const data = await res.json();
+    const results = data.data || [];
+    
+    for (const item of results) {
+       jobs.push({
+          id: item.job_id,
+          title: item.job_title,
+          company: { display_name: item.employer_name },
+          description: item.job_description,
+          redirect_url: item.job_apply_link,
+          salary_min: item.job_min_salary
+       });
+    }
+  } catch (err) {
+      console.warn(`JSearch fetch error:`, err.message);
+  }
+  return jobs;
+}
+
 async function scoreJob(job, profile) {
   const prompt = `You are a recruiting AI scoring job fit for this candidate.
 Return ONLY valid JSON. No explanation. No markdown.
@@ -241,7 +285,9 @@ async function main() {
     const auth = await getAuth();
     const sheets = google.sheets('v4');
     const existingIds = await getExistingJobIds(sheets, auth);
-    const rawJobs = await fetchAdzunaJobs(profile);
+    const rawAdzunaJobs = await fetchAdzunaJobs(profile);
+    const rawJSearchJobs = await fetchJSearchJobs(profile);
+    const rawJobs = [...rawAdzunaJobs, ...rawJSearchJobs];
     const newJobs = rawJobs.filter(j => j.id && !existingIds.has(String(j.id)));
     
     const uniqueNewJobsMap = new Map();
