@@ -5,9 +5,12 @@
     "Product Marketing Manager",
     "Growth Marketing Manager",
     "Founder's Associate",
-    "Product Analyst"
+    "Product Analyst",
+    "Growth Manager",
+    "Marketing Manager",
+    "Business Analyst"
   ],
-  "target_cities": ["Hyderabad", "Bengaluru"],
+  "target_cities": ["Hyderabad", "Bengaluru", "Remote"],
   "min_salary_lpa": 8,
   "experience_years": 1,
   "portfolio": "https://portjitterglitter.vercel.app",

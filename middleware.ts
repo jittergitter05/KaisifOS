@@ -7,26 +7,12 @@ export function middleware(request: NextRequest) {
     return NextResponse.next()
   }
 
-  const auth = request.headers.get('authorization')
+  const authCookie = request.cookies.get('kaisifos_auth')
 
-  if (!auth || !auth.startsWith('Basic ')) {
-    return new NextResponse(null, {
-      status: 401,
-      headers: {
-        'WWW-Authenticate': 'Basic realm="KaisifOS Admin"'
-      }
-    })
-  }
-
-  const decoded = atob(auth.split(' ')[1])
-  
-  const [user, pass] = decoded.split(':')
-
-  if (
-    user !== process.env.ADMIN_USER ||
-    pass !== process.env.ADMIN_PASS
-  ) {
-    return new NextResponse(null, { status: 401 })
+  if (!authCookie || authCookie.value !== 'authenticated') {
+    const url = request.nextUrl.clone()
+    url.pathname = '/login'
+    return NextResponse.redirect(url)
   }
 
   return NextResponse.next()

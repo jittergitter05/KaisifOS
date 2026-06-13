@@ -1,6 +1,8 @@
 'use client';
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Image from 'next/image';
+import { motion } from 'framer-motion';
 
 export default function LoginPage() {
   const [username, setUsername] = useState('');
@@ -44,10 +46,15 @@ export default function LoginPage() {
 
   return (
     <div className="flex flex-col min-h-screen w-full bg-slate-900 text-slate-50 items-center justify-center p-4">
-      <div className="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-xl p-8 shadow-xl">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95, y: 10 }} 
+        animate={{ opacity: 1, scale: 1, y: 0 }} 
+        transition={{ duration: 0.3 }}
+        className="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-xl p-8 shadow-2xl shadow-indigo-500/5"
+      >
         <div className="flex flex-col items-center mb-8">
-          <div className="w-12 h-12 bg-emerald-500 rounded flex items-center justify-center font-bold text-white font-mono text-2xl mb-4">K</div>
-          <h1 className="text-2xl font-bold tracking-tight">Admin Login</h1>
+          <Image src="/favicon-kaisif-512.png" alt="KaisifOS" width={48} height={48} className="rounded-xl mb-4 shadow-lg shadow-emerald-500/20" />
+          <h1 className="text-2xl font-bold tracking-tight text-white">Admin Login</h1>
           <p className="text-xs text-slate-500 uppercase tracking-widest mt-2">KaisifOS Secure Access</p>
         </div>
 
@@ -100,7 +107,7 @@ export default function LoginPage() {
             )}
           </button>
         </form>
-      </div>
+      </motion.div>
     </div>
   );
 }

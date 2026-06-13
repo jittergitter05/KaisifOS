@@ -147,19 +147,80 @@ async function appendToSheet(sheets, auth, rows, retries = 1) {
   }
 }
 
-async function sendDiscordDigest(matches, resumeUrl) {
+async function getWeeklyStats(sheets, auth) {
+  try {
+    const response = await sheets.spreadsheets.values.get({
+      auth,
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      range: 'Sheet1!A:A',
+    });
+    const rows = response.data.values;
+    if (!rows || rows.length === 0) return { weekMatches: 0 };
+    
+    const now = new Date();
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    
+    let weekMatches = 0;
+    for (let i = 1; i < rows.length; i++) { // Skip header assuming row 0 is header
+      if (rows[i] && rows[i][0]) {
+        const rowDate = new Date(rows[i][0]);
+        if (rowDate >= sevenDaysAgo) {
+          weekMatches++;
+        }
+      }
+    }
+    return { weekMatches };
+  } catch (error) {
+    console.error('Error fetching weekly stats:', error.message);
+    return null;
+  }
+}
+
+async function sendDiscordDigest(matches, resumeUrl, totalScanned, weeklyStats = null) {
   const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
   if (!webhookUrl) throw new Error('Missing DISCORD_WEBHOOK_URL');
 
-  let content = `📋 KAISIF JOB DIGEST — ${new Date().toISOString().split('T')[0]}\n─────────────────────────────\n`;
+  let content = `📋 KAISIF JOB DIGEST — ${new Date().toISOString().split('T')[0]}\n`;
+  content += `Scanned ${totalScanned} roles today, ${matches.length} matched your profile (≥60)\n─────────────────────────────\n`;
   
-  if (matches.length === 0) {
-    content += "No new matches above 70 today.";
-  } else {
+  if (matches.length > 0) {
     matches.forEach((m, idx) => {
-      content += `\n${idx + 1}. **${m.job.title}** @ **${m.job.company?.display_name || 'Unknown'}**\n🎯 Match: ${m.scoreData.score}/100\n✅ Why: ${m.scoreData.match_reasons.join(" | ")}\n⚠️ Gap: ${m.scoreData.gap}\n📝 DM: ${m.scoreData.dm_draft}\n🔗 ${m.job.redirect_url}\n─────────────────────────────`;
+      const bTitle = encodeURIComponent(m.job.title || '');
+      let domain = 'Unknown';
+      try {
+          if (m.job.redirect_url) domain = new URL(m.job.redirect_url).hostname.replace('www.', '');
+      } catch (e) {}
+
+      if (idx < 3) {
+        content += `\n${idx + 1}. **${m.job.title}** @ **${m.job.company?.display_name || 'Unknown'}**\n`;
+        content += `🎯 Match: ${m.scoreData.score}/100\n`;
+        content += `✅ Why: ${m.scoreData.match_reasons.join(" | ")}\n`;
+        content += `⚠️ Gap: ${m.scoreData.gap}\n`;
+        content += `💡 Lead with: ${m.scoreData.resume_angle || 'N/A'}\n`;
+        content += `📝 DM: ${m.scoreData.dm_draft}\n`;
+        if (m.job.salary_min || m.job.salary_max) {
+           const sMin = m.job.salary_min || '';
+           const sMax = m.job.salary_max || '';
+           content += `💰 Salary: ${sMin}${sMin && sMax ? ' - ' : ''}${sMax}\n`;
+        }
+        if (m.job.created) {
+           content += `⏳ Posted: ${m.job.created.split('T')[0]}\n`;
+        }
+        content += `🔗 Source: ${domain}\n`;
+        content += `🔗 Apply: ${m.job.redirect_url}\n`;
+        content += `📄 Tailor resume: https://portjitterglitter.vercel.app/resume?job=${bTitle}\n`;
+        content += `─────────────────────────────`;
+      } else {
+        content += `\n${idx + 1}. **${m.job.title}** @ **${m.job.company?.display_name || 'Unknown'}**\n`;
+        content += `🔗 Source: ${domain}\n`;
+        content += `🔗 Apply: ${m.job.redirect_url}\n`;
+        content += `─────────────────────────────`;
+      }
     });
-    content += `\n${matches.length} matches above 70 today.\nResume synthesizer: ${resumeUrl}\n⏱ Send DMs before 11AM IST.`;
+  }
+
+  if (weeklyStats) {
+    content += `\n📊 **WEEKLY SUMMARY**\nTotal matches stored this week: ${weeklyStats.weekMatches}\nKeep going! The market can be quiet, but consistency wins.`;
   }
 
   const res = await fetch(webhookUrl, {
@@ -191,7 +252,7 @@ async function main() {
     const scoredJobs = [];
     for (const job of jobsToScore) {
       const scoreData = await scoreJob(job, profile);
-      if (scoreData && typeof scoreData.score === 'number' && scoreData.score >= 70) {
+      if (scoreData && typeof scoreData.score === 'number' && scoreData.score >= 60) {
         scoredJobs.push({ job, scoreData });
       }
       await delay(1000); 
@@ -218,9 +279,16 @@ async function main() {
       await appendToSheet(sheets, auth, rows);
     }
     
+    let weeklyStats = null;
+    if (new Date().getDay() === 0) { // Sunday
+      weeklyStats = await getWeeklyStats(sheets, auth);
+    }
+
     await sendDiscordDigest(
       topMatches, 
-      profile.portfolio || 'https://portjitterglitter.vercel.app'
+      profile.portfolio || 'https://portjitterglitter.vercel.app',
+      jobsToScore.length,
+      weeklyStats
     );
     console.log('Scout completed successfully!');
   } catch (error) {

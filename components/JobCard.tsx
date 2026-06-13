@@ -1,6 +1,8 @@
+'use client';
 import React from 'react';
 import StatusBadge from './StatusBadge';
 import MetricBar from './MetricBar';
+import { motion } from 'framer-motion';
 
 interface JobData {
     Date: string; Title: string; Company: string; Score: number;
@@ -9,7 +11,11 @@ interface JobData {
 
 export default function JobCard({ job }: { job: JobData }) {
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 sm:p-6 hover:border-slate-700 transition-colors shadow-sm">
+    <motion.div 
+      whileHover={{ scale: 1.01, translateY: -2 }}
+      transition={{ duration: 0.2 }}
+      className="bg-slate-900 border border-slate-800 rounded-xl p-5 sm:p-6 hover:border-slate-700 transition-colors shadow-sm"
+    >
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-4 sm:gap-0">
         <div>
            <h3 className="text-base sm:text-lg font-medium text-white">{job.Title}</h3>
@@ -28,6 +34,6 @@ export default function JobCard({ job }: { job: JobData }) {
          <span className="text-xs font-mono text-slate-500">Found {job.Date}</span>
          <a href={job.URL} target="_blank" rel="noreferrer" className="inline-flex items-center px-4 py-2 border border-emerald-500/20 text-xs font-medium rounded-md text-emerald-400 hover:bg-emerald-500/10 focus:outline-none transition-colors">Apply Now</a>
       </div>
-    </div>
+    </motion.div>
   );
 }

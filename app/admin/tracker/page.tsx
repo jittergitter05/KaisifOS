@@ -4,6 +4,7 @@ import StatusBadge from '@/components/StatusBadge';
 import MetricBar from '@/components/MetricBar';
 import Link from 'next/link';
 import dynamic from 'next/dynamic';
+import { motion } from 'framer-motion';
 
 const ClientChart = dynamic(() => import('@/components/ClientChart'), { ssr: false });
 
@@ -95,18 +96,18 @@ export default function TrackerPage() {
 
   return (
     <div className="flex flex-col flex-1 w-full bg-slate-900 text-slate-50">
-      <header className="h-16 border-b border-slate-800 px-8 flex items-center justify-between bg-slate-900/50 backdrop-blur-md shrink-0">
-        <div className="flex items-center space-x-4">
-          <Link href="/"><div className="w-8 h-8 bg-emerald-500 rounded flex items-center justify-center font-bold text-white font-mono text-xl">K</div></Link>
-          <div className="flex flex-col"><h1 className="text-lg font-bold tracking-tight">Job Tracker</h1><p className="text-[10px] text-slate-500 uppercase tracking-widest">KaisifOS Pipeline</p></div>
-        </div>
-        <div className="flex space-x-4">
-            <Link href="/admin/digest" className="text-xs text-slate-400 hover:text-emerald-400 font-mono transition-colors border border-slate-800 px-3 py-1.5 rounded bg-slate-900 hover:border-emerald-500/30">View Digest</Link>
-        </div>
-      </header>
-
-      <main className="flex-1 p-4 sm:p-8 flex flex-col lg:grid lg:grid-cols-12 gap-6 pb-24">
+      <motion.main 
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.4 }}
+        className="flex-1 p-4 sm:p-8 flex flex-col lg:grid lg:grid-cols-12 gap-6 pb-24 max-w-[1600px] mx-auto w-full"
+      >
         <div className="lg:col-span-3 flex-shrink-0">
+          <div className="flex flex-col mb-6">
+            <h1 className="text-3xl font-bold tracking-tight text-white mb-2">Job Tracker</h1>
+            <p className="text-sm text-slate-400">Manage and monitor your job pipeline</p>
+          </div>
+          
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-1 gap-4 lg:gap-6">
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5">
               <div className="text-[10px] sm:text-xs text-slate-500 uppercase tracking-widest mb-2 sm:mb-4 font-semibold">Total Leads</div>
@@ -201,7 +202,7 @@ export default function TrackerPage() {
             </table>
           </div>
         </div>
-      </main>
+      </motion.main>
     </div>
   );
 }

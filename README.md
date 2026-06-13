@@ -72,3 +72,19 @@ Ensure your GitHub repository secrets are set matching the `.env` variables so t
 ## 📜 License
 
 Open source under the MIT License.
+
+## 🚧 Beginner Setup Blockers (Review Notes)
+If you are a student or beginner without DevOps experience trying to self-host this project, you might get blocked on the following steps. (These areas need better documentation in future updates):
+
+1. **`APP_URL` & Deployment Context**: Missing instructions on how to actually deploy the app (e.g., using Vercel or Railway). The instructions assume you know how to get a live URL and where to provide it. You also have `localhost` instructions but ask for an `APP_URL` beforehand.
+2. **Adzuna External API**: No link is provided to the Adzuna developer portal to register an `ADZUNA_APP_ID` & `ADZUNA_API_KEY`. It leaves the user guessing where to sign up.
+3. **Discord Integration**: Explaining how to create a Discord webhook (Server Settings ➔ Integrations ➔ Webhooks) is missing. The user might not know where to get `DISCORD_WEBHOOK_URL`.
+4. **Google Cloud / Sheets Configuration**: The hardest part for beginners. It needs a mini-guide explaining how to:
+    - Create a Google Cloud Project & enable Google Sheets API.
+    - Create a Service Account and download its JSON keys.
+    - Convert that raw JSON into `GOOGLE_SERVICE_KEY_BASE64` (e.g., using `base64 credentials.json > b64.txt` on macOS or `certutil` on Windows).
+    - Extract the `client_email` from the JSON to share the actual Google Sheet with that email.
+5. **Google Sheet Structure**: Fails to explain the exact columns the Google Sheet requires on `Sheet1` (e.g., Col A = Date, Col B = ID, Col C = Title, etc.). Because it reads from `A:K`, the sheet structure needs to be strictly defined.
+6. **Data Profile Setup**: The scout script looks for `data/profile.json` (for keywords, salary, cities), but there are no instructions on how the user creates or formats this file matching their own requirements.
+7. **Basic Authentication**: No explanation on how to pass `ADMIN_USER` and `ADMIN_PASS` in `.env.local` (e.g., are they plaintext passwords or hashed?).
+8. **Automated Workflows (Cron)**: Missing instructions on how to actually set up GitHub Actions secrets. Mentions "Reply Tracker" but there is no such tracker code implemented in standard setups.

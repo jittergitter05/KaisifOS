@@ -1,5 +1,7 @@
 import { google } from 'googleapis';
 import Link from 'next/link';
+import Image from 'next/image';
+import FadeIn from '@/components/FadeIn';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -79,7 +81,7 @@ export default async function Home() {
         <div className="flex flex-col flex-1 w-full bg-slate-900 text-slate-50">
             <header className="h-16 border-b border-slate-800 px-8 flex items-center justify-between bg-slate-900/50 backdrop-blur-md shrink-0">
                 <div className="flex items-center space-x-4">
-                    <div className="w-8 h-8 bg-emerald-500 rounded flex items-center justify-center font-bold text-white font-mono text-xl">K</div>
+                    <Image src="/favicon-kaisif-512.png" alt="KaisifOS" width={32} height={32} className="rounded" />
                     <div className="flex flex-col">
                         <h1 className="text-lg font-bold tracking-tight">KaisifOS <span className="text-xs font-mono text-emerald-500 ml-2 font-normal">Public</span></h1>
                     </div>
@@ -87,7 +89,7 @@ export default async function Home() {
             </header>
             
             <main className="flex-1 w-full pb-24">
-                <div className="max-w-4xl mx-auto py-10 sm:py-16 px-4 sm:px-6">
+                <FadeIn className="max-w-4xl mx-auto py-10 sm:py-16 px-4 sm:px-6">
                     <div className="text-center mb-10 sm:mb-16">
                         <h2 className="text-3xl sm:text-4xl font-bold tracking-tight mb-3 sm:mb-4 text-white">Automated Job Hunting Engine</h2>
                         <p className="text-sm sm:text-base md:text-lg text-slate-400 max-w-2xl mx-auto px-2">
@@ -184,7 +186,7 @@ export default async function Home() {
                             View on GitHub
                         </a>
                     </div>
-                </div>
+                </FadeIn>
             </main>
         </div>
     );
