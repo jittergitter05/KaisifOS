@@ -62,3 +62,8 @@ body {
     color: #94A3B8;
     border: 1px solid rgba(148,163,184,0.2);
 }
+.status-ignored {
+    background: rgba(244,63,94,0.1);
+    color: #FB7185;
+    border: 1px solid rgba(244,63,94,0.2);
+}

@@ -7,6 +7,7 @@ export default function StatusBadge({ status }: { status: string }) {
   else if (tStatus === "replied") classes = "status-replied";
   else if (tStatus === "interview") classes = "status-interview";
   else if (tStatus === "rejected") classes = "status-rejected";
+  else if (tStatus === "ignored") classes = "status-ignored";
   else classes = "bg-slate-800 text-slate-400 border-slate-700";
 
   return (

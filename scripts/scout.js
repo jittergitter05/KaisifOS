@@ -147,29 +147,40 @@ Salary: ${job.salary_min || 'Not listed'}
 
 Return exactly:
 {
-  "score": <0-100 integer>,
+  "score": <0-100 integer> (Aggressively penalize jobs requiring 1+ years experience. Candidate is a FRESHER/0 years. High scores ONLY for entry-level/fresher appropriate roles),
   "match_reasons": ["reason 1", "reason 2", "reason 3"],
   "gap": "one line on biggest weakness",
-  "dm_draft": "3-sentence LinkedIn DM. Line 1: specific observation about their product/company. Line 2: one thing from candidate profile that directly maps. Line 3: single low-friction ask — Worth a 15-min call?",
+  "dm_draft": "3-sentence LinkedIn DM.",
   "resume_angle": "which of candidate's metrics to lead with"
 }`;
 
-  try {
-    const response = await AI.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: prompt,
-      config: {
-          responseMimeType: "application/json",
-      }
-    });
+  let retries = 3;
+  while (retries > 0) {
+    try {
+      const response = await AI.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+        config: {
+            responseMimeType: "application/json",
+        }
+      });
 
-    const text = response.text;
-    const data = JSON.parse(text);
-    return data;
-  } catch (error) {
-    console.error(`Gemini error for job ${job.id}:`, error.message);
-    return { score: 0 };
+      const text = response.text;
+      const data = JSON.parse(text);
+      return data;
+    } catch (error) {
+      if (error.status === 429 || error.message.includes('429')) {
+        console.warn(`[Gemini API] Rate limit hit. Retrying in ${4 - retries}s...`);
+        await delay((4 - retries) * 1500);
+        retries--;
+      } else {
+        console.error(`Gemini error for job ${job.id}:`, error.message);
+        return { score: 0 };
+      }
+    }
   }
+  console.error(`Gemini error for job ${job.id}: Exhausted retries due to rate limit.`);
+  return { score: 0 };
 }
 
 async function appendToSheet(sheets, auth, rows, retries = 1) {
@@ -229,42 +240,20 @@ async function sendDiscordDigest(matches, resumeUrl, totalScanned, weeklyStats =
   
   if (matches.length > 0) {
     matches.forEach((m, idx) => {
-      const bTitle = encodeURIComponent(m.job.title || '');
       let domain = 'Unknown';
       try {
           if (m.job.redirect_url) domain = new URL(m.job.redirect_url).hostname.replace('www.', '');
       } catch (e) {}
 
-      if (idx < 3) {
-        content += `\n${idx + 1}. **${m.job.title}** @ **${m.job.company?.display_name || 'Unknown'}**\n`;
-        content += `🎯 Match: ${m.scoreData.score}/100\n`;
-        content += `✅ Why: ${m.scoreData.match_reasons.join(" | ")}\n`;
-        content += `⚠️ Gap: ${m.scoreData.gap}\n`;
-        content += `💡 Lead with: ${m.scoreData.resume_angle || 'N/A'}\n`;
-        content += `📝 DM: ${m.scoreData.dm_draft}\n`;
-        if (m.job.salary_min || m.job.salary_max) {
-           const sMin = m.job.salary_min || '';
-           const sMax = m.job.salary_max || '';
-           content += `💰 Salary: ${sMin}${sMin && sMax ? ' - ' : ''}${sMax}\n`;
-        }
-        if (m.job.created) {
-           content += `⏳ Posted: ${m.job.created.split('T')[0]}\n`;
-        }
-        content += `🔗 Source: ${domain}\n`;
-        content += `🔗 Apply: ${m.job.redirect_url}\n`;
-        content += `📄 Tailor resume: https://portjitterglitter.vercel.app/resume?job=${bTitle}\n`;
-        content += `─────────────────────────────`;
-      } else {
-        content += `\n${idx + 1}. **${m.job.title}** @ **${m.job.company?.display_name || 'Unknown'}**\n`;
-        content += `🔗 Source: ${domain}\n`;
-        content += `🔗 Apply: ${m.job.redirect_url}\n`;
-        content += `─────────────────────────────`;
-      }
+      content += `\n${idx + 1}. **${m.job.title}** @ **${m.job.company?.display_name || 'Unknown'}**\n`;
+      content += `🎯 ${m.scoreData.score}/100 | ✅ ${m.scoreData.match_reasons.join(" | ").substring(0, 100)}\n`;
+      content += `💡 Lead: ${m.scoreData.resume_angle || 'N/A'}\n`;
+      content += `🔗 <${m.job.redirect_url}>\n`;
     });
   }
 
   if (weeklyStats) {
-    content += `\n📊 **WEEKLY SUMMARY**\nTotal matches stored this week: ${weeklyStats.weekMatches}\nKeep going! The market can be quiet, but consistency wins.`;
+    content += `\n📊 **WEEKLY SUMMARY**\nTotal matches stored this week: ${weeklyStats.weekMatches}`;
   }
 
   const res = await fetch(webhookUrl, {
@@ -293,7 +282,15 @@ async function main() {
     const uniqueNewJobsMap = new Map();
     newJobs.forEach(j => uniqueNewJobsMap.set(j.id, j));
     const uniqueNewJobs = Array.from(uniqueNewJobsMap.values());
-    const jobsToScore = uniqueNewJobs.slice(0, 30)
+    
+    // PRUNING: Pre-filter out obvious over-experienced roles to save LLM tokens/quota
+    const blacklistRegex = /\b(senior|lead|manager|director|vp|head|sr\.|principal|architect|5\+? years|3\+? years|4\+? years)\b/i;
+    const prunedJobs = uniqueNewJobs.filter(j => {
+      const combinedText = `${j.title || ''} ${j.description || ''}`;
+      return !blacklistRegex.test(combinedText);
+    });
+
+    const jobsToScore = prunedJobs.slice(0, 30);
 
     const scoredJobs = [];
     for (const job of jobsToScore) {

@@ -17,6 +17,8 @@ export default function TrackerPage() {
   const [jobs, setJobs] = useState<JobRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('ALL');
+  const [sortField, setSortField] = useState<'date' | 'score' | 'company'>('date');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
   const [error, setError] = useState<string | null>(null);
 
@@ -88,11 +90,58 @@ export default function TrackerPage() {
     }));
   }, [jobs]);
 
-  const filteredJobs = filter === 'ALL' ? jobs : jobs.filter(j => j.status === filter);
+  const filteredJobs = useMemo(() => {
+    let result = filter === 'ALL' ? jobs : jobs.filter(j => j.status === filter);
+    result = [...result].sort((a, b) => {
+       const valA = a[sortField];
+       const valB = b[sortField];
+       
+       if (sortField === 'score') {
+          return sortDir === 'asc' ? Number(valA) - Number(valB) : Number(valB) - Number(valA);
+       }
+       if (sortField === 'date') {
+          const dA = new Date(valA as string).getTime();
+          const dB = new Date(valB as string).getTime();
+          return sortDir === 'asc' ? dA - dB : dB - dA;
+       }
+       if (typeof valA === 'string' && typeof valB === 'string') {
+          return sortDir === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
+       }
+       return 0;
+    });
+    return result;
+  }, [jobs, filter, sortField, sortDir]);
+
   const appliedCount = jobs.filter(j => ['APPLIED', 'REPLIED', 'INTERVIEW', 'REJECTED'].includes(j.status)).length;
   const intCount = jobs.filter(j => j.status === 'INTERVIEW').length;
   const intRate = appliedCount > 0 ? ((intCount / appliedCount) * 100).toFixed(1) : '0.0';
   const avgScore = jobs.length > 0 ? Math.round(jobs.reduce((a, b) => a + b.score, 0) / jobs.length) : 0;
+
+  const weekAgo = new Date();
+  weekAgo.setDate(weekAgo.getDate() - 7);
+  const velocity7d = jobs.filter(j => 
+    ['APPLIED', 'REPLIED', 'INTERVIEW', 'REJECTED'].includes(j.status) && 
+    new Date(j.date) >= weekAgo
+  ).length;
+
+  // Statistical probability of getting at least 1 offer based on applied count
+  // Using a conservative 1.5% offer rate per cold application for freshers
+  const p = 0.015;
+  const hireProb = appliedCount > 0 ? ((1 - Math.pow(1 - p, appliedCount)) * 100).toFixed(1) : '0.0';
+
+  const toggleSort = (field: 'date' | 'score' | 'company') => {
+    if (sortField === field) {
+      setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortDir('desc');
+    }
+  };
+
+  const SortIcon = ({ field }: { field: 'date' | 'score' | 'company' }) => {
+    if (sortField !== field) return <span className="opacity-0 group-hover:opacity-30 ml-1">↓</span>;
+    return <span className="text-emerald-400 ml-1">{sortDir === 'asc' ? '↑' : '↓'}</span>;
+  };
 
   return (
     <div className="flex flex-col flex-1 w-full bg-slate-900 text-slate-50">
@@ -108,7 +157,7 @@ export default function TrackerPage() {
             <p className="text-sm text-slate-400">Manage and monitor your job pipeline</p>
           </div>
           
-          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-1 gap-4 lg:gap-6">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-1 gap-4 lg:gap-6">
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5">
               <div className="text-[10px] sm:text-xs text-slate-500 uppercase tracking-widest mb-2 sm:mb-4 font-semibold">Total Leads</div>
               <div className="text-xl sm:text-2xl font-mono text-white">{jobs.length}</div>
@@ -118,17 +167,25 @@ export default function TrackerPage() {
               <div className="text-xl sm:text-2xl font-mono text-blue-400">{appliedCount}</div>
             </div>
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5">
+              <div className="text-[10px] sm:text-xs text-slate-500 uppercase tracking-widest mb-2 sm:mb-4 font-semibold">7d Velocity</div>
+              <div className="text-xl sm:text-2xl font-mono text-emerald-400">{velocity7d} apps</div>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5">
               <div className="text-[10px] sm:text-xs text-slate-500 uppercase tracking-widest mb-2 sm:mb-4 font-semibold">Interviews</div>
               <div className="text-xl sm:text-2xl font-mono text-purple-400">{intCount}</div>
               <div className="text-[9px] sm:text-[10px] text-purple-500 mt-1">{intRate}% rate</div>
             </div>
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5">
               <div className="text-[10px] sm:text-xs text-slate-500 uppercase tracking-widest mb-2 sm:mb-4 font-semibold">Avg Match</div>
-              <div className="text-xl sm:text-2xl font-mono text-emerald-400">{avgScore}</div>
+              <div className="text-xl sm:text-2xl font-mono text-indigo-400">{avgScore}</div>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5">
+              <div className="text-[10px] sm:text-xs text-slate-500 uppercase tracking-widest mb-2 sm:mb-4 font-semibold">Hire Prob</div>
+              <div className="text-xl sm:text-2xl font-mono text-amber-400">{hireProb}%</div>
             </div>
             
             {chartData.length > 0 && (
-               <div className="col-span-2 sm:col-span-4 lg:col-span-1 bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5 mb-4 lg:mb-10">
+               <div className="col-span-2 sm:col-span-3 lg:col-span-1 bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5 mb-4 lg:mb-10">
                  <div className="text-[10px] sm:text-xs text-slate-500 uppercase tracking-widest mb-2 sm:mb-4 font-semibold">Match Trend (30d)</div>
                  <div className="h-24 sm:h-32 w-full">
                    <ClientChart data={chartData} />
@@ -141,7 +198,7 @@ export default function TrackerPage() {
         <div className="lg:col-span-9 flex flex-col bg-slate-900 border border-slate-800 rounded-xl">
           <div className="p-3 sm:p-4 border-b border-slate-800 items-center justify-between shrink-0 overflow-x-auto whitespace-nowrap hide-scrollbar">
             <div className="flex space-x-2">
-              {['ALL', 'NEW', 'APPLIED', 'REPLIED', 'INTERVIEW', 'REJECTED'].map(f => (
+              {['ALL', 'NEW', 'APPLIED', 'REPLIED', 'INTERVIEW', 'REJECTED', 'IGNORED'].map(f => (
                 <button
                   key={f}
                   onClick={() => setFilter(f)}
@@ -159,9 +216,15 @@ export default function TrackerPage() {
             <table className="w-full text-left border-collapse min-w-[700px]">
               <thead className="text-[10px] text-slate-500 uppercase tracking-wider bg-slate-950/50 sticky top-0 z-10">
                 <tr className="border-b border-slate-800">
-                  <th className="px-6 py-3 font-semibold">Date</th>
-                  <th className="px-6 py-3 font-semibold">Company / Role</th>
-                  <th className="px-6 py-3 font-semibold">Match Score</th>
+                  <th className="px-6 py-3 font-semibold cursor-pointer group hover:text-slate-300 transition-colors" onClick={() => toggleSort('date')}>
+                    Date <SortIcon field="date" />
+                  </th>
+                  <th className="px-6 py-3 font-semibold cursor-pointer group hover:text-slate-300 transition-colors" onClick={() => toggleSort('company')}>
+                    Company / Role <SortIcon field="company" />
+                  </th>
+                  <th className="px-6 py-3 font-semibold cursor-pointer group hover:text-slate-300 transition-colors" onClick={() => toggleSort('score')}>
+                    Match Score <SortIcon field="score" />
+                  </th>
                   <th className="px-6 py-3 font-semibold text-center">Status</th>
                   <th className="px-6 py-3 font-semibold text-right">Action</th>
                 </tr>
@@ -188,7 +251,7 @@ export default function TrackerPage() {
                           onChange={(e) => updateStatus(job.rowId, e.target.value)}
                           className="bg-transparent text-xs font-bold uppercase focus:ring-0 cursor-pointer p-1 rounded opacity-0 absolute w-16 -ml-4 z-20"
                         >
-                           {['NEW', 'APPLIED', 'REPLIED', 'INTERVIEW', 'REJECTED'].map(s => <option className="bg-slate-900 text-slate-500" key={s} value={s}>{s}</option>)}
+                           {['NEW', 'APPLIED', 'REPLIED', 'INTERVIEW', 'REJECTED', 'IGNORED'].map(s => <option className="bg-slate-900 text-slate-500" key={s} value={s}>{s}</option>)}
                         </select>
                         <div className="relative z-10 inline-flex items-center justify-center"><StatusBadge status={job.status} /></div>
                       </td>
