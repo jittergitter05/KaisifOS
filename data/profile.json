@@ -2,25 +2,24 @@
   "name": "Shaik Kaisif Basha",
   "email": "shaikkaisifbasha04@gmail.com",
   "target_roles": [
+    "Associate Product Manager",
     "Product Marketing Manager",
-    "Growth Marketing Manager",
+    "Growth Manager",
     "Founder's Associate",
     "Product Analyst",
-    "Growth Manager",
-    "Marketing Manager",
-    "Business Analyst"
+    "Digital Content Lead"
   ],
-  "target_cities": ["Hyderabad", "Bengaluru", "Remote"],
+  "target_cities": ["Hyderabad", "Bengaluru"],
   "min_salary_lpa": 8,
   "experience_years": 0,
   "experience_level": "Fresher / Entry Level",
   "portfolio": "https://portjitterglitter.vercel.app",
   "key_metrics": [
-    "17.72% CTR vs 3-5% industry average at Smatr AI",
-    "425% organic search growth at Smatr AI",
-    "Built live Shopify-TallyPrime webhook automation pipeline",
-    "249 impressions and 14 high-intent clicks in 6 weeks from zero",
-    "1000+ monthly visits grown from 150 in 6 months"
+    "~425% organic search growth at Smatr AI",
+    "~1,466% product page view growth at Smatr AI",
+    "Created digital contact database for 2,000+ alumni",
+    "Grew unique monthly traffic to 1,000+ visits",
+    "Executed product marketing across Reddit, Discord, Pinterest"
   ],
   "skills": [
     "GTM Strategy", "Product Marketing", "SEO", "Growth Marketing",

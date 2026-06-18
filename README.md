@@ -3,6 +3,10 @@
   <p><b>An automated, AI-powered Job Scouting & Tracking Engine</b></p>
 </div>
 
+## 🌐 Live Website
+
+Project Website: [https://kaisif-tech.vercel.app/](https://kaisif-tech.vercel.app/)
+
 ## 📌 Overview
 
 **KaisifOS** is an intelligent, open-source automated job search engine and application tracker. Think of it as a personal AI assistant that scouts for matching jobs, scores them against your profile, and provides a sleek dashboard to manage your applications.
@@ -37,6 +41,7 @@ cp .env.example .env.local
 - `GEMINI_API_KEY`: Google Gemini API key for AI scoring.
 - `APP_URL`: Your deployed application URL.
 - `ADZUNA_APP_ID` & `ADZUNA_API_KEY`: Credentials for the Adzuna job fetching API.
+- `RAPIDAPI_KEY`: Credentials for the JSearch job fetching API.
 - `DISCORD_WEBHOOK_URL`: For job arrival notifications.
 - `GOOGLE_SHEET_ID`: Target Google Sheet for data syncing.
 - `GOOGLE_SERVICE_KEY_BASE64`: Base64 encoded Google Service Account JSON for accessing the sheet.
@@ -64,8 +69,7 @@ Visit the app at `http://localhost:3000`.
 ## 🔄 Scheduled Automation
 
 KaisifOS comes with predefined workflows to run:
-- **Job Scout**: Runs daily on weekdays.
-- **Reply Tracker**: Tracks email responses automatically.
+- **Job Scout**: Runs 4x a week (Sunday, Monday, Wednesday, Friday) at 9:30 AM IST to optimize token usage.
 
 Ensure your GitHub repository secrets are set matching the `.env` variables so the cron tasks can execute properly.
 

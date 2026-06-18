@@ -284,7 +284,7 @@ async function main() {
     const uniqueNewJobs = Array.from(uniqueNewJobsMap.values());
     
     // PRUNING: Pre-filter out obvious over-experienced roles to save LLM tokens/quota
-    const blacklistRegex = /\b(senior|lead|manager|director|vp|head|sr\.|principal|architect|5\+? years|3\+? years|4\+? years)\b/i;
+    const blacklistRegex = /\b(senior|director|vp|head of|sr\.|principal|architect|staff|5\+?\s*years|4\+?\s*years|3\+?\s*years|2\+?\s*years)\b/i;
     const prunedJobs = uniqueNewJobs.filter(j => {
       const combinedText = `${j.title || ''} ${j.description || ''}`;
       return !blacklistRegex.test(combinedText);
