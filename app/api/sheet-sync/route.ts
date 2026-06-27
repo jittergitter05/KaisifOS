@@ -1,5 +1,6 @@
 import { google } from 'googleapis'
 import { NextRequest, NextResponse } from 'next/server'
+import { cookies } from 'next/headers';
 
 async function getAuth() {
   const credentials = JSON.parse(
@@ -17,6 +18,14 @@ async function getAuth() {
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
   const isPublic = searchParams.get('public') === 'true'
+
+  if (!isPublic) {
+    const cookieStore = cookies();
+    const authCookie = cookieStore.get('kaisifos_auth');
+    if (!authCookie || authCookie.value !== 'authenticated') {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+  }
 
   if (
     !process.env.GOOGLE_SERVICE_KEY_BASE64 || 
@@ -90,6 +99,12 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const cookieStore = cookies();
+  const authCookie = cookieStore.get('kaisifos_auth');
+  if (!authCookie || authCookie.value !== 'authenticated') {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   try {
     const { rowId, status } = await request.json()
 

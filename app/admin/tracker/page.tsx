@@ -35,7 +35,7 @@ export default function TrackerPage() {
       })
       .then(data => {
         if (data && data.rows) {
-          const parsedJobs = data.rows.map((r: any[], i: number) => ({
+          const parsedJobs = data.rows.map((r: string[], i: number) => ({
             rowId: i + 1, date: r[0] || '', id: r[1] || '', title: r[2] || '', company: r[3] || '',
             score: parseInt(r[4] || '0', 10), url: r[7] || '', dm: r[8] || '', status: r[10] || 'NEW',
           })).filter((j: JobRow) => j.title !== 'Title' && j.id); 
@@ -54,12 +54,18 @@ export default function TrackerPage() {
     const originalJobs = [...jobs];
     setJobs(jobs.map(j => j.rowId === rowId ? { ...j, status: newStatus } : j));
     try {
-      await fetch('/api/sheet-sync', {
+      const res = await fetch('/api/sheet-sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rowId, status: newStatus }),
       });
-    } catch (e) { console.error('Update failed', e); setJobs(originalJobs); }
+      if (!res.ok) {
+        throw new Error(`Server error: ${res.status}`);
+      }
+    } catch (e) {
+      console.error('Update failed', e);
+      setJobs(originalJobs);
+    }
   };
 
   const chartData = useMemo(() => {
@@ -76,7 +82,14 @@ export default function TrackerPage() {
       const jobDate = new Date(job.date);
       if (jobDate >= last30Days) {
         // Group by short date part
-        const dateKey = job.date.split('T')[0].slice(-5); // Use last 5 chars, usually MM-DD
+        let dateKey = job.date;
+        try {
+          const d = new Date(job.date);
+          if (!isNaN(d.getTime())) {
+            dateKey = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          }
+        } catch (_) {}
+        
         if (!dailyScores[dateKey]) {
            dailyScores[dateKey] = { total: 0, count: 0 };
         }

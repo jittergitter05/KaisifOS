@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { google } from 'googleapis';
-import { GoogleGenAI } from '@google/genai';
+import Groq from 'groq-sdk';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
@@ -9,8 +9,6 @@ dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-const AI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
@@ -153,53 +151,62 @@ async function fetchJSearchJobs(profile) {
   return jobs;
 }
 
-async function scoreJob(job, profile) {
+async function scoreJob(job, profile, groq) {
   const prompt = `You are a recruiting AI scoring job fit for this candidate.
-Return ONLY valid JSON. No explanation. No markdown.
+Return ONLY valid JSON. No explanation. No markdown. No code fences.
 
 CANDIDATE: ${JSON.stringify(profile)}
 
 JOB:
 Title: ${job.title}
-Company: ${job.company?.display_name || 'Unknown'}  
+Company: ${job.company?.display_name || 'Unknown'}
 Description: ${(job.description || '').substring(0, 600)}
 Salary: ${job.salary_min || 'Not listed'}
 
-Return exactly:
+Return exactly this JSON structure:
 {
-  "score": <0-100 integer> (Aggressively penalize jobs requiring 1+ years experience. Candidate is a FRESHER/0 years. High scores ONLY for entry-level/fresher appropriate roles),
+  "score": <0-100 integer, aggressively penalize roles requiring 1+ year experience, candidate is a FRESHER>,
   "match_reasons": ["reason 1", "reason 2", "reason 3"],
   "gap": "one line on biggest weakness",
-  "dm_draft": "3-sentence LinkedIn DM.",
-  "resume_angle": "which of candidate's metrics to lead with"
+  "dm_draft": "3-sentence LinkedIn DM",
+  "resume_angle": "which candidate metric to lead with"
 }`;
 
   let retries = 3;
+  let backoff = 4000;
+  
   while (retries > 0) {
     try {
-      const response = await AI.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-        config: {
-            responseMimeType: "application/json",
-        }
+      const response = await groq.chat.completions.create({
+        model: 'llama-3.3-70b-versatile',
+        messages: [{ role: 'user', content: prompt }],
+        response_format: { type: 'json_object' },
+        temperature: 0.1,
+        max_tokens: 500,
       });
-
-      const text = response.text;
+      
+      const text = response.choices[0]?.message?.content || '{}';
       const data = JSON.parse(text);
       return data;
     } catch (error) {
-      if (error.status === 429 || error.message.includes('429')) {
-        console.warn(`[Gemini API] Rate limit hit. Retrying in ${4 - retries}s...`);
-        await delay((4 - retries) * 1500);
+      const isRateLimit = 
+        error?.status === 429 ||
+        error?.message?.includes('429') ||
+        error?.message?.includes('rate_limit') ||
+        error?.message?.includes('Rate limit');
+      
+      if (isRateLimit && retries > 0) {
+        console.warn(`[Groq] Rate limit hit. Retry in ${backoff}ms...`);
+        await delay(backoff);
+        backoff *= 2;
         retries--;
       } else {
-        console.error(`Gemini error for job ${job.id}:`, error.message);
+        console.error(`Groq error for job ${job.id}:`, error.message);
         return { score: 0 };
       }
     }
   }
-  console.error(`Gemini error for job ${job.id}: Exhausted retries due to rate limit.`);
+  console.error(`Groq: exhausted retries for job ${job.id}`);
   return { score: 0 };
 }
 
@@ -253,7 +260,10 @@ async function getWeeklyStats(sheets, auth) {
 
 async function sendDiscordDigest(matches, resumeUrl, totalScanned, weeklyStats = null) {
   const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
-  if (!webhookUrl) throw new Error('Missing DISCORD_WEBHOOK_URL');
+  if (!webhookUrl) {
+    console.warn('[Scout] DISCORD_WEBHOOK_URL not set — skipping digest notification.');
+    return;
+  }
 
   let content = `📋 KAISIF JOB DIGEST — ${new Date().toISOString().split('T')[0]}\n`;
   content += `Scanned ${totalScanned} roles today, ${matches.length} matched your profile (≥60)\n─────────────────────────────\n`;
@@ -289,6 +299,7 @@ async function sendDiscordDigest(matches, resumeUrl, totalScanned, weeklyStats =
 
 async function main() {
   try {
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
     const profilePath = path.join(__dirname, '../data/profile.json');
     const profile = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
     const auth = await getAuth();
@@ -313,15 +324,15 @@ async function main() {
       return !blacklistRegex.test(combinedText);
     });
 
-    const jobsToScore = prunedJobs.slice(0, 30);
+    const jobsToScore = prunedJobs.slice(0, 15);
 
     const scoredJobs = [];
     for (const job of jobsToScore) {
-      const scoreData = await scoreJob(job, profile);
+      const scoreData = await scoreJob(job, profile, groq);
       if (scoreData && typeof scoreData.score === 'number' && scoreData.score >= 60) {
         scoredJobs.push({ job, scoreData });
       }
-      await delay(1000); 
+      await delay(2500); // 24 RPM effective — under 30 RPM Groq free limit
     }
     
     scoredJobs.sort((a, b) => b.scoreData.score - a.scoreData.score);

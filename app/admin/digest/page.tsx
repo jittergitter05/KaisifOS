@@ -4,8 +4,22 @@ import JobCard from '@/components/JobCard';
 import Link from 'next/link';
 import { motion } from 'motion/react';
 
+interface DigestJob {
+  rowId: number;
+  Date: string;
+  Title: string;
+  Company: string;
+  Score: number;
+  Reasons: string;
+  Gap: string;
+  URL: string;
+  DM: string;
+  ResumeAngle: string;
+  Status: string;
+}
+
 export default function DigestPage() {
-  const [jobs, setJobs] = useState<any[]>([]);
+  const [jobs, setJobs] = useState<DigestJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -22,12 +36,12 @@ export default function DigestPage() {
       .then(data => {
         if (data && data.rows) {
           const todayStr = new Date().toISOString().split('T')[0];
-          const parsedJobs = data.rows.map((r: any[], i: number) => ({
+          const parsedJobs = data.rows.map((r: string[], i: number) => ({
             rowId: i + 1, Date: r[0] || '', Title: r[2] || '', Company: r[3] || '',
             Score: parseInt(r[4] || '0', 10), Reasons: r[5] || '', Gap: r[6] || '',
             URL: r[7] || '', DM: r[8] || '', ResumeAngle: r[9] || '', Status: r[10] || 'NEW',
-          })).filter((j: any) => j.Title !== 'Title' && j.Date === todayStr && j.Score >= 60);
-          setJobs(parsedJobs.sort((a,b) => b.Score - a.Score));
+          })).filter((j: DigestJob) => j.Title !== 'Title' && j.Date === todayStr && j.Score >= 60);
+          setJobs(parsedJobs.sort((a: DigestJob, b: DigestJob) => b.Score - a.Score));
         }
         setLoading(false);
       })

@@ -1,4 +1,3 @@
-import { google } from 'googleapis';
 import Link from 'next/link';
 import Image from 'next/image';
 import FadeIn from '@/components/FadeIn';
@@ -7,69 +6,27 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 async function getStats() {
-  if (!process.env.GOOGLE_SERVICE_KEY_BASE64 || !process.env.GOOGLE_SHEET_ID) {
-    return { scoutedWeek: 0, avgScore: 0, applied: 0, responseRate: 0 };
-  }
-
   try {
-    const creds = JSON.parse(Buffer.from(process.env.GOOGLE_SERVICE_KEY_BASE64, 'base64').toString('utf8'));
-    const auth = new google.auth.GoogleAuth({
-      credentials: creds,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+    const baseUrl = process.env.APP_URL || 'http://localhost:3000';
+    const res = await fetch(`${baseUrl}/api/sheet-sync?public=true`, {
+      cache: 'no-store',
     });
-
-    const sheets = google.sheets('v4');
-    const response = await sheets.spreadsheets.values.get({
-      auth,
-      spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: 'Sheet1!A:M',
-    });
-
-    const rows = response.data.values || [];
+    if (!res.ok) throw new Error('Failed to fetch stats');
     
-    let scoutedWeek = 0;
-    let totalScore = 0;
-    let scoreCount = 0;
-    let applied = 0;
-    let replied = 0; 
-
-    const now = new Date();
-    const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-
-    for (let i = 1; i < rows.length; i++) {
-        const row = rows[i];
-        if (!row[0]) continue;
-        
-        const dateStr = row[0];
-        const score = parseInt(row[4] || '0', 10);
-        const status = row[10] || 'NEW';
-
-        const rowDate = new Date(dateStr);
-        if (rowDate >= oneWeekAgo) {
-            scoutedWeek++;
-        }
-
-        if (score > 0) {
-            totalScore += score;
-            scoreCount++;
-        }
-
-        if (['APPLIED', 'REPLIED', 'INTERVIEW', 'REJECTED'].includes(status)) {
-            applied++;
-        }
-        
-        if (['REPLIED', 'INTERVIEW', 'REJECTED'].includes(status)) {
-            replied++;
-        }
+    const contentType = res.headers.get('content-type');
+    if (!contentType || !contentType.includes('application/json')) {
+      throw new Error('Not JSON');
     }
-
-    const avgScore = scoreCount > 0 ? Math.round(totalScore / scoreCount) : 0;
-    const responseRate = applied > 0 ? Math.round((replied / applied) * 100) : 0;
-
-    return { scoutedWeek, avgScore, applied, responseRate };
-
-  } catch(e) {
-    console.error(e);
+    
+    const data = await res.json();
+    return {
+      scoutedWeek: data.jobs_scouted_this_week ?? 0,
+      avgScore: data.avg_match_score ?? 0,
+      applied: data.applications_sent ?? 0,
+      responseRate: parseInt(data.response_rate ?? '0', 10),
+    };
+  } catch (e) {
+    console.error('Stats fetch failed:', e);
     return { scoutedWeek: 0, avgScore: 0, applied: 0, responseRate: 0 };
   }
 }

@@ -1,14 +1,12 @@
 name: Reply Tracker
 on:
   schedule:
-    - cron: '30 3 * * 1-5' # 9:00 AM IST (3:30 AM UTC) weekdays
+    - cron: '30 3 * * 1-5'
   workflow_dispatch:
 
 jobs:
   track:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -16,15 +14,11 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '20'
           cache: 'npm'
           
       - name: Install dependencies
         run: npm install
-        
-      - name: Install node-fetch
-        run: npm i node-fetch dotenv
-        working-directory: ./scripts
         
       - name: Run Reply Tracker
         env:
