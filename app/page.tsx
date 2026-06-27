@@ -2,21 +2,18 @@ import Link from 'next/link';
 import Image from 'next/image';
 import FadeIn from '@/components/FadeIn';
 
+import { GET } from '@/app/api/sheet-sync/route';
+import { NextRequest } from 'next/server';
+
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 async function getStats() {
   try {
-    const baseUrl = process.env.APP_URL || 'http://localhost:3000';
-    const res = await fetch(`${baseUrl}/api/sheet-sync?public=true`, {
-      cache: 'no-store',
-    });
-    if (!res.ok) throw new Error('Failed to fetch stats');
+    const req = new NextRequest(new URL('http://localhost:3000/api/sheet-sync?public=true'));
+    const res = await GET(req);
     
-    const contentType = res.headers.get('content-type');
-    if (!contentType || !contentType.includes('application/json')) {
-      throw new Error('Not JSON');
-    }
+    if (!res.ok) throw new Error('Failed to fetch stats');
     
     const data = await res.json();
     return {
