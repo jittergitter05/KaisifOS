@@ -15,7 +15,7 @@ Built with Next.js, it leverages Google Gemini AI for intelligent matching and a
 
 ## ✨ Features
 
-- 🤖 **AI-Powered Job Scouter:** Automatically fetches jobs from Adzuna and uses Gemini AI to score them against your skills.
+- 🤖 **AI-Powered Job Scouter:** Automatically fetches jobs from The Muse, Remotive, and JSearch (via RapidAPI), and uses Gemini AI to score them against your skills.
 - 📊 **Tracker Dashboard:** Sleek, modern tracker to manage job statuses (Applied, Interview, Rejected, etc.).
 - 🔒 **Secure Admin Portal:** Protected by Basic Authentication middleware.
 - 📈 **Public Metrics:** Shareable dashboard showing scouting and application statistics.
@@ -40,7 +40,6 @@ cp .env.example .env.local
 **Required Credentials:**
 - `GEMINI_API_KEY`: Google Gemini API key for AI scoring.
 - `APP_URL`: Your deployed application URL.
-- `ADZUNA_APP_ID` & `ADZUNA_API_KEY`: Credentials for the Adzuna job fetching API.
 - `RAPIDAPI_KEY`: Credentials for the JSearch job fetching API.
 - `DISCORD_WEBHOOK_URL`: For job arrival notifications.
 - `GOOGLE_SHEET_ID`: Target Google Sheet for data syncing.
@@ -81,7 +80,7 @@ Open source under the MIT License.
 If you are a student or beginner without DevOps experience trying to self-host this project, you might get blocked on the following steps. (These areas need better documentation in future updates):
 
 1. **`APP_URL` & Deployment Context**: Missing instructions on how to actually deploy the app (e.g., using Vercel or Railway). The instructions assume you know how to get a live URL and where to provide it. You also have `localhost` instructions but ask for an `APP_URL` beforehand.
-2. **Adzuna External API**: No link is provided to the Adzuna developer portal to register an `ADZUNA_APP_ID` & `ADZUNA_API_KEY`. It leaves the user guessing where to sign up.
+2. **JSearch External API**: No link is provided to the RapidAPI developer portal to register a `RAPIDAPI_KEY` for JSearch. It leaves the user guessing where to sign up.
 3. **Discord Integration**: Explaining how to create a Discord webhook (Server Settings ➔ Integrations ➔ Webhooks) is missing. The user might not know where to get `DISCORD_WEBHOOK_URL`.
 4. **Google Cloud / Sheets Configuration**: The hardest part for beginners. It needs a mini-guide explaining how to:
     - Create a Google Cloud Project & enable Google Sheets API.

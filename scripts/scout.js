@@ -41,50 +41,70 @@ async function getExistingJobIds(sheets, auth) {
   }
 }
 
-async function fetchAdzunaJobs(profile) {
-  if (!process.env.ADZUNA_APP_ID || !process.env.ADZUNA_API_KEY) {
-     throw new Error("Missing ADZUNA env variables");
-  }
-
+async function fetchMuseJobs(profile) {
   const jobs = [];
-  const minSalary = (profile.min_salary_lpa || 6) * 100000;
-
-  for (const role of profile.target_roles) {
+  try {
     for (const city of profile.target_cities) {
-        try {
-            const url = new URL(`https://api.adzuna.com/v1/api/jobs/in/search/1`);
-            url.searchParams.append('app_id', process.env.ADZUNA_APP_ID);
-            url.searchParams.append('app_key', process.env.ADZUNA_API_KEY);
-            url.searchParams.append('results_per_page', 10);
-            url.searchParams.append('what', role);
-            url.searchParams.append('where', city);
-            url.searchParams.append('salary_min', minSalary);
-            url.searchParams.append('content-type', 'application/json');
-
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 10000);
-
-            const res = await fetch(url.toString(), { signal: controller.signal });
-            clearTimeout(timeout);
-
-            if (!res.ok) {
-              const errBody = await res.text();
-              throw new Error(`Adzuna API error HTTP ${res.status}: ${errBody.substring(0, 200)}`);
-            }
-            
-            const textBody = await res.text();
-            try {
-              const data = JSON.parse(textBody);
-              jobs.push(...(data.results || []));
-            } catch (err) {
-              throw new Error(`Adzuna JSON parse error: ${textBody.substring(0, 200)}`);
-            }
-        } catch (error) {
-             console.error(`Fetch error for ${role} in ${city}:`, error.message);
-             throw error;
-        }
-        await delay(500); 
+      const url = new URL('https://www.themuse.com/api/public/jobs');
+      url.searchParams.append('page', '1');
+      url.searchParams.append('location', city);
+      
+      const res = await fetch(url.toString());
+      if (!res.ok) {
+        console.warn(`The Muse API error HTTP ${res.status}`);
+        continue;
+      }
+      const data = await res.json();
+      const results = data.results || [];
+      
+      for (const item of results) {
+        const description = (item.contents || '').replace(/<[^>]*>?/gm, '').trim();
+        jobs.push({
+          id: item.id ? `muse_${item.id}` : null,
+          title: item.name,
+          company: { display_name: item.company?.name || 'Unknown' },
+          description: description,
+          redirect_url: item.refs?.landing_page || '',
+        });
+      }
+      await delay(500);
     }
+  } catch (err) {
+    console.warn(`The Muse fetch error:`, err.message);
+  }
+  return jobs;
+}
+
+async function fetchRemotiveJobs(profile) {
+  const jobs = [];
+  try {
+    for (const role of profile.target_roles) {
+      const url = new URL('https://remotive.com/api/remote-jobs');
+      url.searchParams.append('search', role);
+      url.searchParams.append('limit', '10');
+      
+      const res = await fetch(url.toString());
+      if (!res.ok) {
+        console.warn(`Remotive API error HTTP ${res.status}`);
+        continue;
+      }
+      const data = await res.json();
+      const results = data.jobs || [];
+      
+      for (const item of results) {
+        const description = (item.description || '').replace(/<[^>]*>?/gm, '').trim();
+        jobs.push({
+          id: item.id ? `remotive_${item.id}` : null,
+          title: item.title,
+          company: { display_name: item.company_name || 'Unknown' },
+          description: description,
+          redirect_url: item.url || '',
+        });
+      }
+      await delay(500);
+    }
+  } catch (err) {
+    console.warn(`Remotive fetch error:`, err.message);
   }
   return jobs;
 }
@@ -274,9 +294,12 @@ async function main() {
     const auth = await getAuth();
     const sheets = google.sheets('v4');
     const existingIds = await getExistingJobIds(sheets, auth);
-    const rawAdzunaJobs = await fetchAdzunaJobs(profile);
-    const rawJSearchJobs = await fetchJSearchJobs(profile);
-    const rawJobs = [...rawAdzunaJobs, ...rawJSearchJobs];
+    const [rawMuseJobs, rawRemotiveJobs, rawJSearchJobs] = await Promise.all([
+      fetchMuseJobs(profile),
+      fetchRemotiveJobs(profile),
+      fetchJSearchJobs(profile)
+    ]);
+    const rawJobs = [...rawMuseJobs, ...rawRemotiveJobs, ...rawJSearchJobs];
     const newJobs = rawJobs.filter(j => j.id && !existingIds.has(String(j.id)));
     
     const uniqueNewJobsMap = new Map();

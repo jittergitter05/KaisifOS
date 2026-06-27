@@ -4,7 +4,7 @@ import StatusBadge from '@/components/StatusBadge';
 import MetricBar from '@/components/MetricBar';
 import Link from 'next/link';
 import dynamic from 'next/dynamic';
-import { motion } from 'framer-motion';
+import { motion } from 'motion/react';
 
 const ClientChart = dynamic(() => import('@/components/ClientChart'), { ssr: false });
 
@@ -19,6 +19,7 @@ export default function TrackerPage() {
   const [filter, setFilter] = useState('ALL');
   const [sortField, setSortField] = useState<'date' | 'score' | 'company'>('date');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [searchQuery, setSearchQuery] = useState('');
 
   const [error, setError] = useState<string | null>(null);
 
@@ -92,6 +93,10 @@ export default function TrackerPage() {
 
   const filteredJobs = useMemo(() => {
     let result = filter === 'ALL' ? jobs : jobs.filter(j => j.status === filter);
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter(j => j.title.toLowerCase().includes(q) || j.company.toLowerCase().includes(q));
+    }
     result = [...result].sort((a, b) => {
        const valA = a[sortField];
        const valB = b[sortField];
@@ -110,7 +115,7 @@ export default function TrackerPage() {
        return 0;
     });
     return result;
-  }, [jobs, filter, sortField, sortDir]);
+  }, [jobs, filter, sortField, sortDir, searchQuery]);
 
   const appliedCount = jobs.filter(j => ['APPLIED', 'REPLIED', 'INTERVIEW', 'REJECTED'].includes(j.status)).length;
   const intCount = jobs.filter(j => j.status === 'INTERVIEW').length;
@@ -196,8 +201,8 @@ export default function TrackerPage() {
         </div>
 
         <div className="lg:col-span-9 flex flex-col bg-slate-900 border border-slate-800 rounded-xl">
-          <div className="p-3 sm:p-4 border-b border-slate-800 items-center justify-between shrink-0 overflow-x-auto whitespace-nowrap hide-scrollbar">
-            <div className="flex space-x-2">
+          <div className="p-3 sm:p-4 border-b border-slate-800 flex flex-col sm:flex-row items-center justify-between shrink-0 gap-3">
+            <div className="flex space-x-2 overflow-x-auto whitespace-nowrap hide-scrollbar w-full sm:w-auto pb-2 sm:pb-0">
               {['ALL', 'NEW', 'APPLIED', 'REPLIED', 'INTERVIEW', 'REJECTED', 'IGNORED'].map(f => (
                 <button
                   key={f}
@@ -209,6 +214,18 @@ export default function TrackerPage() {
                   {f === 'ALL' ? 'All' : f.charAt(0) + f.slice(1).toLowerCase()}
                 </button>
               ))}
+            </div>
+            <div className="relative w-full sm:w-64 shrink-0">
+              <svg className="absolute left-2.5 top-2.5 h-4 w-4 text-slate-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+              <input
+                type="text"
+                placeholder="Search jobs or companies..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-4 py-2 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 transition-colors"
+              />
             </div>
           </div>
 

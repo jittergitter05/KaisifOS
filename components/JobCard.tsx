@@ -2,7 +2,7 @@
 import React from 'react';
 import StatusBadge from './StatusBadge';
 import MetricBar from './MetricBar';
-import { motion } from 'framer-motion';
+import { motion } from 'motion/react';
 
 interface JobData {
     Date: string; Title: string; Company: string; Score: number;
