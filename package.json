@@ -2,6 +2,7 @@
   "name": "kaisifos",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -12,7 +13,7 @@
     "@google/genai": "^2.4.0",
     "dotenv": "^16.0.0",
     "framer-motion": "^12.40.0",
-    "googleapis": "^140.0.0",
+    "googleapis": "^173.0.0",
     "lucide-react": "^0.471.0",
     "motion": "^12.40.0",
     "next": "14.2.3",
