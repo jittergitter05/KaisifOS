@@ -7,10 +7,24 @@
     "Growth Manager",
     "Founder's Associate",
     "Product Analyst",
-    "Digital Content Lead"
+    "Digital Content Lead",
+    "Growth Marketing Analyst",
+    "Marketing Operations Analyst"
   ],
   "target_cities": ["Hyderabad", "Bengaluru"],
+  "open_to_relocation": true,
+  "relocation_preference": {
+    "willing": true,
+    "requirements": [
+      "relocation package OR accommodation provided OR housing allowance",
+      "visa sponsorship if outside India",
+      "competitive salary for location (min $30k USD equivalent abroad OR ₹8 LPA India)"
+    ],
+    "preferred_regions": ["UAE", "Singapore", "UK", "Europe", "Southeast Asia", "India"],
+    "avoid": ["unpaid", "self-sponsored visa only with no support"]
+  },
   "min_salary_lpa": 8,
+  "min_salary_usd_annual": 30000,
   "experience_years": 0,
   "experience_level": "Fresher / Entry Level",
   "portfolio": "https://portjitterglitter.vercel.app",
@@ -26,5 +40,6 @@
     "Python EDA", "GA4", "Google Search Console", "Notion",
     "AI tooling", "Cloudflare Workers", "Vibe-coding"
   ],
+  "languages": ["English (fluent)", "Telugu (native)", "Hindi (conversational)"],
   "resume_synthesizer_url": "https://portjitterglitter.vercel.app/resume"
 }
