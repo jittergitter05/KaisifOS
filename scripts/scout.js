@@ -61,7 +61,7 @@ async function fetchInternshalaJobs() {
         const html = await res.text();
 
         // Strategy A: __NEXT_DATA__ JSON
-        const nextMatch = html.match(/<script id="__NEXT_DATA__" type="application\\/json">([\\s\\S]*?)<\\/script>/);
+        const nextMatch = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
         if (nextMatch) {
           try {
             const d = JSON.parse(nextMatch[1]);
@@ -82,9 +82,9 @@ async function fetchInternshalaJobs() {
         }
 
         // Strategy B: Regex fallback
-        const titleMatches   = [...html.matchAll(/class="job-title-name"[^>]*>\\s*<a[^>]*href="([^"]+)"[^>]*>\\s*([^<]+)/g)];
-        const companyMatches = [...html.matchAll(/class="company-name"[^>]*>\\s*(?:<[^>]+>\\s*)*([^<\\n]{3,60})/g)];
-        const idMatches      = [...html.matchAll(/data-internship_id="(\\d+)"/g)];
+        const titleMatches   = [...html.matchAll(/class="job-title-name"[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>\s*([^<]+)/g)];
+        const companyMatches = [...html.matchAll(/class="company-name"[^>]*>\s*(?:<[^>]+>\s*)*([^<\n]{3,60})/g)];
+        const idMatches      = [...html.matchAll(/data-internship_id="(\d+)"/g)];
         let n = 0;
         for (let i = 0; i < Math.min(titleMatches.length, 6); i++) {
           const href = titleMatches[i]?.[1] || '';
@@ -146,7 +146,7 @@ async function fetchRemoteOKJobs() {
 
         // Flag relocation-friendly signals in description/tags
         const fullText = `${item.description || ''} ${(item.tags || []).join(' ')}`.toLowerCase();
-        const hasRelocation = /relocation|accommodation|housing|visa\\s*sponsor|flight|moving\\s*allowance|relo/.test(fullText);
+        const hasRelocation = /relocation|accommodation|housing|visa\s*sponsor|flight|moving\s*allowance|relo/.test(fullText);
 
         jobs.push({
           id: `remoteok_${item.id || item.slug}`,
@@ -195,7 +195,7 @@ async function fetchRemotiveJobs() {
       for (const item of (data.jobs || [])) {
         const description = (item.description || '').replace(/<[^>]*>/g, '').trim();
         const fullText = description.toLowerCase();
-        const hasRelocation = /relocation|accommodation|housing|visa\\s*sponsor|flight|moving\\s*allowance|relo/.test(fullText);
+        const hasRelocation = /relocation|accommodation|housing|visa\s*sponsor|flight|moving\s*allowance|relo/.test(fullText);
 
         jobs.push({
           id: `remotive_${item.id}`,
@@ -227,7 +227,7 @@ async function fetchRemotiveJobs() {
       const data = await res.json();
       for (const item of (data.jobs || [])) {
         const description = (item.description || '').replace(/<[^>]*>/g, '').trim();
-        const hasRelocation = /relocation|accommodation|housing|visa\\s*sponsor|flight|relo/.test(description.toLowerCase());
+        const hasRelocation = /relocation|accommodation|housing|visa\s*sponsor|flight|relo/.test(description.toLowerCase());
         jobs.push({
           id: `remotive_kw_${item.id}`,
           title: item.title,
@@ -264,7 +264,7 @@ async function fetchJSearchJobs(profile) {
     const data = await res.json();
     for (const item of (data.data || [])) {
       const desc = (item.job_description || '').toLowerCase();
-      const hasRelocation = /relocation|accommodation|housing|visa\\s*sponsor|relo/.test(desc);
+      const hasRelocation = /relocation|accommodation|housing|visa\s*sponsor|relo/.test(desc);
       jobs.push({
         id: item.job_id,
         title: item.job_title,
@@ -272,7 +272,7 @@ async function fetchJSearchJobs(profile) {
         description: (item.job_description || '').substring(0, 800),
         redirect_url: item.job_apply_link,
         salary_min: item.job_min_salary,
-        location: `${item.job_city || ''}, ${item.job_country || ''}`.trim().replace(/^,\\s*/, ''),
+        location: `${item.job_city || ''}, ${item.job_country || ''}`.trim().replace(/^,\s*/, ''),
         has_relocation: hasRelocation,
       });
     }
@@ -493,7 +493,7 @@ async function main() {
     console.log(`[Scout] After dedup + seen filter: ${newJobs.length} new jobs.`);
 
     // BLACKLIST: title-only, seniority-only. No location filtering.
-    const blacklistRegex = /\\b(senior\\s+(?:manager|director|engineer|developer|consultant)|director\\s+of|vp\\s+of|head\\s+of|principal\\s+\\w+|staff\\s+engineer|5\\+?\\s*years?|4\\+?\\s*years?|3\\+?\\s*years?)\\b/i;
+    const blacklistRegex = /\b(senior\s+(?:manager|director|engineer|developer|consultant)|director\s+of|vp\s+of|head\s+of|principal\s+\w+|staff\s+engineer|5\+?\s*years?|4\+?\s*years?|3\+?\s*years?)\b/i;
     const prunedJobs = newJobs.filter(j => !blacklistRegex.test(j.title || ''));
     console.log(`[Scout] After blacklist: ${prunedJobs.length} jobs to score.`);
 
