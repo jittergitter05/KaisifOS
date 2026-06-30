@@ -82,15 +82,18 @@ async function fetchInternshalaJobs() {
         }
 
         // Strategy B: Regex fallback
-        const titleMatches   = [...html.matchAll(/class="job-title-name"[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>\s*([^<]+)/g)];
-        const companyMatches = [...html.matchAll(/class="company-name"[^>]*>\s*(?:<[^>]+>\s*)*([^<\n]{3,60})/g)];
-        const idMatches      = [...html.matchAll(/data-internship_id="(\d+)"/g)];
+        const parts = html.split('class="company generic_company');
         let n = 0;
-        for (let i = 0; i < Math.min(titleMatches.length, 6); i++) {
-          const href = titleMatches[i]?.[1] || '';
-          const title = titleMatches[i]?.[2]?.trim() || '';
-          const company = companyMatches[i]?.[1]?.trim() || 'Unknown';
-          const rawId = idMatches[i]?.[1] || `${category}_${city}_${i}`;
+        for (let i = 1; i < parts.length && n < 8; i++) {
+          const p = parts[i];
+          const hrefMatch = p.match(/class="job-title-href"[^>]*href="([^"]+)"[^>]*>\s*([^<]+)/);
+          if (!hrefMatch) continue;
+          
+          const href = hrefMatch[1];
+          const title = hrefMatch[2].trim();
+          const company = p.match(/class="company-name">\s*(?:<[^>]+>\s*)*([^<\n]+)/)?.[1]?.trim() || 'Unknown';
+          const rawId = href.match(/(\d+)$/)?.[1] || `${category}_${city}_${i}`;
+          
           if (title.length > 3) {
             jobs.push({
               id: `internshala_${rawId}`, title,
@@ -98,7 +101,9 @@ async function fetchInternshalaJobs() {
               description: `${title} role at ${company}, ${city}. Via Internshala.`,
               redirect_url: href.startsWith('http') ? href : `https://internshala.com${href}`,
               location: city,
-            }); n++;
+              has_relocation: false,
+            });
+            n++;
           }
         }
         console.log(`[Internshala] Regex: ${n} jobs → ${category}/${city}`);
