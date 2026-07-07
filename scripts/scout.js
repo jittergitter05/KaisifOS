@@ -268,11 +268,11 @@ async function fetchJSearchJobs(profile) {
   if (!process.env.RAPIDAPI_KEY) { console.warn('[JSearch] No RAPIDAPI_KEY — skipping.'); return []; }
   const jobs = [];
   try {
-    const query = `(${profile.target_roles.slice(0, 3).join(' OR ')}) entry level fresher relocation`;
+    const query = `(${profile.target_roles.slice(0, 3).map(r => `"${r}"`).join(' OR ')}) (fresher OR "entry level" OR junior)`;
     const url = new URL('https://jsearch.p.rapidapi.com/search');
     url.searchParams.append('query', query);
     url.searchParams.append('num_pages', '1');
-    url.searchParams.append('date_posted', 'today');
+    url.searchParams.append('date_posted', 'week');
     const res = await fetch(url.toString(), {
       headers: { 'X-RapidAPI-Key': process.env.RAPIDAPI_KEY, 'X-RapidAPI-Host': 'jsearch.p.rapidapi.com' },
     });
@@ -299,7 +299,103 @@ async function fetchJSearchJobs(profile) {
 
 // ─── GROQ SCORING ────────────────────────────────────────────────────────────
 
-async function scoreJob(job, profile, groq) {
+// Global state for fallback tracking
+global.groqFailed = false;
+
+async function scoreJobWithGemini(job, profile, apiKey) {
+  const desc = (job.description || '').substring(0, 600);
+  const hasRelocation = job.has_relocation || false;
+  const location = job.location || 'Not specified';
+  const salaryInfo = job.salary_min
+    ? `Min salary: ${job.salary_min} ${job.salary_max ? `- ${job.salary_max}` : ''}` 
+    : 'Salary: Not listed';
+
+  const prompt = `You are a recruiting AI. Score this job for this specific candidate.
+Return ONLY valid JSON. No markdown. No explanation. No code fences.
+
+CANDIDATE:
+Name: ${profile.name}
+Target Roles: ${profile.target_roles.join(', ')}
+Base: Hyderabad, India
+Open to relocation: YES — willing to move globally if role provides accommodation/relocation support
+Experience: ${profile.experience_level} — 0 full-time years
+Key Metrics: ${profile.key_metrics.join(' | ')}
+Skills: ${profile.skills.join(', ')}
+Min Salary: ₹${profile.min_salary_lpa} LPA India / $${profile.min_salary_usd_annual || 30000} USD abroad
+
+JOB:
+Title: ${job.title}
+Company: ${job.company?.display_name || 'Unknown'}
+Location: ${location}
+${salaryInfo}
+Relocation/Accommodation mentioned: ${hasRelocation ? 'YES ✅' : 'Not detected'}
+Description: ${desc}
+
+SCORING RULES — READ ALL:
+1. Role match (40 pts): How well does the title/description match PMM / APM / Growth / Content / FA?
+2. Fresher-friendly (25 pts): Penalise ONLY if explicitly requires 3+ years. "2 years preferred" or "1-2 years" = OK for a strong fresher.
+3. Location/relocation (20 pts): India roles score full marks. International roles with relocation/visa/accommodation support score full marks. International roles WITHOUT relocation support but FULLY REMOTE score 12/20. International roles requiring self-funded visa/move score 5/20.
+4. Salary (15 pts): Listed salary ≥ ₹8 LPA India or ≥ $30k USD abroad = full marks. Unlisted = 10/15 (assume standard).
+
+BONUS: Add 5–10 points if relocation/accommodation/visa is explicitly mentioned.
+
+HARD RULES:
+- DO NOT score 0 just because location is outside India — candidate wants international
+- DO NOT penalise worldwide/remote roles
+- DO score below 40 only for: clearly unrelated domain (engineering, law, medicine), or explicitly 5+ years required
+
+Return exactly:
+{
+  "score": <integer 0-100>,
+  "match_reasons": ["reason 1", "reason 2", "reason 3"],
+  "gap": "one line on the biggest risk or weakness for this specific role",
+  "dm_draft": "3-sentence LinkedIn DM opening with the strongest matching metric from candidate profile",
+  "resume_angle": "which specific candidate metric to lead with for THIS role",
+  "relocation_note": "brief note on relocation/accommodation situation for this role, or 'N/A if India-based'"
+}`;
+
+  let retries = 3;
+  let backoff = 4000;
+
+  while (retries > 0) {
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: 'application/json' }
+        })
+      });
+
+      if (!res.ok) {
+        throw new Error(`Gemini HTTP error ${res.status}: ${await res.text()}`);
+      }
+
+      const data = await res.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+      const parsedData = JSON.parse(text);
+
+      if (typeof parsedData.score !== 'number' || parsedData.score < 0 || parsedData.score > 100) {
+        console.warn(`[Gemini] Bad score format for "${job.title}": ${JSON.stringify(parsedData.score)}`);
+        return { score: 0 };
+      }
+      return parsedData;
+    } catch (error) {
+      console.warn(`[Gemini] Error for "${job.title}":`, error.message, `Retries left: ${retries - 1}`);
+      retries--;
+      if (retries > 0) {
+        await delay(backoff);
+        backoff *= 2;
+      } else {
+        return { score: 0 };
+      }
+    }
+  }
+  return { score: 0 };
+}
+
+async function scoreJobWithGroq(job, profile, groq) {
   const desc = (job.description || '').substring(0, 600);
   const hasRelocation = job.has_relocation || false;
   const location = job.location || 'Not specified';
@@ -373,6 +469,9 @@ Return exactly:
       }
       return data;
     } catch (error) {
+      if (error?.status === 401 || error?.message?.includes('401') || error?.message?.includes('api_key') || error?.message?.includes('API key')) {
+        throw error; // Propagate auth errors to trigger fallback
+      }
       const isRate = error?.status === 429 || error?.message?.includes('429') ||
         error?.message?.includes('rate_limit') || error?.message?.includes('Rate limit');
       if (isRate && retries > 0) {
@@ -385,6 +484,33 @@ Return exactly:
     }
   }
   console.error(`[Groq] Exhausted retries for "${job.title}"`);
+  return { score: 0 };
+}
+
+async function scoreJob(job, profile, groq) {
+  if (groq && !global.groqFailed) {
+    try {
+      return await scoreJobWithGroq(job, profile, groq);
+    } catch (err) {
+      if (err?.status === 401 || err?.message?.includes('401') || err?.message?.includes('api_key') || err?.message?.includes('API key')) {
+        console.warn('[Scout] Groq API key is invalid or unauthorized. Switching to Gemini fallback...');
+        global.groqFailed = true;
+      } else {
+        console.error(`[Scout] Groq client error for "${job.title}":`, err.message);
+      }
+    }
+  }
+
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      return await scoreJobWithGemini(job, profile, process.env.GEMINI_API_KEY);
+    } catch (err) {
+      console.error(`[Scout] Gemini fallback error for "${job.title}":`, err.message);
+    }
+  } else {
+    console.warn(`[Scout] Gemini fallback skipped: GEMINI_API_KEY not set.`);
+  }
+
   return { score: 0 };
 }
 
@@ -477,7 +603,7 @@ async function sendDiscordDigest(matches, portfolioUrl, totalScanned, weeklyStat
 
 async function main() {
   try {
-    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_KEY }) : null;
     const profilePath = path.join(__dirname, '../data/profile.json');
     const profile = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
 
