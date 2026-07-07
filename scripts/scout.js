@@ -11,6 +11,17 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
+const stripHtmlTags = (input) => {
+  if (!input) return '';
+  let output = input;
+  let previous;
+  do {
+    previous = output;
+    output = output.replace(/<[^>]*>/g, '');
+  } while (output !== previous);
+  return output;
+};
+
 // ─── AUTH ────────────────────────────────────────────────────────────────────
 
 async function getAuth() {
@@ -71,7 +82,7 @@ async function fetchInternshalaJobs() {
               const id = `internshala_${job.id || job.job_id || Math.random().toString(36).slice(2)}`;
               const title = job.profile || job.title || job.job_title || '';
               const company = job.company_name || job.employer_name || job.company || 'Unknown';
-              const desc = (job.description || job.job_description || `${title} at ${company} in ${city}.`).replace(/<[^>]*>/g, '').trim();
+              const desc = stripHtmlTags(job.description || job.job_description || `${title} at ${company} in ${city}.`).trim();
               const link = job.url ? `https://internshala.com${job.url}` : `https://internshala.com/jobs/${category}-jobs/`;
               if (title) { jobs.push({ id, title, company: { display_name: company }, description: desc.substring(0, 800), redirect_url: link, location: city }); n++; }
             }
@@ -157,7 +168,7 @@ async function fetchRemoteOKJobs() {
           id: `remoteok_${item.id || item.slug}`,
           title: item.position,
           company: { display_name: item.company },
-          description: (item.description || `${item.position} at ${item.company}. Remote role.`).replace(/<[^>]*>/g, '').trim().substring(0, 800),
+          description: stripHtmlTags(item.description || `${item.position} at ${item.company}. Remote role.`).trim().substring(0, 800),
           redirect_url: item.url || `https://remoteok.com/l/${item.slug}`,
           location: 'Remote / Worldwide',
           salary_min: item.salary_min || null,
@@ -198,7 +209,7 @@ async function fetchRemotiveJobs() {
       const data = await res.json();
       let n = 0;
       for (const item of (data.jobs || [])) {
-        const description = (item.description || '').replace(/<[^>]*>/g, '').trim();
+        const description = stripHtmlTags(item.description || '').trim();
         const fullText = description.toLowerCase();
         const hasRelocation = /relocation|accommodation|housing|visa\s*sponsor|flight|moving\s*allowance|relo/.test(fullText);
 
@@ -231,7 +242,7 @@ async function fetchRemotiveJobs() {
       if (!res.ok) continue;
       const data = await res.json();
       for (const item of (data.jobs || [])) {
-        const description = (item.description || '').replace(/<[^>]*>/g, '').trim();
+        const description = stripHtmlTags(item.description || '').trim();
         const hasRelocation = /relocation|accommodation|housing|visa\s*sponsor|flight|relo/.test(description.toLowerCase());
         jobs.push({
           id: `remotive_kw_${item.id}`,
