@@ -483,7 +483,114 @@ Return exactly:
   return { score: 0 };
 }
 
+async function scoreJobWithGrok(job, profile, apiKey) {
+  const desc = (job.description || '').substring(0, 600);
+  const location = job.location || 'Not specified';
+  const salaryInfo = job.salary_min
+    ? `Min salary: ${job.salary_min} ${job.salary_max ? `- ${job.salary_max}` : ''}` 
+    : 'Salary: Not listed';
+
+  const prompt = `You are a recruiting AI. Score this job for this specific candidate.
+Return ONLY valid JSON. No markdown. No explanation. No code fences.
+
+CANDIDATE:
+Name: ${profile.name}
+Target Roles: ${profile.target_roles.join(', ')}
+Base: Hyderabad, India
+Experience: ${profile.experience_level} — 0 full-time years
+Key Metrics: ${profile.key_metrics.join(' | ')}
+Skills: ${profile.skills.join(', ')}
+Min Salary: ₹${profile.min_salary_lpa} LPA India / $${profile.min_salary_usd_annual || 30000} USD abroad
+
+JOB:
+Title: ${job.title}
+Company: ${job.company?.display_name || 'Unknown'}
+Location: ${location}
+${salaryInfo}
+Description: ${desc}
+
+SCORING RULES — READ ALL:
+1. Role match (40 pts): How well does the title/description match PMM / APM / Growth / Content / FA?
+2. Fresher-friendly (25 pts): Candidate is a FRESHER (0 full-time years). Full marks only if the role is entry-level, junior, associate, or explicitly open to freshers. Penalise heavily (score 0/25) if it requires 2+ years of experience or is a mid/senior-level role.
+3. Location/relocation (20 pts): MUST be located in Hyderabad, India (on-site/hybrid) or be a fully remote role (worldwide or India). Give 20/20 for Hyderabad-based or remote roles. Give 0/20 for any other location (including other Indian cities like Bengaluru, or international locations requiring relocation).
+4. Salary (15 pts): Listed salary ≥ ₹8 LPA India or ≥ $30k USD abroad = full marks. Unlisted = 10/15 (assume standard).
+
+BONUS: Add 5–10 points if relocation/accommodation/visa is explicitly mentioned.
+
+HARD RULES:
+- DO NOT score above 50 if the role requires 2+ years of experience (candidate is 0 years/fresher).
+- DO NOT score above 50 if the role is located in any city other than Hyderabad, India, unless it is 100% remote.
+- DO score below 40 for: clearly unrelated domain (engineering, law, medicine), or explicitly 5+ years required.
+
+Return exactly:
+{
+  "score": <integer 0-100>,
+  "match_reasons": ["reason 1", "reason 2", "reason 3"],
+  "gap": "one line on the biggest risk or weakness for this specific role",
+  "dm_draft": "3-sentence LinkedIn DM opening with the strongest matching metric from candidate profile",
+  "resume_angle": "which specific candidate metric to lead with for THIS role",
+  "relocation_note": "brief note on relocation/accommodation situation for this role, or 'N/A if India-based'"
+}`;
+
+  let retries = 3;
+  let backoff = 4000;
+
+  while (retries > 0) {
+    try {
+      const res = await fetch('https://api.x.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model: 'grok-2',
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.1,
+          response_format: { type: 'json_object' }
+        })
+      });
+
+      if (!res.ok) {
+        throw new Error(`Grok HTTP error ${res.status}: ${await res.text()}`);
+      }
+
+      const data = await res.json();
+      const text = data.choices?.[0]?.message?.content || '{}';
+      const parsedData = JSON.parse(text);
+
+      if (typeof parsedData.score !== 'number' || parsedData.score < 0 || parsedData.score > 100) {
+        console.warn(`[Grok] Bad score format for "${job.title}": ${JSON.stringify(parsedData.score)}`);
+        return { score: 0 };
+      }
+      return parsedData;
+    } catch (error) {
+      console.warn(`[Grok] Error for "${job.title}":`, error.message, `Retries left: ${retries - 1}`);
+      retries--;
+      if (retries > 0) {
+        await delay(backoff);
+        backoff *= 2;
+      } else {
+        return { score: 0 };
+      }
+    }
+  }
+  return { score: 0 };
+}
+
 async function scoreJob(job, profile, groq) {
+  const key = process.env.GROQ_API_KEY || '';
+
+  // 1. If key starts with 'xai-', call Grok API
+  if (key.startsWith('xai-')) {
+    try {
+      return await scoreJobWithGrok(job, profile, key);
+    } catch (err) {
+      console.error(`[Scout] Grok API error for "${job.title}":`, err.message);
+    }
+  }
+
+  // 2. Otherwise, use standard Groq if available
   if (groq && !global.groqFailed) {
     try {
       return await scoreJobWithGroq(job, profile, groq);
@@ -497,6 +604,7 @@ async function scoreJob(job, profile, groq) {
     }
   }
 
+  // 3. Fallback to Gemini if key is present
   if (process.env.GEMINI_API_KEY) {
     try {
       return await scoreJobWithGemini(job, profile, process.env.GEMINI_API_KEY);
