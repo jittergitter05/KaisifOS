@@ -4,6 +4,9 @@ on:
     - cron: '0 4 * * 0,1,3,5'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   scout:
     runs-on: ubuntu-latest

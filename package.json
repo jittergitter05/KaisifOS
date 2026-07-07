@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "rm -rf .next/cache node_modules/.cache && next build",
+    "build": "node scripts/clean.js && next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "check-env": "node scripts/check-env.js"
   },
   "dependencies": {
     "dotenv": "^16.0.0",

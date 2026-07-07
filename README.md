@@ -76,18 +76,76 @@ Ensure your GitHub repository secrets are set matching the `.env` variables so t
 
 Open source under the MIT License.
 
-## 🚧 Beginner Setup Blockers (Review Notes)
-If you are a student or beginner without DevOps experience trying to self-host this project, you might get blocked on the following steps. (These areas need better documentation in future updates):
+## ⚙️ Detailed Setup Guide (Resolving Setup Blockers)
 
-1. **`APP_URL` & Deployment Context**: Missing instructions on how to actually deploy the app (e.g., using Vercel or Railway). The instructions assume you know how to get a live URL and where to provide it. You also have `localhost` instructions but ask for an `APP_URL` beforehand.
-2. **JSearch External API**: No link is provided to the RapidAPI developer portal to register a `RAPIDAPI_KEY` for JSearch. It leaves the user guessing where to sign up.
-3. **Discord Integration**: Explaining how to create a Discord webhook (Server Settings ➔ Integrations ➔ Webhooks) is missing. The user might not know where to get `DISCORD_WEBHOOK_URL`.
-4. **Google Cloud / Sheets Configuration**: The hardest part for beginners. It needs a mini-guide explaining how to:
-    - Create a Google Cloud Project & enable Google Sheets API.
-    - Create a Service Account and download its JSON keys.
-    - Convert that raw JSON into `GOOGLE_SERVICE_KEY_BASE64` (e.g., using `base64 credentials.json > b64.txt` on macOS or `certutil` on Windows).
-    - Extract the `client_email` from the JSON to share the actual Google Sheet with that email.
-5. **Google Sheet Structure**: Fails to explain the exact columns the Google Sheet requires on `Sheet1` (e.g., Col A = Date, Col B = ID, Col C = Title, etc.). Because it reads from `A:K`, the sheet structure needs to be strictly defined.
-6. **Data Profile Setup**: The scout script looks for `data/profile.json` (for keywords, salary, cities), but there are no instructions on how the user creates or formats this file matching their own requirements.
-7. **Basic Authentication**: No explanation on how to pass `ADMIN_USER` and `ADMIN_PASS` in `.env.local` (e.g., are they plaintext passwords or hashed?).
-8. **Automated Workflows (Cron)**: Missing instructions on how to actually set up GitHub Actions secrets. Mentions "Reply Tracker" but there is no such tracker code implemented in standard setups.
+This section provides step-by-step instructions to set up, self-host, and run **KaisifOS** without blockers.
+
+### 1. Google Cloud & Sheets Integration (Database Setup)
+KaisifOS stores all pipeline and scout records in a Google Sheet.
+1. **Create Google Cloud Project:** Go to the [Google Cloud Console](https://console.cloud.google.com/), create a new project.
+2. **Enable Sheets API:** Search for "Google Sheets API" in the library and enable it.
+3. **Create Service Account:**
+   - Go to **IAM & Admin > Service Accounts**.
+   - Create a service account (e.g. `kaisifos-scout@...`).
+   - Create a key under the service account, choosing **JSON** type. Download the key file.
+4. **Base64 Encode Service Account Key:**
+   - On **macOS/Linux**: `base64 -i path/to/key.json | tr -d '\r\n'`
+   - On **Windows (PowerShell)**: `[Convert]::ToBase64String([IO.File]::ReadAllBytes("path\to\key.json"))`
+   - Paste this single-line string into `GOOGLE_SERVICE_KEY_BASE64` in your environment.
+5. **Share the Google Sheet:**
+   - Create a Google Sheet. Name the first tab `Sheet1`.
+   - Copy the service account's email (found in the JSON file as `client_email`).
+   - Share the Google Sheet with that email as an **Editor**.
+   - Copy the spreadsheet ID from the URL (the string between `/d/` and `/edit`) and set it as `GOOGLE_SHEET_ID`.
+
+### 2. Google Sheet Column Schema
+Ensure your `Sheet1` has the following column headers in Row 1:
+- **Col A:** Date
+- **Col B:** Job ID
+- **Col C:** Title
+- **Col D:** Company
+- **Col E:** Score
+- **Col F:** Match Reasons
+- **Col G:** Gap
+- **Col H:** URL
+- **Col I:** DM Draft
+- **Col J:** Resume Angle
+- **Col K:** Status (NEW / APPLIED / REPLIED / INTERVIEW / REJECTED / IGNORED)
+- **Col L:** Reply Date
+
+### 3. Candidates Profile (`data/profile.json`)
+Create a candidate profile matching your skills at `data/profile.json` using this schema:
+```json
+{
+  "name": "Your Name",
+  "target_roles": ["Associate Product Manager", "Product Marketing Manager", "Growth Lead"],
+  "experience_level": "Fresher",
+  "min_salary_lpa": 8,
+  "min_salary_usd_annual": 30000,
+  "skills": ["SQL", "Product Analytics", "Market Research", "Copywriting"],
+  "key_metrics": [
+    "Drove 40% user retention growth in internship",
+    "Analyzed 10k+ survey inputs for market analysis"
+  ]
+}
+```
+
+### 4. Discord Integration
+To receive daily scout alerts:
+1. Open Discord, go to **Server Settings > Integrations > Webhooks**.
+2. Click **New Webhook**, select the channel, and copy the **Webhook URL**.
+3. Set this URL as `DISCORD_WEBHOOK_URL` in your environment.
+
+### 5. JSearch (RapidAPI)
+1. Register on [RapidAPI JSearch](https://rapidapi.com/letscrape-65710200/api/jsearch).
+2. Subscribe to the free tier (gives 50 free search calls/month).
+3. Copy the `x-rapidapi-key` and set it as `RAPIDAPI_KEY` in your environment.
+
+### 6. Authentication Setup
+- `ADMIN_USER` and `ADMIN_PASS` should be set as plaintext strings in your `.env.local` file (e.g. `ADMIN_USER="admin"` and `ADMIN_PASS="secret123"`). These credentials protect the `/admin` path.
+
+### 7. Environment Verification Script
+Validate your environment variables locally at any time by running:
+```bash
+npm run check-env
+```
