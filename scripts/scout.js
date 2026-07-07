@@ -56,7 +56,7 @@ async function getExistingJobIds(sheets, auth) {
 async function fetchInternshalaJobs() {
   const jobs = [];
   const categories = ['digital-marketing', 'marketing', 'product-management', 'content-writing'];
-  const cities = ['hyderabad', 'bangalore'];
+  const cities = ['hyderabad'];
   const headers = {
     'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -317,7 +317,6 @@ CANDIDATE:
 Name: ${profile.name}
 Target Roles: ${profile.target_roles.join(', ')}
 Base: Hyderabad, India
-Open to relocation: YES — willing to move globally if role provides accommodation/relocation support
 Experience: ${profile.experience_level} — 0 full-time years
 Key Metrics: ${profile.key_metrics.join(' | ')}
 Skills: ${profile.skills.join(', ')}
@@ -328,21 +327,20 @@ Title: ${job.title}
 Company: ${job.company?.display_name || 'Unknown'}
 Location: ${location}
 ${salaryInfo}
-Relocation/Accommodation mentioned: ${hasRelocation ? 'YES ✅' : 'Not detected'}
 Description: ${desc}
 
 SCORING RULES — READ ALL:
 1. Role match (40 pts): How well does the title/description match PMM / APM / Growth / Content / FA?
-2. Fresher-friendly (25 pts): Penalise ONLY if explicitly requires 3+ years. "2 years preferred" or "1-2 years" = OK for a strong fresher.
-3. Location/relocation (20 pts): India roles score full marks. International roles with relocation/visa/accommodation support score full marks. International roles WITHOUT relocation support but FULLY REMOTE score 12/20. International roles requiring self-funded visa/move score 5/20.
+2. Fresher-friendly (25 pts): Candidate is a FRESHER (0 full-time years). Full marks only if the role is entry-level, junior, associate, or explicitly open to freshers. Penalise heavily (score 0/25) if it requires 2+ years of experience or is a mid/senior-level role.
+3. Location/relocation (20 pts): MUST be located in Hyderabad, India (on-site/hybrid) or be a fully remote role (worldwide or India). Give 20/20 for Hyderabad-based or remote roles. Give 0/20 for any other location (including other Indian cities like Bengaluru, or international locations requiring relocation).
 4. Salary (15 pts): Listed salary ≥ ₹8 LPA India or ≥ $30k USD abroad = full marks. Unlisted = 10/15 (assume standard).
 
 BONUS: Add 5–10 points if relocation/accommodation/visa is explicitly mentioned.
 
 HARD RULES:
-- DO NOT score 0 just because location is outside India — candidate wants international
-- DO NOT penalise worldwide/remote roles
-- DO score below 40 only for: clearly unrelated domain (engineering, law, medicine), or explicitly 5+ years required
+- DO NOT score above 50 if the role requires 2+ years of experience (candidate is 0 years/fresher).
+- DO NOT score above 50 if the role is located in any city other than Hyderabad, India, unless it is 100% remote.
+- DO score below 40 for: clearly unrelated domain (engineering, law, medicine), or explicitly 5+ years required.
 
 Return exactly:
 {
@@ -410,7 +408,6 @@ CANDIDATE:
 Name: ${profile.name}
 Target Roles: ${profile.target_roles.join(', ')}
 Base: Hyderabad, India
-Open to relocation: YES — willing to move globally if role provides accommodation/relocation support
 Experience: ${profile.experience_level} — 0 full-time years
 Key Metrics: ${profile.key_metrics.join(' | ')}
 Skills: ${profile.skills.join(', ')}
@@ -421,21 +418,20 @@ Title: ${job.title}
 Company: ${job.company?.display_name || 'Unknown'}
 Location: ${location}
 ${salaryInfo}
-Relocation/Accommodation mentioned: ${hasRelocation ? 'YES ✅' : 'Not detected'}
 Description: ${desc}
 
 SCORING RULES — READ ALL:
 1. Role match (40 pts): How well does the title/description match PMM / APM / Growth / Content / FA?
-2. Fresher-friendly (25 pts): Penalise ONLY if explicitly requires 3+ years. "2 years preferred" or "1-2 years" = OK for a strong fresher.
-3. Location/relocation (20 pts): India roles score full marks. International roles with relocation/visa/accommodation support score full marks. International roles WITHOUT relocation support but FULLY REMOTE score 12/20. International roles requiring self-funded visa/move score 5/20.
+2. Fresher-friendly (25 pts): Candidate is a FRESHER (0 full-time years). Full marks only if the role is entry-level, junior, associate, or explicitly open to freshers. Penalise heavily (score 0/25) if it requires 2+ years of experience or is a mid/senior-level role.
+3. Location/relocation (20 pts): MUST be located in Hyderabad, India (on-site/hybrid) or be a fully remote role (worldwide or India). Give 20/20 for Hyderabad-based or remote roles. Give 0/20 for any other location (including other Indian cities like Bengaluru, or international locations requiring relocation).
 4. Salary (15 pts): Listed salary ≥ ₹8 LPA India or ≥ $30k USD abroad = full marks. Unlisted = 10/15 (assume standard).
 
 BONUS: Add 5–10 points if relocation/accommodation/visa is explicitly mentioned.
 
 HARD RULES:
-- DO NOT score 0 just because location is outside India — candidate wants international
-- DO NOT penalise worldwide/remote roles
-- DO score below 40 only for: clearly unrelated domain (engineering, law, medicine), or explicitly 5+ years required
+- DO NOT score above 50 if the role requires 2+ years of experience (candidate is 0 years/fresher).
+- DO NOT score above 50 if the role is located in any city other than Hyderabad, India, unless it is 100% remote.
+- DO score below 40 for: clearly unrelated domain (engineering, law, medicine), or explicitly 5+ years required.
 
 Return exactly:
 {
@@ -634,10 +630,14 @@ async function main() {
     const newJobs = Array.from(deduped.values()).filter(j => !existingIds.has(String(j.id)));
     console.log(`[Scout] After dedup + seen filter: ${newJobs.length} new jobs.`);
 
-    // BLACKLIST: title-only, seniority-only. No location filtering.
-    const blacklistRegex = /\b(senior\s+(?:manager|director|engineer|developer|consultant)|director\s+of|vp\s+of|head\s+of|principal\s+\w+|staff\s+engineer|5\+?\s*years?|4\+?\s*years?|3\+?\s*years?)\b/i;
-    const prunedJobs = newJobs.filter(j => !blacklistRegex.test(j.title || ''));
-    console.log(`[Scout] After blacklist: ${prunedJobs.length} jobs to score.`);
+    // Strict Whitelist / Target roles filter
+    const whitelistRegex = /\b(product\s+marketing|product\s+manager|associate\s+product|apm|pmm|growth\s+marketing|growth\s+manager|founder'?s\s+associate|product\s+analyst|digital\s+content|marketing\s+operations|marketing\s+analyst)\b/i;
+    const targetMatchingJobs = newJobs.filter(j => whitelistRegex.test(j.title || ''));
+
+    // BLACKLIST: title-only, seniority-only + irrelevant roles.
+    const blacklistRegex = /\b(senior\s+(?:manager|director|engineer|developer|consultant)|director\s+of|vp\s+of|head\s+of|principal\s+\w+|staff\s+engineer|5\+?\s*years?|4\+?\s*years?|3\+?\s*years?|video\s+editor|graphic\s+designer|telecaller|inside\s+sales|telemarketing|sales\s+executive|customer\s+support|data\s+entry|virtual\s+assistant|executive\s+assistant|tutor|teacher|academic\s+counselor)\b/i;
+    const prunedJobs = targetMatchingJobs.filter(j => !blacklistRegex.test(j.title || ''));
+    console.log(`[Scout] After whitelist and blacklist: ${prunedJobs.length} jobs to score.`);
 
     // Prioritise: put relocation-flagged and India jobs first for scoring
     prunedJobs.sort((a, b) => {
@@ -655,13 +655,13 @@ async function main() {
       const reloFlag = job.has_relocation ? ' 🌍' : '';
       console.log(`  [Score] "${job.title}" @ ${job.company?.display_name} [${job.location}]${reloFlag} → ${score}/100`);
 
-      if (score >= 60) scoredMatches.push({ job, scoreData });
+      if (score >= 90) scoredMatches.push({ job, scoreData });
       await delay(2500);
     }
 
     scoredMatches.sort((a, b) => b.scoreData.score - a.scoreData.score);
     const topMatches = scoredMatches.slice(0, 5);
-    console.log(`[Scout] Scored ${jobsToScore.length} → ${topMatches.length} matched ≥60.`);
+    console.log(`[Scout] Scored ${jobsToScore.length} → ${topMatches.length} matched ≥90.`);
 
     if (topMatches.length > 0) {
       const dateStr = new Date().toISOString().split('T')[0];
