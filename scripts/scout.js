@@ -484,7 +484,7 @@ async function scoreJobWithGrok(job, profile, apiKey) {
           'Authorization': `Bearer ${apiKey}`
         },
         body: JSON.stringify({
-          model: 'grok-2-latest',
+          model: 'grok-beta',
           messages: [{ role: 'user', content: prompt }],
           temperature: 0.1,
           response_format: { type: 'json_object' }
