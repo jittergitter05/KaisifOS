@@ -6,6 +6,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Terminal, Cpu, Zap, Radar, Orbit, MailCheck, BriefcaseBusiness, TrendingUp, Users } from 'lucide-react';
 import { siteConfig } from '@/config/site';
+import SecretTrigger from '@/components/SecretTrigger';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -17,7 +18,9 @@ export default async function Home() {
         <div className="flex flex-col flex-1 w-full bg-slate-950 text-slate-50 font-sans selection:bg-emerald-500/30">
             <header className="h-16 border-b border-slate-800 px-8 flex items-center justify-between bg-slate-950/80 backdrop-blur-md shrink-0">
                 <div className="flex items-center space-x-4">
-                    <Cpu className="h-6 w-6 text-emerald-500" />
+                    <SecretTrigger>
+                        <Cpu className="h-6 w-6 text-emerald-500" />
+                    </SecretTrigger>
                     <div className="flex items-center gap-3">
                         <h1 className="text-lg font-bold tracking-tight">{siteConfig.name}</h1>
                         <span className="px-2 py-0.5 rounded-full bg-slate-800 text-[10px] text-slate-400 border border-slate-700 tracking-wider">PUBLIC</span>

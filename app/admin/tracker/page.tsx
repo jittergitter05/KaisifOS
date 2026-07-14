@@ -5,6 +5,7 @@ import MetricBar from '@/components/MetricBar';
 import Link from 'next/link';
 import dynamic from 'next/dynamic';
 import { motion } from 'motion/react';
+import { RefreshCw } from 'lucide-react';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 
@@ -25,7 +26,9 @@ export default function TrackerPage() {
 
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const fetchJobs = () => {
+    setLoading(true);
+    setError(null);
     fetch('/api/sheet-sync')
       .then(async res => {
         if (res.status === 401) {
@@ -50,6 +53,10 @@ export default function TrackerPage() {
         setError('Failed to load tracker data. Please check your connection.');
         setLoading(false);
       });
+  };
+
+  useEffect(() => {
+    fetchJobs();
   }, []);
 
   const updateStatus = async (rowId: number, newStatus: string) => {
@@ -242,6 +249,9 @@ export default function TrackerPage() {
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-4 py-2 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 transition-colors"
               />
             </div>
+            <Button onClick={fetchJobs} disabled={loading} variant="outline" size="icon" className="shrink-0 bg-slate-900 border-slate-800 hover:bg-slate-800 text-slate-400">
+              <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin text-emerald-500' : ''}`} />
+            </Button>
           </div>
 
           <div className="rounded-md border border-slate-800 mt-4 overflow-hidden">
