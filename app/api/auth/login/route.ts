@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { signToken } from '@/lib/auth';
 
 export async function POST(req: NextRequest) {
   try {
@@ -13,7 +14,8 @@ export async function POST(req: NextRequest) {
 
     if (username === adminUser && password === adminPass) {
       const response = NextResponse.json({ success: true }, { status: 200 });
-      response.cookies.set('kaisifos_auth', 'authenticated', {
+      const token = await signToken();
+      response.cookies.set('kaisifos_auth', token, {
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
         sameSite: 'strict',

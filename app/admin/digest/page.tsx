@@ -53,7 +53,7 @@ export default function DigestPage() {
   }, []);
 
   return (
-    <div className="flex flex-col flex-1 w-full bg-slate-900 text-slate-50">
+    <div className="flex flex-col flex-1 w-full bg-slate-950 text-slate-50">
       <motion.main 
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
@@ -66,7 +66,7 @@ export default function DigestPage() {
         </div>
         {loading ? <div className="text-center py-12 text-slate-500 font-mono text-xs">Loading today&apos;s matches...</div> :
          error ? <div className="text-center py-12 text-slate-500 font-mono text-xs text-red-400">{error}</div> :
-         jobs.length === 0 ? <div className="text-center py-12 bg-slate-900 rounded-xl shadow-sm border border-slate-800 text-slate-400 gap-4 flex flex-col items-center"><p className="text-sm font-medium text-white">No top matches found today.</p><p className="text-[10px] font-mono text-slate-500 tracking-wider">Cron will run again tomorrow at 08:00 UTC</p></div> :
+         jobs.length === 0 ? <div className="text-center py-12 bg-slate-950 rounded-xl shadow-sm border border-slate-800 text-slate-400 gap-4 flex flex-col items-center"><p className="text-sm font-medium text-white">No top matches found today.</p><p className="text-[10px] font-mono text-slate-500 tracking-wider">Cron will run again tomorrow at 08:00 UTC</p></div> :
          <div className="space-y-6 pb-12">{jobs.map(job => <JobCard key={job.rowId} job={job} />)}</div>}
       </motion.main>
     </div>

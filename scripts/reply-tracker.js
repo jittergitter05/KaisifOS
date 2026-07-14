@@ -3,6 +3,22 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+export function groupCompanies(rows) {
+  const pendingRows = [];
+  const lowerCompanies = new Map();
+  rows.forEach((row, index) => {
+    if (row[10] === 'APPLIED' && row[3]) {
+      pendingRows.push({ row, index });
+      const companyLowerCase = row[3].toLowerCase();
+      if (!lowerCompanies.has(companyLowerCase)) {
+        lowerCompanies.set(companyLowerCase, []);
+      }
+      lowerCompanies.get(companyLowerCase).push(index);
+    }
+  });
+  return { pendingRows, lowerCompanies };
+}
+
 function getAuthWithoutSubject() {
   if (!process.env.GOOGLE_SERVICE_KEY_BASE64) {
        throw new Error('Missing GOOGLE_SERVICE_KEY_BASE64');
@@ -22,9 +38,9 @@ function getAuth() {
   return new google.auth.GoogleAuth({
     credentials,
     scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/gmail.readonly'],
-    clientOptions: {
+    clientOptions: process.env.GMAIL_USER_EMAIL ? {
       subject: process.env.GMAIL_USER_EMAIL, 
-    }
+    } : undefined
   });
 }
 
@@ -32,11 +48,15 @@ async function sendDiscordAlert(content) {
   const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
   if (!webhookUrl) return;
   
-  await fetch(webhookUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content: content.substring(0, 2000) }),
-  });
+  try {
+    await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: content.substring(0, 2000) }),
+    });
+  } catch (err) {
+    console.error('[Discord] Alert failed:', err.message);
+  }
 }
 
 async function main() {
@@ -64,16 +84,7 @@ async function main() {
       return;
     }
     
-    const pendingRows = [];
-    const lowerCompanies = new Map();
-    
-    rows.forEach((row, index) => {
-      if (row[10] === 'APPLIED' && row[3]) {
-        pendingRows.push({ row, index });
-        lowerCompanies.set(row[3].toLowerCase(), index);
-      }
-    });
-    
+    const { pendingRows, lowerCompanies } = groupCompanies(rows);
     if (pendingRows.length === 0) return;
     
     let listRes;
@@ -108,17 +119,20 @@ async function main() {
        const lowerFrom = from.toLowerCase();
        const lowerSubj = subject.toLowerCase();
        
-       for (const [companyLowerCase, rowIndex] of lowerCompanies.entries()) {
-          if (!matchedIndices.has(rowIndex)) {
-             if (lowerFrom.includes(companyLowerCase) || lowerSubj.includes(companyLowerCase)) {
-                matchedIndices.add(rowIndex);
-                hits.push({
-                   rowIndex,
-                   company: pendingRows.find(p => p.index === rowIndex).row[3],
-                   from,
-                   subject,
-                   dateStr
-                });
+       for (const [companyLowerCase, indices] of lowerCompanies.entries()) {
+          const matchFound = lowerFrom.includes(companyLowerCase) || lowerSubj.includes(companyLowerCase);
+          if (matchFound) {
+             for (const rowIndex of indices) {
+                if (!matchedIndices.has(rowIndex)) {
+                   matchedIndices.add(rowIndex);
+                   hits.push({
+                      rowIndex,
+                      company: pendingRows.find(p => p.index === rowIndex).row[3],
+                      from,
+                      subject,
+                      dateStr
+                   });
+                }
              }
           }
        }
@@ -128,26 +142,35 @@ async function main() {
       const today = new Date().toISOString().split('T')[0];
       for (const hit of hits) {
          const rowToUpdate = hit.rowIndex + 1; 
-         await sheets.spreadsheets.values.update({
-            auth,
-            spreadsheetId,
-            range: `Sheet1!K${rowToUpdate}:L${rowToUpdate}`,
-            valueInputOption: 'USER_ENTERED',
-            requestBody: {
-              values: [['REPLIED', today]]
-            }
-         });
-         const alertMsg = `📩 REPLY DETECTED\nCompany: ${hit.company}\nFrom: ${hit.from}\nSubject: ${hit.subject}\nDate: ${hit.dateStr}\n→ Update your tracker and respond within 2 hours.`;
-         await sendDiscordAlert(alertMsg);
+         try {
+           await sheets.spreadsheets.values.update({
+              auth,
+              spreadsheetId,
+              range: `Sheet1!K${rowToUpdate}:L${rowToUpdate}`,
+              valueInputOption: 'USER_ENTERED',
+              requestBody: {
+                values: [['REPLIED', today]]
+              }
+           });
+           const alertMsg = `📩 REPLY DETECTED\nCompany: ${hit.company}\nFrom: ${hit.from}\nSubject: ${hit.subject}\nDate: ${hit.dateStr}\n→ Update your tracker and respond within 2 hours.`;
+           await sendDiscordAlert(alertMsg);
+         } catch (updateErr) {
+           console.error(`[Sheets] Failed to update row for ${hit.company}:`, updateErr.message);
+         }
       }
     } 
   } catch (error) {
     const errorMessage = error.stack || error.message || String(error);
     const safeError = errorMessage.substring(0, 1500);
+    console.error(`[Reply Tracker Error] ${errorMessage}`);
     const payload = `🚨 **Reply Tracker Failed** 🚨\n\n**Error Trace:**\n\`\`\`js\n${safeError}\n\`\`\``;
     await sendDiscordAlert(payload);
     process.exit(1);
   }
 }
 
-main();
+import { fileURLToPath } from 'url';
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main();
+}

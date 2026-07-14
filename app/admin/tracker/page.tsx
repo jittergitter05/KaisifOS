@@ -5,6 +5,8 @@ import MetricBar from '@/components/MetricBar';
 import Link from 'next/link';
 import dynamic from 'next/dynamic';
 import { motion } from 'motion/react';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Button } from '@/components/ui/button';
 
 const ClientChart = dynamic(() => import('@/components/ClientChart'), { ssr: false });
 
@@ -242,57 +244,59 @@ export default function TrackerPage() {
             </div>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse min-w-[700px]">
-              <thead className="text-[10px] text-slate-500 uppercase tracking-wider bg-slate-950/50 sticky top-0 z-10">
-                <tr className="border-b border-slate-800">
-                  <th className="px-6 py-3 font-semibold cursor-pointer group hover:text-slate-300 transition-colors" onClick={() => toggleSort('date')}>
+          <div className="rounded-md border border-slate-800 mt-4 overflow-hidden">
+            <Table>
+              <TableHeader className="bg-slate-900/50">
+                <TableRow>
+                  <TableHead className="w-[120px] cursor-pointer group hover:text-slate-300 transition-colors" onClick={() => toggleSort('date')}>
                     Date <SortIcon field="date" />
-                  </th>
-                  <th className="px-6 py-3 font-semibold cursor-pointer group hover:text-slate-300 transition-colors" onClick={() => toggleSort('company')}>
+                  </TableHead>
+                  <TableHead className="cursor-pointer group hover:text-slate-300 transition-colors" onClick={() => toggleSort('company')}>
                     Company / Role <SortIcon field="company" />
-                  </th>
-                  <th className="px-6 py-3 font-semibold cursor-pointer group hover:text-slate-300 transition-colors" onClick={() => toggleSort('score')}>
-                    Match Score <SortIcon field="score" />
-                  </th>
-                  <th className="px-6 py-3 font-semibold text-center">Status</th>
-                  <th className="px-6 py-3 font-semibold text-right">Action</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800">
+                  </TableHead>
+                  <TableHead className="cursor-pointer group hover:text-slate-300 transition-colors" onClick={() => toggleSort('score')}>
+                    Match <SortIcon field="score" />
+                  </TableHead>
+                  <TableHead className="text-center">Status</TableHead>
+                  <TableHead className="text-right">Action</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {loading ? (
-                  <tr><td colSpan={5} className="px-6 py-12 text-center text-sm font-mono text-slate-500">Loading tracker data...</td></tr>
+                  <TableRow><TableCell colSpan={5} className="h-24 text-center text-sm font-mono text-slate-500">Loading tracker data...</TableCell></TableRow>
                 ) : error ? (
-                  <tr><td colSpan={5} className="px-6 py-12 text-center text-sm font-mono text-red-400">{error}</td></tr>
+                  <TableRow><TableCell colSpan={5} className="h-24 text-center text-sm font-mono text-red-400">{error}</TableCell></TableRow>
                 ) : filteredJobs.length === 0 ? (
-                  <tr><td colSpan={5} className="px-6 py-12 text-center text-sm font-mono text-slate-500">No jobs found.</td></tr>
+                  <TableRow><TableCell colSpan={5} className="h-24 text-center text-sm font-mono text-slate-500">No jobs found.</TableCell></TableRow>
                 ) : (
                   filteredJobs.map((job) => (
-                    <tr key={job.rowId} className="hover:bg-slate-800/50 transition-colors">
-                      <td className="px-6 py-4 whitespace-nowrap text-xs text-slate-500 font-mono">{job.date}</td>
-                      <td className="px-6 py-4">
-                        <div className="text-sm font-medium text-white">{job.company}</div>
+                    <TableRow key={job.rowId}>
+                      <TableCell className="font-mono text-xs text-slate-500">{job.date}</TableCell>
+                      <TableCell>
+                        <div className="font-medium text-slate-200">{job.company}</div>
                         <div className="text-xs text-slate-500">{job.title}</div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap"><MetricBar score={job.score} /></td>
-                      <td className="px-6 py-4 whitespace-nowrap text-center">
+                      </TableCell>
+                      <TableCell><MetricBar score={job.score} /></TableCell>
+                      <TableCell className="text-center relative">
                         <select 
                           value={job.status} 
                           onChange={(e) => updateStatus(job.rowId, e.target.value)}
-                          className="bg-transparent text-xs font-bold uppercase focus:ring-0 cursor-pointer p-1 rounded opacity-0 absolute w-16 -ml-4 z-20"
+                          className="bg-transparent text-xs font-bold uppercase focus:ring-0 cursor-pointer p-1 rounded opacity-0 absolute inset-0 z-20 w-full"
                         >
                            {['NEW', 'APPLIED', 'REPLIED', 'INTERVIEW', 'REJECTED', 'IGNORED'].map(s => <option className="bg-slate-900 text-slate-500" key={s} value={s}>{s}</option>)}
                         </select>
                         <div className="relative z-10 inline-flex items-center justify-center"><StatusBadge status={job.status} /></div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-right">
-                        <a href={job.url} target="_blank" rel="noreferrer" className="text-emerald-500 hover:text-emerald-400 text-xs hover:underline transition-colors">Open &nearr;</a>
-                      </td>
-                    </tr>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Button asChild variant="ghost" size="sm" className="text-emerald-500 hover:text-emerald-400">
+                          <a href={job.url} target="_blank" rel="noreferrer">Open &nearr;</a>
+                        </Button>
+                      </TableCell>
+                    </TableRow>
                   ))
                 )}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
           </div>
         </div>
       </motion.main>

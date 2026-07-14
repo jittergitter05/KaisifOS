@@ -11,7 +11,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
-const stripHtmlTags = (input) => {
+export const stripHtmlTags = (input) => {
   if (!input) return '';
   let output = input;
   let previous;
@@ -21,6 +21,82 @@ const stripHtmlTags = (input) => {
   } while (output !== previous);
   return output;
 };
+
+// ─── PROMPT GENERATOR ────────────────────────────────────────────────────────
+
+export function buildPrompt(job, profile) {
+  const desc = (job.description || '').substring(0, 600);
+  const location = job.location || 'Not specified';
+  const salaryInfo = job.salary_min
+    ? `Min salary: ${job.salary_min} ${job.salary_max ? `- ${job.salary_max}` : ''}` 
+    : 'Salary: Not listed';
+
+  const expYears = profile.experience_years;
+  const isFresher = expYears === 0;
+  
+  // Relocation logic based on profile
+  const willRelocate = profile.open_to_relocation;
+  const targetCities = profile.target_cities.join(', ');
+  let locationRule = '';
+  if (willRelocate) {
+    locationRule = `3. Location (20 pts): Candidate is open to relocation globally (especially ${profile.relocation_preference?.preferred_regions?.join(', ')}). Give 20/20 for remote roles OR roles anywhere they are willing to relocate. Give 0/20 ONLY if the role explicitly forbids their relocation or is in an undesired location.`;
+  } else {
+    locationRule = `3. Location (20 pts): MUST be located in ${targetCities} (on-site/hybrid) or fully remote. Give 0/20 for any other location requiring relocation.`;
+  }
+
+  // Experience logic
+  let expRule = '';
+  let hardExpRule = '';
+  if (isFresher) {
+    expRule = `2. Experience match (25 pts): Candidate is a FRESHER (0 full-time years). Full marks only if the role is entry-level, junior, associate, or open to freshers. Penalise heavily (score 0/25) if it requires 2+ years of experience.`;
+    hardExpRule = `- DO NOT score above 50 if the role explicitly requires 2+ years of experience.`;
+  } else {
+    expRule = `2. Experience match (25 pts): Candidate has ${expYears} years of experience. Score based on how well this matches the role's requirements.`;
+    hardExpRule = `- DO NOT score above 50 if the role requires significantly more experience than ${expYears} years.`;
+  }
+
+  return `You are a recruiting AI. Score this job for this specific candidate.
+Return ONLY valid JSON. No markdown. No explanation. No code fences.
+
+CANDIDATE:
+Name: ${profile.name}
+Target Roles: ${profile.target_roles.join(', ')}
+Base: ${targetCities}
+Experience: ${profile.experience_level} — ${expYears} years
+Key Metrics: ${profile.key_metrics.join(' | ')}
+Skills: ${profile.skills.join(', ')}
+Min Salary: ₹${profile.min_salary_lpa} LPA India / $${profile.min_salary_usd_annual || 30000} USD abroad
+
+JOB:
+Title: ${job.title}
+Company: ${job.company?.display_name || 'Unknown'}
+Location: ${location}
+${salaryInfo}
+Description: ${desc}
+
+SCORING RULES — READ ALL:
+1. Role match (40 pts): How well does the title/description match ${profile.target_roles.slice(0,4).join('/')}?
+${expRule}
+${locationRule}
+4. Salary (15 pts): Listed salary ≥ ₹${profile.min_salary_lpa} LPA India or ≥ $${profile.min_salary_usd_annual} USD abroad = full marks. Unlisted = 10/15 (assume standard).
+
+BONUS: Add 5–10 points if relocation/accommodation/visa is explicitly mentioned.
+
+HARD RULES:
+${hardExpRule}
+- DO score below 40 for: clearly unrelated domain (engineering, law, medicine), or irrelevant seniority.
+
+Return exactly:
+{
+  "score": <integer 0-100>,
+  "match_reasons": ["reason 1", "reason 2", "reason 3"],
+  "gap": "one line on the biggest risk or weakness for this specific role",
+  "dm_draft": "3-sentence LinkedIn DM opening with the strongest matching metric from candidate profile",
+  "resume_angle": "which specific candidate metric to lead with for THIS role",
+  "relocation_note": "brief note on relocation/accommodation situation for this role, or 'N/A if local'"
+}`;
+}
+
 
 // ─── AUTH ────────────────────────────────────────────────────────────────────
 
@@ -47,16 +123,17 @@ async function getExistingJobIds(sheets, auth) {
     return new Set(rows.map((row) => String(row[0])));
   } catch (error) {
     console.error('[Sheets] Error fetching existing IDs:', error.message);
-    return new Set();
+    throw new Error(`Failed to fetch existing job IDs: ${error.message}`);
   }
 }
 
 // ─── SOURCE 1: INTERNSHALA (India-specific, fresher-focused) ─────────────────
 
-async function fetchInternshalaJobs() {
+async function fetchInternshalaJobs(profile) {
   const jobs = [];
   const categories = ['digital-marketing', 'marketing', 'product-management', 'content-writing'];
-  const cities = ['hyderabad'];
+  let cities = profile?.target_cities?.map(c => c.toLowerCase().replace('bengaluru', 'bangalore')) || [];
+  if (cities.length === 0) cities = ['bangalore', 'hyderabad', 'delhi', 'mumbai'];
   const headers = {
     'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -302,55 +379,9 @@ async function fetchJSearchJobs(profile) {
 // Global state for fallback tracking
 global.groqFailed = false;
 
-async function scoreJobWithGemini(job, profile, apiKey) {
-  const desc = (job.description || '').substring(0, 600);
-  const hasRelocation = job.has_relocation || false;
-  const location = job.location || 'Not specified';
-  const salaryInfo = job.salary_min
-    ? `Min salary: ${job.salary_min} ${job.salary_max ? `- ${job.salary_max}` : ''}` 
-    : 'Salary: Not listed';
+export async function scoreJobWithGemini(job, profile, apiKey) {
+  const prompt = buildPrompt(job, profile);
 
-  const prompt = `You are a recruiting AI. Score this job for this specific candidate.
-Return ONLY valid JSON. No markdown. No explanation. No code fences.
-
-CANDIDATE:
-Name: ${profile.name}
-Target Roles: ${profile.target_roles.join(', ')}
-Base: Hyderabad, India
-Experience: ${profile.experience_level} — 0 full-time years
-Key Metrics: ${profile.key_metrics.join(' | ')}
-Skills: ${profile.skills.join(', ')}
-Min Salary: ₹${profile.min_salary_lpa} LPA India / $${profile.min_salary_usd_annual || 30000} USD abroad
-
-JOB:
-Title: ${job.title}
-Company: ${job.company?.display_name || 'Unknown'}
-Location: ${location}
-${salaryInfo}
-Description: ${desc}
-
-SCORING RULES — READ ALL:
-1. Role match (40 pts): How well does the title/description match PMM / APM / Growth / Content / FA?
-2. Fresher-friendly (25 pts): Candidate is a FRESHER (0 full-time years). Full marks only if the role is entry-level, junior, associate, or explicitly open to freshers. Penalise heavily (score 0/25) if it requires 2+ years of experience or is a mid/senior-level role.
-3. Location/relocation (20 pts): MUST be located in Hyderabad, India (on-site/hybrid) or be a fully remote role (worldwide or India). Give 20/20 for Hyderabad-based or remote roles. Give 0/20 for any other location (including other Indian cities like Bengaluru, or international locations requiring relocation).
-4. Salary (15 pts): Listed salary ≥ ₹8 LPA India or ≥ $30k USD abroad = full marks. Unlisted = 10/15 (assume standard).
-
-BONUS: Add 5–10 points if relocation/accommodation/visa is explicitly mentioned.
-
-HARD RULES:
-- DO NOT score above 50 if the role requires 2+ years of experience (candidate is 0 years/fresher).
-- DO NOT score above 50 if the role is located in any city other than Hyderabad, India, unless it is 100% remote.
-- DO score below 40 for: clearly unrelated domain (engineering, law, medicine), or explicitly 5+ years required.
-
-Return exactly:
-{
-  "score": <integer 0-100>,
-  "match_reasons": ["reason 1", "reason 2", "reason 3"],
-  "gap": "one line on the biggest risk or weakness for this specific role",
-  "dm_draft": "3-sentence LinkedIn DM opening with the strongest matching metric from candidate profile",
-  "resume_angle": "which specific candidate metric to lead with for THIS role",
-  "relocation_note": "brief note on relocation/accommodation situation for this role, or 'N/A if India-based'"
-}`;
 
   let retries = 3;
   let backoff = 4000;
@@ -393,55 +424,9 @@ Return exactly:
   return { score: 0 };
 }
 
-async function scoreJobWithGroq(job, profile, groq) {
-  const desc = (job.description || '').substring(0, 600);
-  const hasRelocation = job.has_relocation || false;
-  const location = job.location || 'Not specified';
-  const salaryInfo = job.salary_min
-    ? `Min salary: ${job.salary_min} ${job.salary_max ? `- ${job.salary_max}` : ''}` 
-    : 'Salary: Not listed';
+export async function scoreJobWithGroq(job, profile, groq) {
+  const prompt = buildPrompt(job, profile);
 
-  const prompt = `You are a recruiting AI. Score this job for this specific candidate.
-Return ONLY valid JSON. No markdown. No explanation. No code fences.
-
-CANDIDATE:
-Name: ${profile.name}
-Target Roles: ${profile.target_roles.join(', ')}
-Base: Hyderabad, India
-Experience: ${profile.experience_level} — 0 full-time years
-Key Metrics: ${profile.key_metrics.join(' | ')}
-Skills: ${profile.skills.join(', ')}
-Min Salary: ₹${profile.min_salary_lpa} LPA India / $${profile.min_salary_usd_annual || 30000} USD abroad
-
-JOB:
-Title: ${job.title}
-Company: ${job.company?.display_name || 'Unknown'}
-Location: ${location}
-${salaryInfo}
-Description: ${desc}
-
-SCORING RULES — READ ALL:
-1. Role match (40 pts): How well does the title/description match PMM / APM / Growth / Content / FA?
-2. Fresher-friendly (25 pts): Candidate is a FRESHER (0 full-time years). Full marks only if the role is entry-level, junior, associate, or explicitly open to freshers. Penalise heavily (score 0/25) if it requires 2+ years of experience or is a mid/senior-level role.
-3. Location/relocation (20 pts): MUST be located in Hyderabad, India (on-site/hybrid) or be a fully remote role (worldwide or India). Give 20/20 for Hyderabad-based or remote roles. Give 0/20 for any other location (including other Indian cities like Bengaluru, or international locations requiring relocation).
-4. Salary (15 pts): Listed salary ≥ ₹8 LPA India or ≥ $30k USD abroad = full marks. Unlisted = 10/15 (assume standard).
-
-BONUS: Add 5–10 points if relocation/accommodation/visa is explicitly mentioned.
-
-HARD RULES:
-- DO NOT score above 50 if the role requires 2+ years of experience (candidate is 0 years/fresher).
-- DO NOT score above 50 if the role is located in any city other than Hyderabad, India, unless it is 100% remote.
-- DO score below 40 for: clearly unrelated domain (engineering, law, medicine), or explicitly 5+ years required.
-
-Return exactly:
-{
-  "score": <integer 0-100>,
-  "match_reasons": ["reason 1", "reason 2", "reason 3"],
-  "gap": "one line on the biggest risk or weakness for this specific role",
-  "dm_draft": "3-sentence LinkedIn DM opening with the strongest matching metric from candidate profile",
-  "resume_angle": "which specific candidate metric to lead with for THIS role",
-  "relocation_note": "brief note on relocation/accommodation situation for this role, or 'N/A if India-based'"
-}`;
 
   let retries = 3;
   let backoff = 4000;
@@ -484,53 +469,8 @@ Return exactly:
 }
 
 async function scoreJobWithGrok(job, profile, apiKey) {
-  const desc = (job.description || '').substring(0, 600);
-  const location = job.location || 'Not specified';
-  const salaryInfo = job.salary_min
-    ? `Min salary: ${job.salary_min} ${job.salary_max ? `- ${job.salary_max}` : ''}` 
-    : 'Salary: Not listed';
+  const prompt = buildPrompt(job, profile);
 
-  const prompt = `You are a recruiting AI. Score this job for this specific candidate.
-Return ONLY valid JSON. No markdown. No explanation. No code fences.
-
-CANDIDATE:
-Name: ${profile.name}
-Target Roles: ${profile.target_roles.join(', ')}
-Base: Hyderabad, India
-Experience: ${profile.experience_level} — 0 full-time years
-Key Metrics: ${profile.key_metrics.join(' | ')}
-Skills: ${profile.skills.join(', ')}
-Min Salary: ₹${profile.min_salary_lpa} LPA India / $${profile.min_salary_usd_annual || 30000} USD abroad
-
-JOB:
-Title: ${job.title}
-Company: ${job.company?.display_name || 'Unknown'}
-Location: ${location}
-${salaryInfo}
-Description: ${desc}
-
-SCORING RULES — READ ALL:
-1. Role match (40 pts): How well does the title/description match PMM / APM / Growth / Content / FA?
-2. Fresher-friendly (25 pts): Candidate is a FRESHER (0 full-time years). Full marks only if the role is entry-level, junior, associate, or explicitly open to freshers. Penalise heavily (score 0/25) if it requires 2+ years of experience or is a mid/senior-level role.
-3. Location/relocation (20 pts): MUST be located in Hyderabad, India (on-site/hybrid) or be a fully remote role (worldwide or India). Give 20/20 for Hyderabad-based or remote roles. Give 0/20 for any other location (including other Indian cities like Bengaluru, or international locations requiring relocation).
-4. Salary (15 pts): Listed salary ≥ ₹8 LPA India or ≥ $30k USD abroad = full marks. Unlisted = 10/15 (assume standard).
-
-BONUS: Add 5–10 points if relocation/accommodation/visa is explicitly mentioned.
-
-HARD RULES:
-- DO NOT score above 50 if the role requires 2+ years of experience (candidate is 0 years/fresher).
-- DO NOT score above 50 if the role is located in any city other than Hyderabad, India, unless it is 100% remote.
-- DO score below 40 for: clearly unrelated domain (engineering, law, medicine), or explicitly 5+ years required.
-
-Return exactly:
-{
-  "score": <integer 0-100>,
-  "match_reasons": ["reason 1", "reason 2", "reason 3"],
-  "gap": "one line on the biggest risk or weakness for this specific role",
-  "dm_draft": "3-sentence LinkedIn DM opening with the strongest matching metric from candidate profile",
-  "resume_angle": "which specific candidate metric to lead with for THIS role",
-  "relocation_note": "brief note on relocation/accommodation situation for this role, or 'N/A if India-based'"
-}`;
 
   let retries = 3;
   let backoff = 4000;
@@ -669,7 +609,7 @@ async function sendDiscordDigest(matches, portfolioUrl, totalScanned, weeklyStat
 
   const date = new Date().toISOString().split('T')[0];
   let content = `📋 **KAISIF JOB DIGEST — ${date}**\n`;
-  content += `Scanned **${totalScanned}** roles today, **${matches.length}** matched ≥60\n`;
+  content += `Scanned **${totalScanned}** roles today, **${matches.length}** matched ≥90\n`;
   content += `───────────────────────────────\n`;
 
   if (matches.length > 0) {
@@ -687,20 +627,24 @@ async function sendDiscordDigest(matches, portfolioUrl, totalScanned, weeklyStat
       content += `🔗 <${m.job.redirect_url}>\n`;
     });
   } else {
-    content += `\n_No roles crossed 60 today._\nSources: Internshala + RemoteOK + Remotive${process.env.RAPIDAPI_KEY ? ' + JSearch' : ''}\n`;
+    content += `\n_No roles crossed 90 today._\nSources: Internshala + RemoteOK + Remotive${process.env.RAPIDAPI_KEY ? ' + JSearch' : ''}\n`;
   }
 
   if (weeklyStats) {
     content += `\n📊 **WEEKLY** Total matches stored: **${weeklyStats.weekMatches}**`;
   }
 
-  const res = await fetch(webhookUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content: content.substring(0, 2000) }),
-  });
-  if (!res.ok) console.error('[Discord] Send failed:', res.status);
-  else console.log('[Discord] Digest sent.');
+  try {
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: content.substring(0, 2000) }),
+    });
+    if (!res.ok) console.error('[Discord] Send failed:', res.status);
+    else console.log('[Discord] Digest sent.');
+  } catch (err) {
+    console.error('[Discord] Request failed:', err.message);
+  }
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
@@ -721,7 +665,7 @@ async function main() {
 
     // Fetch all sources in parallel
     const [rawInternshala, rawRemoteOK, rawRemotive, rawJSearch] = await Promise.all([
-      fetchInternshalaJobs(),
+      fetchInternshalaJobs(profile),
       fetchRemoteOKJobs(),
       fetchRemotiveJobs(),
       fetchJSearchJobs(profile),
@@ -738,8 +682,10 @@ async function main() {
     const newJobs = Array.from(deduped.values()).filter(j => !existingIds.has(String(j.id)));
     console.log(`[Scout] After dedup + seen filter: ${newJobs.length} new jobs.`);
 
-    // Strict Whitelist / Target roles filter
-    const whitelistRegex = /\b(product\s+marketing|product\s+manager|associate\s+product|apm|pmm|growth\s+marketing|growth\s+manager|founder'?s\s+associate|product\s+analyst|digital\s+content|marketing\s+operations|marketing\s+analyst)\b/i;
+    // Dynamic Whitelist / Target roles filter
+    const roleKeywords = profile.target_roles.map(r => r.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/)).flat().filter(w => w.length > 3);
+    roleKeywords.push('apm', 'pmm'); // Common acronyms
+    const whitelistRegex = new RegExp(`\\b(${roleKeywords.join('|')})\\b`, 'i');
     const targetMatchingJobs = newJobs.filter(j => whitelistRegex.test(j.title || ''));
 
     // BLACKLIST: title-only, seniority-only + irrelevant roles.
@@ -795,7 +741,7 @@ async function main() {
 
     await sendDiscordDigest(
       topMatches,
-      profile.portfolio || 'https://portjitterglitter.vercel.app',
+      profile.portfolio || process.env.APP_URL || 'No portfolio linked',
       jobsToScore.length,
       weeklyStats
     );
@@ -817,4 +763,6 @@ async function main() {
   }
 }
 
-main();
+if (process.argv[1] === __filename) {
+  main();
+}

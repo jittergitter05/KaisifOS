@@ -1,6 +1,7 @@
 import { google } from 'googleapis'
 import { NextRequest, NextResponse } from 'next/server'
 import { cookies } from 'next/headers';
+import { verifyToken } from '@/lib/auth';
 
 async function getAuth() {
   const credentials = JSON.parse(
@@ -22,7 +23,7 @@ export async function GET(request: NextRequest) {
   if (!isPublic) {
     const cookieStore = cookies();
     const authCookie = cookieStore.get('kaisifos_auth');
-    if (!authCookie || authCookie.value !== 'authenticated') {
+    if (!authCookie || !(await verifyToken(authCookie.value))) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
   }
@@ -101,7 +102,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const cookieStore = cookies();
   const authCookie = cookieStore.get('kaisifos_auth');
-  if (!authCookie || authCookie.value !== 'authenticated') {
+  if (!authCookie || !(await verifyToken(authCookie.value))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
