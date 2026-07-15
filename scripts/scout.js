@@ -127,6 +127,44 @@ async function getExistingJobIds(sheets, auth) {
   }
 }
 
+async function getSeenJobIds(sheets, auth) {
+  try {
+    const response = await sheets.spreadsheets.values.get({
+      auth,
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      range: 'SeenJobs!A:A',
+    });
+    const rows = response.data.values;
+    if (!rows || rows.length === 0) return new Set();
+    return new Set(rows.map((row) => String(row[0])));
+  } catch (error) {
+    // If the SeenJobs tab doesn't exist yet, return empty set
+    if (error?.code === 400 || error?.message?.includes('Unable to parse range')) {
+      console.warn('[Sheets] SeenJobs tab not found — starting fresh.');
+      return new Set();
+    }
+    console.error('[Sheets] Error fetching seen IDs:', error.message);
+    throw new Error(`Failed to fetch seen job IDs: ${error.message}`);
+  }
+}
+
+async function appendSeenJobIds(sheets, auth, ids) {
+  if (!ids || ids.length === 0) return;
+  const rows = ids.map((id) => [String(id)]);
+  try {
+    await sheets.spreadsheets.values.append({
+      auth,
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      range: 'SeenJobs!A:A',
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: rows },
+    });
+  } catch (error) {
+    console.error('[Sheets] Error appending seen IDs:', error.message);
+    throw new Error(`Failed to append seen job IDs: ${error.message}`);
+  }
+}
+
 // ─── SOURCE 1: INTERNSHALA (India-specific, fresher-focused) ─────────────────
 
 async function fetchInternshalaJobs(profile) {
@@ -660,8 +698,8 @@ async function main() {
 
     const auth = await getAuth();
     const sheets = google.sheets('v4');
-    const existingIds = await getExistingJobIds(sheets, auth);
-    console.log(`[Scout] ${existingIds.size} existing job IDs in sheet.`);
+    const seenIds = await getSeenJobIds(sheets, auth);
+    console.log(`[Scout] ${seenIds.size} seen job IDs in SeenJobs tab.`);
 
     // Fetch all sources in parallel
     const [rawInternshala, rawRemoteOK, rawRemotive, rawJSearch] = await Promise.all([
@@ -679,7 +717,7 @@ async function main() {
     for (const job of rawJobs) {
       if (job.id) deduped.set(String(job.id), job);
     }
-    const newJobs = Array.from(deduped.values()).filter(j => !existingIds.has(String(j.id)));
+    const newJobs = Array.from(deduped.values()).filter(j => !seenIds.has(String(j.id)));
     console.log(`[Scout] After dedup + seen filter: ${newJobs.length} new jobs.`);
 
     // Dynamic Whitelist / Target roles filter
@@ -712,6 +750,11 @@ async function main() {
       if (score >= 90) scoredMatches.push({ job, scoreData });
       await delay(2500);
     }
+
+    // Record ALL scored job IDs to SeenJobs tab (not just matches)
+    const allScoredIds = jobsToScore.map((j) => String(j.id));
+    await appendSeenJobIds(sheets, auth, allScoredIds);
+    console.log(`[Scout] ${allScoredIds.length} job IDs appended to SeenJobs tab.`);
 
     scoredMatches.sort((a, b) => b.scoreData.score - a.scoreData.score);
     const topMatches = scoredMatches.slice(0, 5);
@@ -766,3 +809,5 @@ async function main() {
 if (process.argv[1] === __filename) {
   main();
 }
+
+export { getSeenJobIds, appendSeenJobIds };
