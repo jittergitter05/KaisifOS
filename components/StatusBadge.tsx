@@ -1,29 +1,70 @@
 import React from 'react';
 
-const STATUS_CONFIG: Record<string, string> = {
-  new: 'bg-slate-800/80 text-slate-300 border border-slate-700',
-  shortlisted: 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30',
-  applied: 'bg-blue-500/15 text-blue-400 border border-blue-500/30',
-  replied: 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30',
-  interview: 'bg-purple-500/15 text-purple-400 border border-purple-500/30',
-  offer: 'bg-amber-500/15 text-amber-400 border border-amber-500/30',
-  rejected: 'bg-red-500/15 text-red-400 border border-red-500/30',
-  withdrawn: 'bg-slate-600/20 text-slate-400 border border-slate-600/30',
-  ghosted: 'bg-slate-700/20 text-slate-500 border border-slate-700/30',
-  ignored: 'bg-slate-800/40 text-slate-500 border border-slate-800',
+const STATUS_CONFIG: Record<string, { classes: string; label: string }> = {
+  new: {
+    classes: 'text-slate-300 bg-slate-800/70 border-slate-700/80',
+    label: 'New',
+  },
+  shortlisted: {
+    classes: 'text-cyan-300 bg-cyan-950/60 border-cyan-800/60',
+    label: 'Shortlisted',
+  },
+  applied: {
+    classes: 'text-blue-300 bg-blue-950/60 border-blue-800/60',
+    label: 'Applied',
+  },
+  replied: {
+    classes: 'text-emerald-300 bg-emerald-950/60 border-emerald-800/60',
+    label: 'Replied',
+  },
+  interview: {
+    classes: 'text-violet-300 bg-violet-950/60 border-violet-800/60',
+    label: 'Interview',
+  },
+  offer: {
+    classes: 'text-amber-300 bg-amber-950/60 border-amber-700/60',
+    label: 'Offer',
+  },
+  rejected: {
+    classes: 'text-rose-300 bg-rose-950/50 border-rose-800/50',
+    label: 'Rejected',
+  },
+  withdrawn: {
+    classes: 'text-slate-400 bg-slate-900 border-slate-800',
+    label: 'Withdrawn',
+  },
+  ghosted: {
+    classes: 'text-slate-500 bg-slate-900/80 border-slate-800/80',
+    label: 'Ghosted',
+  },
+  ignored: {
+    classes: 'text-slate-500 bg-slate-900/50 border-slate-800/50',
+    label: 'Ignored',
+  },
 };
 
 export const ALL_STATUSES = [
-  'NEW', 'SHORTLISTED', 'APPLIED', 'REPLIED', 'INTERVIEW',
-  'OFFER', 'REJECTED', 'WITHDRAWN', 'GHOSTED', 'IGNORED',
+  'NEW',
+  'SHORTLISTED',
+  'APPLIED',
+  'REPLIED',
+  'INTERVIEW',
+  'OFFER',
+  'REJECTED',
+  'WITHDRAWN',
+  'GHOSTED',
+  'IGNORED',
 ];
 
 export default function StatusBadge({ status }: { status: string }) {
-  const classes = STATUS_CONFIG[status.toLowerCase()] || STATUS_CONFIG.new;
+  const key = (status || 'new').toLowerCase();
+  const cfg = STATUS_CONFIG[key] || STATUS_CONFIG.new;
 
   return (
-    <span className={`px-2 py-0.5 inline-flex text-[10px] font-bold uppercase rounded ${classes}`}>
-      {status}
+    <span
+      className={`px-2 py-0.5 inline-flex items-center text-[11px] font-medium rounded border whitespace-nowrap shrink-0 ${cfg.classes}`}
+    >
+      {cfg.label}
     </span>
   );
 }

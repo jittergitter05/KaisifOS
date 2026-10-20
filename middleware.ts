@@ -1,24 +1,27 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { verifyToken } from '@/lib/auth'
+import { NextRequest, NextResponse } from 'next/server';
+import { isAuthorizedRequest } from '@/lib/auth';
 
 export async function middleware(request: NextRequest) {
-  const { pathname } = request.nextUrl
+  const { pathname } = request.nextUrl;
 
   if (!pathname.startsWith('/admin')) {
-    return NextResponse.next()
+    return NextResponse.next();
   }
 
-  const authCookie = request.cookies.get('kaisifos_auth')
+  const authCookie = request.cookies.get('kaisifos_auth')?.value;
+  const lockedCookie = request.cookies.get('kaisifos_locked')?.value;
 
-  if (!authCookie || !(await verifyToken(authCookie.value))) {
-    const url = request.nextUrl.clone()
-    url.pathname = '/login'
-    return NextResponse.redirect(url)
+  const authorized = await isAuthorizedRequest(authCookie, lockedCookie);
+
+  if (!authorized) {
+    const url = request.nextUrl.clone();
+    url.pathname = '/login';
+    return NextResponse.redirect(url);
   }
 
-  return NextResponse.next()
+  return NextResponse.next();
 }
 
 export const config = {
-  matcher: ['/admin/:path*']
-}
+  matcher: ['/admin/:path*'],
+};

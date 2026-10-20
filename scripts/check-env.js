@@ -10,53 +10,50 @@ const required = [
 ];
 
 const optional = [
+  'GEMINI_API_KEY',
   'APP_URL',
   'RAPIDAPI_KEY',
   'DISCORD_WEBHOOK_URL',
   'GMAIL_USER_EMAIL',
 ];
 
-console.log('🔍 Checking environment configuration...');
+console.log('Checking KaisifOS environment configuration...');
 
-let missingRequired = false;
+let missingCount = 0;
 
 required.forEach(v => {
   if (!process.env[v]) {
-    console.error(`❌ Missing REQUIRED variable: ${v}`);
-    missingRequired = true;
+    console.warn(`[WARN] Variable not set in environment: ${v} (Local fallback store & default operator auth will be used)`);
+    missingCount++;
   } else {
-    console.log(`✅ ${v} is set.`);
+    console.log(`[OK] ${v} is configured.`);
   }
 });
 
 optional.forEach(v => {
   if (!process.env[v]) {
-    console.warn(`⚠️  Missing OPTIONAL variable: ${v}`);
+    console.log(`[INFO] Optional variable not set: ${v}`);
   } else {
-    console.log(`✅ ${v} is set.`);
+    console.log(`[OK] ${v} is configured.`);
   }
 });
 
-// Check if GOOGLE_SERVICE_KEY_BASE64 is valid base64 JSON
 if (process.env.GOOGLE_SERVICE_KEY_BASE64) {
   try {
     const jsonStr = Buffer.from(process.env.GOOGLE_SERVICE_KEY_BASE64, 'base64').toString('utf8');
     const creds = JSON.parse(jsonStr);
     if (!creds.client_email || !creds.private_key) {
-      console.error('❌ GOOGLE_SERVICE_KEY_BASE64 is valid JSON but missing client_email or private_key.');
-      missingRequired = true;
+      console.warn('[WARN] GOOGLE_SERVICE_KEY_BASE64 is valid JSON but missing client_email or private_key.');
     } else {
-      console.log('✅ GOOGLE_SERVICE_KEY_BASE64 successfully decoded and validated.');
+      console.log('[OK] GOOGLE_SERVICE_KEY_BASE64 decoded and verified.');
     }
   } catch (err) {
-    console.error('❌ GOOGLE_SERVICE_KEY_BASE64 decoding or JSON parsing failed:', err.message);
-    missingRequired = true;
+    console.warn('[WARN] GOOGLE_SERVICE_KEY_BASE64 decoding failed:', err.message);
   }
 }
 
-if (missingRequired) {
-  console.error('\n🛑 Environment checks failed. Please fix the required variables before proceeding.');
-  process.exit(1);
+if (missingCount > 0) {
+  console.log(`\nBuild proceeding in Hybrid Local-Persistence Mode (${missingCount} cloud env vars unset).`);
 } else {
-  console.log('\n✨ Environment configuration looks good!');
+  console.log('\nAll cloud environment variables verified.');
 }

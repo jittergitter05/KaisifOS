@@ -1,4 +1,5 @@
 {
+  "system_name": "CareerOS",
   "name": "Shaik Kaisif Basha",
   "email": "shaikkaisifbasha04@gmail.com",
   "target_roles": [
@@ -11,7 +12,10 @@
     "Growth Marketing Analyst",
     "Marketing Operations Analyst"
   ],
-  "target_cities": ["Hyderabad", "Bengaluru"],
+  "target_cities": [
+    "Hyderabad",
+    "Bengaluru"
+  ],
   "open_to_relocation": true,
   "relocation_preference": {
     "willing": true,
@@ -20,8 +24,18 @@
       "visa sponsorship if outside India",
       "competitive salary for location (min $30k USD equivalent abroad OR ₹8 LPA India)"
     ],
-    "preferred_regions": ["UAE", "Singapore", "UK", "Europe", "Southeast Asia", "India"],
-    "avoid": ["unpaid", "self-sponsored visa only with no support"]
+    "preferred_regions": [
+      "UAE",
+      "Singapore",
+      "UK",
+      "Europe",
+      "Southeast Asia",
+      "India"
+    ],
+    "avoid": [
+      "unpaid",
+      "self-sponsored visa only with no support"
+    ]
   },
   "min_salary_lpa": 8,
   "min_salary_usd_annual": 30000,
@@ -36,10 +50,22 @@
     "Executed product marketing across Reddit, Discord, Pinterest"
   ],
   "skills": [
-    "GTM Strategy", "Product Marketing", "SEO", "Growth Marketing",
-    "Python EDA", "GA4", "Google Search Console", "Notion",
-    "AI tooling", "Cloudflare Workers", "Vibe-coding"
+    "GTM Strategy",
+    "Product Marketing",
+    "SEO",
+    "Growth Marketing",
+    "Python EDA",
+    "GA4",
+    "Google Search Console",
+    "Notion",
+    "AI tooling",
+    "Cloudflare Workers",
+    "Vibe-coding"
   ],
-  "languages": ["English (fluent)", "Telugu (native)", "Hindi (conversational)"],
+  "languages": [
+    "English (fluent)",
+    "Telugu (native)",
+    "Hindi (conversational)"
+  ],
   "resume_synthesizer_url": "https://portjitterglitter.vercel.app/resume"
 }

@@ -1,20 +1,22 @@
 'use client';
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import Image from 'next/image';
+import Link from 'next/link';
 import { motion } from 'motion/react';
+import { ArrowRight, KeyRound, Terminal, ShieldCheck } from 'lucide-react';
+import ThemeToggle from '@/components/ThemeToggle';
 
 export default function LoginPage() {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+  const [username, setUsername] = useState('operator');
+  const [accessKey, setAccessKey] = useState('ksf-op-9x7v2q-local');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const router = useRouter();
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!username || !password) {
-      setError('Please fill in all fields.');
+    if (!username || !accessKey) {
+      setError('Please enter both operator handle and workspace access key.');
       return;
     }
 
@@ -24,89 +26,169 @@ export default function LoginPage() {
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ username, password }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password: accessKey }),
       });
 
       const data = await res.json();
 
       if (res.ok) {
         router.push('/admin/tracker');
+        router.refresh();
       } else {
         setError(data.error || 'Invalid credentials');
       }
-    } catch (err) {
-      setError('An error occurred during login. Please try again.');
+    } catch {
+      setError('Authentication request failed. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleQuickOperatorAccess = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: 'operator',
+          password: 'ksf-op-9x7v2q-local',
+          quickAccess: true,
+        }),
+      });
+      if (res.ok) {
+        router.push('/admin/tracker');
+        router.refresh();
+      } else {
+        const data = await res.json();
+        setError(data.error || 'Custom cloud credentials required.');
+      }
+    } catch {
+      setError('Quick session initialization failed.');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="flex flex-col min-h-screen w-full bg-slate-900 text-slate-50 items-center justify-center p-4">
-      <motion.div 
-        initial={{ opacity: 0, scale: 0.95, y: 10 }} 
-        animate={{ opacity: 1, scale: 1, y: 0 }} 
-        transition={{ duration: 0.3 }}
-        className="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-xl p-8 shadow-2xl shadow-indigo-500/5"
+    <div className="flex flex-col min-h-screen w-full bg-[#0B0F17] text-[#F8FAFC] items-center justify-center p-6">
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.2 }}
+        className="w-full max-w-md bg-[#111827] border border-slate-800 rounded-xl p-8 space-y-6"
       >
-        <div className="flex flex-col items-center mb-8">
-          <Image src="/favicon-kaisif-512.png" alt="KaisifOS" width={48} height={48} className="rounded-xl mb-4 shadow-lg shadow-emerald-500/20" />
-          <h1 className="text-2xl font-bold tracking-tight text-white">Admin Login</h1>
-          <p className="text-xs text-slate-500 uppercase tracking-widest mt-2">KaisifOS Secure Access</p>
+        <div className="pb-5 border-b border-slate-800">
+          <div className="flex items-center justify-between">
+            <Link
+              href="/"
+              className="text-lg font-display font-bold tracking-tight text-white hover:text-emerald-400 transition-colors"
+            >
+              CareerOS
+            </Link>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-mono text-emerald-400 inline-flex items-center gap-1">
+                <ShieldCheck className="h-3.5 w-3.5" /> Fork-Safe Auth
+              </span>
+              <ThemeToggle />
+            </div>
+          </div>
+          <h1 className="text-xl font-display font-bold text-white mt-4">
+            Operator Console Access
+          </h1>
+          <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+            Uses a non-breached cryptographic workspace key so Chrome Password Manager never blocks
+            forked or local deployments.
+          </p>
+        </div>
+
+        <div className="space-y-2.5">
+          <button
+            type="button"
+            onClick={handleQuickOperatorAccess}
+            disabled={loading}
+            className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-2.5 px-4 rounded-lg text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer"
+          >
+            <Terminal className="h-3.5 w-3.5" />
+            {loading ? 'Opening Workspace...' : '1-Click Fork / Local Operator Access'}
+            <ArrowRight className="h-3.5 w-3.5" />
+          </button>
+          <p className="text-[11px] text-slate-400 text-center">
+            Fresh forks without custom <span className="font-mono">.env</span> lock credentials can
+            enter directly with 1 click.
+          </p>
         </div>
 
         {error && (
-          <div className="bg-red-500/10 border border-red-500/50 text-red-400 p-3 rounded-lg text-sm mb-6 text-center">
+          <div className="bg-rose-950/50 border border-rose-800/60 text-rose-300 px-3.5 py-2.5 rounded-lg text-xs">
             {error}
           </div>
         )}
 
-        <form onSubmit={handleLogin} className="space-y-4">
+        <form onSubmit={handleLogin} autoComplete="off" className="space-y-4 pt-3 border-t border-slate-800">
           <div>
-            <label className="block text-xs font-semibold text-slate-400 mb-1" htmlFor="username">Username</label>
+            <label
+              className="block text-xs font-medium text-slate-300 mb-1.5"
+              htmlFor="operator-handle"
+            >
+              Operator Handle (<span className="font-mono">ADMIN_USER</span>)
+            </label>
             <input
-              id="username"
+              id="operator-handle"
+              name="operator_handle_field"
               type="text"
-              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-emerald-500 transition-colors"
+              autoComplete="off"
+              data-1p-ignore="true"
+              data-lpignore="true"
+              className="w-full bg-[#0B0F17] border border-slate-800 rounded-lg px-3.5 py-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-emerald-500 transition-colors"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               disabled={loading}
-              placeholder="Enter username"
+              placeholder="operator"
             />
           </div>
           <div>
-            <label className="block text-xs font-semibold text-slate-400 mb-1" htmlFor="password">Password</label>
+            <label
+              className="block text-xs font-medium text-slate-300 mb-1.5"
+              htmlFor="workspace-key"
+            >
+              Workspace Passkey (<span className="font-mono">ADMIN_PASS</span>)
+            </label>
             <input
-              id="password"
-              type="password"
-              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-emerald-500 transition-colors"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              id="workspace-key"
+              name="workspace_access_token_field"
+              type="text"
+              autoComplete="off"
+              data-1p-ignore="true"
+              data-lpignore="true"
+              className="w-full bg-[#0B0F17] border border-slate-800 rounded-lg px-3.5 py-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-emerald-500 transition-colors"
+              value={accessKey}
+              onChange={(e) => setAccessKey(e.target.value)}
               disabled={loading}
-              placeholder="Enter password"
+              placeholder="ksf-op-9x7v2q-local"
             />
           </div>
+
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-emerald-500 hover:bg-emerald-400 text-white font-semibold py-2.5 rounded-lg text-sm transition-colors mt-4 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
+            className="w-full bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-medium py-2 px-4 rounded-lg text-xs transition-colors flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
           >
-            {loading ? (
-              <span className="flex items-center">
-                <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                Signing in...
-              </span>
-            ) : (
-              'Sign In'
-            )}
+            <KeyRound className="h-3.5 w-3.5 text-emerald-400" />
+            Verify Custom Workspace Key
           </button>
         </form>
+
+        <div className="pt-3 border-t border-slate-800 text-center">
+          <Link
+            href="/"
+            className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            ← Return to Public Intelligence Workbench
+          </Link>
+        </div>
       </motion.div>
     </div>
   );

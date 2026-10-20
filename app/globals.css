@@ -1,6 +1,7 @@
 @import "tailwindcss";
 
 @theme {
+  --font-display: var(--font-display), ui-sans-serif, system-ui, sans-serif;
   --font-sans: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
@@ -8,62 +9,151 @@
 body {
   margin: 0;
   height: 100%;
+  background-color: #0B0F17;
+  color: #F8FAFC;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.font-display {
+  font-family: var(--font-display), ui-sans-serif, system-ui, sans-serif;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================================
+   HIGH-CRAFT LIGHT MODE ("ALABASTER EXECUTIVE LEDGER")
+   Transforms dark slate surfaces into crisp daylight editorial surfaces
+   ============================================================================ */
+html.light body {
+  background-color: #F8FAFC !important;
+  color: #0F172A !important;
+}
+
+html.light .bg-\[\#0B0F17\],
+html.light .bg-\[\#0B0F17\]\/90,
+html.light .bg-\[\#0B0F17\]\/95,
+html.light .bg-\[\#0B0F17\]\/60 {
+  background-color: #F8FAFC !important;
+}
+
+html.light .bg-\[\#111827\] {
+  background-color: #FFFFFF !important;
+  box-shadow: 0 1px 3px 0 rgba(15, 23, 42, 0.04), 0 1px 2px -1px rgba(15, 23, 42, 0.04);
+}
+
+html.light .bg-\[\#0D131F\],
+html.light .bg-\[\#0E1422\] {
+  background-color: #F1F5F9 !important;
+}
+
+html.light .bg-slate-900,
+html.light .bg-slate-800,
+html.light .bg-slate-800\/90,
+html.light .bg-slate-800\/80,
+html.light .bg-slate-800\/70,
+html.light .bg-slate-800\/60,
+html.light .bg-slate-800\/50 {
+  background-color: #E2E8F0 !important;
+  color: #0F172A !important;
+}
+
+html.light .border-slate-800,
+html.light .border-slate-800\/90,
+html.light .border-slate-800\/80,
+html.light .border-slate-800\/70,
+html.light .border-slate-700,
+html.light .border-slate-700\/80 {
+  border-color: #CBD5E1 !important;
+}
+
+html.light .divide-slate-800 > :not(:last-child),
+html.light .divide-slate-800\/80 > :not(:last-child),
+html.light .divide-slate-800\/70 > :not(:last-child) {
+  border-color: #E2E8F0 !important;
+}
+
+html.light .text-white,
+html.light .text-\[\#F8FAFC\],
+html.light .text-slate-100 {
+  color: #0F172A !important;
+}
+
+html.light .bg-emerald-600.text-white,
+html.light .bg-emerald-600 .text-white,
+html.light a.bg-emerald-600,
+html.light button.bg-emerald-600 {
+  background-color: #059669 !important;
+  color: #FFFFFF !important;
+}
+
+html.light .text-slate-200,
+html.light .text-slate-300 {
+  color: #334155 !important;
+}
+
+html.light .text-slate-400,
+html.light .text-slate-500 {
+  color: #475569 !important;
+}
+
+html.light .text-emerald-400,
+html.light .text-emerald-300 {
+  color: #059669 !important;
+}
+
+html.light .text-blue-400,
+html.light .text-blue-300 {
+  color: #2563EB !important;
+}
+
+html.light .text-violet-400,
+html.light .text-violet-300 {
+  color: #7C3AED !important;
+}
+
+html.light .text-amber-400,
+html.light .text-amber-300 {
+  color: #D97706 !important;
+}
+
+html.light .text-rose-400,
+html.light .text-rose-300 {
+  color: #E11D48 !important;
 }
 
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #0f172a;
+  background: #0B0F17;
+}
+
+html.light ::-webkit-scrollbar-track {
+  background: #F1F5F9;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #334155;
-  border-radius: 5px;
-  border: 2px solid #0f172a;
+  background: #1E293B;
+  border-radius: 4px;
+}
+
+html.light ::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #475569;
+  background: #334155;
 }
 
 .hide-scrollbar::-webkit-scrollbar {
-    display: none;
+  display: none;
 }
 .hide-scrollbar {
-    -ms-overflow-style: none;
-    scrollbar-width: none;
-}
-
-.status-new {
-    background: rgba(59,130,246,0.1);
-    color: #60A5FA;
-    border: 1px solid rgba(59,130,246,0.2);
-}
-.status-applied {
-    background: rgba(234,179,8,0.1);
-    color: #FACC15;
-    border: 1px solid rgba(234,179,8,0.2);
-}
-.status-replied {
-    background: rgba(16,185,129,0.1);
-    color: #34D399;
-    border: 1px solid rgba(16,185,129,0.2);
-}
-.status-interview {
-    background: rgba(168,85,247,0.1);
-    color: #C084FC;
-    border: 1px solid rgba(168,85,247,0.2);
-}
-.status-rejected {
-    background: rgba(148,163,184,0.1);
-    color: #94A3B8;
-    border: 1px solid rgba(148,163,184,0.2);
-}
-.status-ignored {
-    background: rgba(244,63,94,0.1);
-    color: #FB7185;
-    border: 1px solid rgba(244,63,94,0.2);
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
