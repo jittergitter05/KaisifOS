@@ -18,6 +18,8 @@ function sanitizeStringArray(val: unknown, fallback: string[] = []): string[] {
     .slice(0, 100);
 }
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const isPublic = searchParams.get('public') === 'true';

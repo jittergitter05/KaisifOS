@@ -4,6 +4,8 @@ import { isAuthorizedRequest } from '@/lib/auth';
 import { isCloudSheetsConfigured, getPublicStats } from '@/lib/sheets';
 import { getCandidateProfile } from '@/lib/profile';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET() {
   const cookieStore = cookies();
   const authCookie = cookieStore.get('kaisifos_auth')?.value;

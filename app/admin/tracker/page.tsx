@@ -121,7 +121,7 @@ function exportToCSV(jobs: JobRow[]) {
   link.click();
 }
 
-export function detectSource(id: string): string {
+function detectSource(id: string): string {
   if (id.startsWith('greenhouse_')) return 'Greenhouse ATS';
   if (id.startsWith('lever_')) return 'Lever ATS';
   if (id.startsWith('ashby_')) return 'Ashby ATS';

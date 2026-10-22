@@ -4,7 +4,7 @@ import JobCard, { JobData } from '@/components/JobCard';
 import JobAuditDrawer, { AuditableJob } from '@/components/JobAuditDrawer';
 import { RefreshCw, Calendar, Copy, Check, Layers } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { detectSource } from '@/app/admin/tracker/page';
+import { detectSource } from '@/lib/utils';
 
 export default function DigestPage() {
   const [jobs, setJobs] = useState<(JobData & { id: string; source: string })[]>([]);

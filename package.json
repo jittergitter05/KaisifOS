@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "rm -rf .next/cache && node scripts/check-env.js && next build",
+    "build": "NODE_ENV=production node scripts/check-env.js && NODE_ENV=production next build",
     "start": "next start",
     "lint": "next lint",
+    "typecheck": "tsc --noEmit",
     "check-env": "node scripts/check-env.js",
     "test": "vitest run"
   },

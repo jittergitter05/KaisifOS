@@ -1,14 +1,14 @@
-import { google } from 'googleapis';
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { isAuthorizedRequest } from '@/lib/auth';
 import {
-  getAuth,
   getAllSheetRows,
   getPublicStats,
   isCloudSheetsConfigured,
   updateLocalJobRow,
   appendLocalJobRecord,
+  appendCloudSheetRecord,
+  updateCloudSheetRowStatus,
 } from '@/lib/sheets';
 
 const ALLOWED_STATUSES = new Set([
@@ -33,6 +33,8 @@ function sanitizeSheetCell(val: unknown, maxLen = 2000): string {
   }
   return str;
 }
+
+export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -108,31 +110,7 @@ export async function POST(request: NextRequest) {
 
       if (isCloudSheetsConfigured()) {
         try {
-          const auth = await getAuth();
-          const sheets = google.sheets('v4');
-          await sheets.spreadsheets.values.append({
-            auth,
-            spreadsheetId: process.env.GOOGLE_SHEET_ID,
-            range: 'Sheet1!A:K',
-            valueInputOption: 'USER_ENTERED',
-            requestBody: {
-              values: [
-                [
-                  record.date,
-                  record.id,
-                  record.title,
-                  record.company,
-                  record.score,
-                  record.reasons,
-                  record.gap,
-                  record.url,
-                  record.dm,
-                  record.resumeAngle,
-                  record.status,
-                ],
-              ],
-            },
-          });
+          await appendCloudSheetRecord(record);
         } catch (cloudErr) {
           console.warn('[sheet-sync] Cloud append failed, saving to local store:', cloudErr);
         }
@@ -155,15 +133,7 @@ export async function POST(request: NextRequest) {
 
     if (isCloudSheetsConfigured() && safeStatus) {
       try {
-        const auth = await getAuth();
-        const sheets = google.sheets('v4');
-        await sheets.spreadsheets.values.update({
-          auth,
-          spreadsheetId: process.env.GOOGLE_SHEET_ID,
-          range: `Sheet1!K${numericRowId}`,
-          valueInputOption: 'USER_ENTERED',
-          requestBody: { values: [[safeStatus]] },
-        });
+        await updateCloudSheetRowStatus(numericRowId, safeStatus);
       } catch (cloudErr) {
         console.warn('[sheet-sync] Cloud status update failed, updating local store:', cloudErr);
       }

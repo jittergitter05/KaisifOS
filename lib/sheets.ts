@@ -33,6 +33,48 @@ export async function getAuth() {
   });
 }
 
+export async function appendCloudSheetRecord(record: StoredJobRecord): Promise<void> {
+  if (!isCloudSheetsConfigured()) return;
+  const auth = await getAuth();
+  const sheets = google.sheets('v4');
+  await sheets.spreadsheets.values.append({
+    auth,
+    spreadsheetId: process.env.GOOGLE_SHEET_ID,
+    range: 'Sheet1!A:K',
+    valueInputOption: 'USER_ENTERED',
+    requestBody: {
+      values: [
+        [
+          record.date,
+          record.id,
+          record.title,
+          record.company,
+          record.score,
+          record.reasons,
+          record.gap,
+          record.url,
+          record.dm,
+          record.resumeAngle,
+          record.status,
+        ],
+      ],
+    },
+  });
+}
+
+export async function updateCloudSheetRowStatus(rowId: number, status: string): Promise<void> {
+  if (!isCloudSheetsConfigured()) return;
+  const auth = await getAuth();
+  const sheets = google.sheets('v4');
+  await sheets.spreadsheets.values.update({
+    auth,
+    spreadsheetId: process.env.GOOGLE_SHEET_ID,
+    range: `Sheet1!K${rowId}`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: [[status]] },
+  });
+}
+
 function resolveDateString(record: StoredJobRecord): string {
   if (record.date && /^\d{4}-\d{2}-\d{2}$/.test(record.date)) {
     return record.date;
