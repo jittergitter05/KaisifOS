@@ -1,6 +1,12 @@
 import fs from 'fs';
 import path from 'path';
 
+export interface AtsCompanyTargets {
+  greenhouse: string[];
+  lever: string[];
+  ashby: string[];
+}
+
 export interface CandidateProfile {
   system_name?: string;
   name: string;
@@ -23,7 +29,14 @@ export interface CandidateProfile {
   skills: string[];
   languages: string[];
   resume_synthesizer_url: string;
+  ats_companies?: AtsCompanyTargets;
 }
+
+export const DEFAULT_ATS_COMPANIES: AtsCompanyTargets = {
+  greenhouse: ['razorpay', 'postman', 'stripe', 'vercel', 'cloudflare'],
+  lever: ['zepto', 'cred', 'mistral'],
+  ashby: ['linear', 'posthog', 'supabase', 'langchain'],
+};
 
 export const FORK_PROFILE_TEMPLATES: Record<string, CandidateProfile> = {
   pm_growth: {
@@ -73,16 +86,17 @@ export const FORK_PROFILE_TEMPLATES: Record<string, CandidateProfile> = {
       'GA4',
       'Google Search Console',
       'Notion',
-      'AI tooling',
+      'AI Workflow Automation',
       'Cloudflare Workers',
-      'Vibe-coding',
+      'Full-Stack Prototyping',
     ],
     languages: ['English (fluent)', 'Telugu (native)', 'Hindi (conversational)'],
     resume_synthesizer_url: 'https://portjitterglitter.vercel.app/resume',
+    ats_companies: DEFAULT_ATS_COMPANIES,
   },
   swe_ai: {
     system_name: 'ScoutOS',
-    name: 'Alex Rivera (Fork Owner)',
+    name: 'Alex Rivera',
     email: 'alex.rivera@example.com',
     target_roles: [
       'Full-Stack Software Engineer',
@@ -122,10 +136,11 @@ export const FORK_PROFILE_TEMPLATES: Record<string, CandidateProfile> = {
     ],
     languages: ['English (fluent)'],
     resume_synthesizer_url: 'https://github.com/your-username',
+    ats_companies: DEFAULT_ATS_COMPANIES,
   },
   data_ml: {
     system_name: 'VectorOS',
-    name: 'Priya Sharma (Fork Owner)',
+    name: 'Priya Sharma',
     email: 'priya.data@example.com',
     target_roles: [
       'Data Scientist',
@@ -165,10 +180,11 @@ export const FORK_PROFILE_TEMPLATES: Record<string, CandidateProfile> = {
     ],
     languages: ['English (fluent)', 'Hindi (native)'],
     resume_synthesizer_url: 'https://github.com/your-data-portfolio',
+    ats_companies: DEFAULT_ATS_COMPANIES,
   },
   blank_fork: {
-    system_name: 'MyCareerOS',
-    name: 'Your Name Here',
+    system_name: 'OpenScout',
+    name: 'Candidate Workspace',
     email: 'you@example.com',
     target_roles: [
       'Product Manager',
@@ -176,7 +192,7 @@ export const FORK_PROFILE_TEMPLATES: Record<string, CandidateProfile> = {
       'Growth Strategist',
       'Founding Team Member',
     ],
-    target_cities: ['Remote', 'Your City'],
+    target_cities: ['Remote', 'Bengaluru'],
     open_to_relocation: true,
     relocation_preference: {
       willing: true,
@@ -190,13 +206,14 @@ export const FORK_PROFILE_TEMPLATES: Record<string, CandidateProfile> = {
     experience_level: 'Entry / Early Career',
     portfolio: 'https://your-portfolio.com',
     key_metrics: [
-      'Delivered X% measurable growth in core product/engineering KPI',
-      'Built and shipped Y end-to-end system serving Z users',
-      'Automated workflow reducing manual turnaround time by N%',
+      'Delivered 45% measurable growth in core product/engineering KPI',
+      'Built and shipped end-to-end system serving 10,000+ active users',
+      'Automated operational workflow reducing turnaround time by 60%',
     ],
-    skills: ['Core Skill 1', 'Core Skill 2', 'Core Skill 3', 'Analytics', 'AI Workflows'],
+    skills: ['Product Strategy', 'SQL', 'Python', 'TypeScript', 'Analytics'],
     languages: ['English (fluent)'],
     resume_synthesizer_url: 'https://your-portfolio.com/resume',
+    ats_companies: DEFAULT_ATS_COMPANIES,
   },
 };
 
@@ -207,6 +224,7 @@ export function getCandidateProfile(): CandidateProfile {
     const parsed = JSON.parse(raw);
     return {
       system_name: parsed.system_name || 'CareerOS',
+      ats_companies: parsed.ats_companies || DEFAULT_ATS_COMPANIES,
       ...parsed,
     };
   } catch {

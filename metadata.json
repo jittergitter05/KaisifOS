@@ -1,5 +1,8 @@
 {
   "name": "KaisifOS",
-  "description": "Autonomous AI-driven job intelligence, multi-source scouting, deterministic fit scoring, outreach synthesis, and Gmail reply tracking engine.",
-  "requestFramePermissions": []
+  "description": "Autonomous job intelligence, FreeHire direct-ATS scouting, multi-source resume parsing, deterministic 4-pillar fit scoring, outreach synthesis, and Gmail reply tracking engine.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

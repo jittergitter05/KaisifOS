@@ -58,14 +58,34 @@
     "GA4",
     "Google Search Console",
     "Notion",
-    "AI tooling",
+    "AI Workflow Automation",
     "Cloudflare Workers",
-    "Vibe-coding"
+    "Full-Stack Prototyping"
   ],
   "languages": [
     "English (fluent)",
     "Telugu (native)",
     "Hindi (conversational)"
   ],
-  "resume_synthesizer_url": "https://portjitterglitter.vercel.app/resume"
+  "resume_synthesizer_url": "https://portjitterglitter.vercel.app/resume",
+  "ats_companies": {
+    "greenhouse": [
+      "razorpay",
+      "postman",
+      "stripe",
+      "vercel",
+      "cloudflare"
+    ],
+    "lever": [
+      "zepto",
+      "cred",
+      "mistral"
+    ],
+    "ashby": [
+      "linear",
+      "posthog",
+      "supabase",
+      "langchain"
+    ]
+  }
 }

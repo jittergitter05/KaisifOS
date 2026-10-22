@@ -11,6 +11,23 @@ export function isCustomAuthConfigured(): boolean {
 }
 
 /**
+ * Constant-time string comparison to prevent timing side-channel attacks on HMAC tokens
+ * and credential verification in Edge and Node runtimes.
+ */
+export function constantTimeEqual(a: string, b: string): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const encoder = new TextEncoder();
+  const bufA = encoder.encode(a);
+  const bufB = encoder.encode(b);
+  if (bufA.length !== bufB.length) return false;
+  let diff = 0;
+  for (let i = 0; i < bufA.length; i++) {
+    diff |= bufA[i] ^ bufB[i];
+  }
+  return diff === 0;
+}
+
+/**
  * Creates an HMAC signed token using ADMIN_USER and ADMIN_PASS (or non-breached local fork key).
  * Uses Web Crypto API to be 100% compatible with Next.js Edge Runtime (middleware).
  */
@@ -38,12 +55,12 @@ export async function signToken(): Promise<string> {
 }
 
 /**
- * Verifies if the provided token matches the expected HMAC signature.
+ * Verifies if the provided token matches the expected HMAC signature using constant-time comparison.
  */
 export async function verifyToken(token: string | undefined): Promise<boolean> {
   if (!token) return false;
   const expectedToken = await signToken();
-  return token === expectedToken;
+  return constantTimeEqual(token, expectedToken);
 }
 
 /**

@@ -23,11 +23,11 @@ const jetbrainsMono = JetBrains_Mono({
 export const metadata: Metadata = {
   title: 'KaisifOS — Autonomous Job Intelligence & Outreach Engine',
   description:
-    'Autonomous AI-driven job intelligence, multi-source scouting, deterministic fit scoring, outreach synthesis, and Gmail reply tracking engine.',
+    'Autonomous job intelligence, FreeHire direct-ATS scouting, multi-source resume parsing, deterministic 4-pillar fit scoring, outreach synthesis, and Gmail reply tracking engine.',
   openGraph: {
     title: 'KaisifOS — Autonomous Job Intelligence & Outreach Engine',
     description:
-      'Autonomous AI-driven job intelligence, multi-source scouting, deterministic fit scoring, outreach synthesis, and Gmail reply tracking engine.',
+      'Autonomous job intelligence, FreeHire direct-ATS scouting, multi-source resume parsing, deterministic 4-pillar fit scoring, outreach synthesis, and Gmail reply tracking engine.',
   },
   icons: {
     icon: [

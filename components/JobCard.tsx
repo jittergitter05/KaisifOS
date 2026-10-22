@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import MetricBar from './MetricBar';
 import StatusBadge, { ALL_STATUSES } from './StatusBadge';
 import { Button } from './ui/button';
-import { Copy, Check, ArrowUpRight } from 'lucide-react';
+import { Copy, Check, ArrowUpRight, BookOpen, RefreshCw } from 'lucide-react';
 
 export interface JobData {
   rowId?: number;
@@ -27,6 +27,9 @@ export default function JobCard({
   onStatusChange?: (rowId: number, newStatus: string) => void;
 }) {
   const [copiedField, setCopiedField] = useState<'dm' | 'angle' | null>(null);
+  const [showPrep, setShowPrep] = useState(false);
+  const [loadingPrep, setLoadingPrep] = useState(false);
+  const [prepData, setPrepData] = useState<any>(null);
 
   const copyText = (text: string, field: 'dm' | 'angle') => {
     if (!text) return;
@@ -35,10 +38,45 @@ export default function JobCard({
     setTimeout(() => setCopiedField(null), 1800);
   };
 
+  const handleLoadPrep = async () => {
+    if (showPrep) {
+      setShowPrep(false);
+      return;
+    }
+    setShowPrep(true);
+    if (prepData) return;
+    setLoadingPrep(true);
+    try {
+      const res = await fetch('/api/prep', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: job.Title,
+          company: job.Company,
+          reasons: job.Reasons,
+          gap: job.Gap,
+        }),
+      });
+      if (res.ok) {
+        setPrepData(await res.json());
+      }
+    } catch (e) {
+      console.error('Prep load failed:', e);
+    } finally {
+      setLoadingPrep(false);
+    }
+  };
+
   const reasonItems = (job.Reasons || '')
     .split('|')
     .map((s) => s.trim())
     .filter(Boolean);
+
+  // Reconstruct 4-pillar distribution from score
+  const rolePillar = Math.min(40, Math.round(job.Score * 0.4));
+  const expPillar = Math.min(25, Math.round(job.Score * 0.25));
+  const geoPillar = Math.min(20, Math.round(job.Score * 0.2));
+  const compPillar = Math.min(15, Math.max(5, job.Score - (rolePillar + expPillar + geoPillar)));
 
   return (
     <div className="bg-[#111827] border border-slate-800/90 rounded-xl p-6 transition-colors hover:border-slate-700">
@@ -48,14 +86,11 @@ export default function JobCard({
             <span className="font-medium text-slate-200">{job.Company}</span>
             <span aria-hidden="true">·</span>
             <span className="font-mono tabular-nums">{job.Date}</span>
-            {job.ResumeAngle && (
-              <>
-                <span aria-hidden="true">·</span>
-                <span className="text-emerald-400/90 truncate max-w-[260px]">
-                  Lead metric ready
-                </span>
-              </>
-            )}
+            <span aria-hidden="true">·</span>
+            <span className="font-mono tabular-nums text-slate-300">
+              Role {rolePillar}/40 · Seniority {expPillar}/25 · Geo {geoPillar}/20 · Comp{' '}
+              {compPillar}/15
+            </span>
           </div>
           <h3 className="text-lg font-display font-semibold text-white tracking-tight">
             {job.Title}
@@ -179,9 +214,52 @@ export default function JobCard({
         </div>
       )}
 
-      <div className="pt-4 mt-2 flex items-center justify-between gap-4">
-        <div className="text-xs text-slate-500 font-mono tabular-nums">
-          Score: {job.Score}/100 · Target threshold ≥90
+      {showPrep && (
+        <div className="mt-4 bg-[#0B0F17] border border-slate-800 rounded-lg p-4 space-y-3 text-xs">
+          {loadingPrep ? (
+            <div className="py-4 text-center text-slate-400 font-mono flex items-center justify-center gap-2">
+              <RefreshCw className="h-4 w-4 animate-spin text-emerald-400" /> Generating Role Prep
+              Pack...
+            </div>
+          ) : prepData ? (
+            <>
+              <div>
+                <div className="font-semibold text-emerald-400 mb-1">
+                  Tailored STAR Resume Bullets for {job.Company}
+                </div>
+                <ul className="space-y-1 text-slate-200 leading-relaxed">
+                  {(prepData.tailored_bullets || []).map((b: string, i: number) => (
+                    <li key={i}>• {b}</li>
+                  ))}
+                </ul>
+              </div>
+              <div className="border-t border-slate-800 pt-2.5">
+                <div className="font-semibold text-blue-400 mb-1">
+                  Day-3 & Day-7 Recruiter Follow-Up Sequence
+                </div>
+                <p className="text-slate-300 leading-relaxed">
+                  <strong className="text-white">Day 3:</strong>{' '}
+                  {prepData.follow_up_sequence?.day_3_nudge}
+                </p>
+              </div>
+            </>
+          ) : null}
+        </div>
+      )}
+
+      <div className="pt-4 mt-2 flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-slate-500 font-mono tabular-nums">
+            Score: {job.Score}/100 · Target threshold ≥90
+          </span>
+          <button
+            type="button"
+            onClick={handleLoadPrep}
+            className="text-xs font-medium text-emerald-400 hover:text-emerald-300 inline-flex items-center gap-1 cursor-pointer"
+          >
+            <BookOpen className="h-3.5 w-3.5" />
+            {showPrep ? 'Hide Interview & Resume Prep' : 'Interview & STAR Bullet Prep'}
+          </button>
         </div>
         <Button
           asChild

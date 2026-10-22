@@ -3,6 +3,7 @@ import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import StatusBadge, { ALL_STATUSES } from '@/components/StatusBadge';
 import MetricBar from '@/components/MetricBar';
 import InteractiveEvaluator from '@/components/InteractiveEvaluator';
+import JobAuditDrawer, { deriveJobPillarBreakdown } from '@/components/JobAuditDrawer';
 import dynamic from 'next/dynamic';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -17,7 +18,8 @@ import {
   X,
   BarChart3,
   ArrowUpRight,
-  Save,
+  Layers,
+  Radar,
 } from 'lucide-react';
 import {
   Table,
@@ -77,6 +79,10 @@ function exportToCSV(jobs: JobRow[]) {
     'Title',
     'Company',
     'Score',
+    'RolePillar(/40)',
+    'SkillPillar(/30)',
+    'SeniorityPillar(/15)',
+    'CompPillar(/15)',
     'Status',
     'URL',
     'Reasons',
@@ -84,14 +90,19 @@ function exportToCSV(jobs: JobRow[]) {
     'DM Draft',
     'Resume Angle',
   ];
-  const rows = jobs.map((j) =>
-    [
+  const rows = jobs.map((j) => {
+    const p = deriveJobPillarBreakdown(j);
+    return [
       j.date,
       j.id,
       j.source,
       j.title,
       j.company,
       j.score,
+      p.role.earned,
+      p.skill.earned,
+      p.seniority.earned,
+      p.compGeo.earned,
       j.status,
       j.url,
       j.reasons,
@@ -100,17 +111,22 @@ function exportToCSV(jobs: JobRow[]) {
       j.resumeAngle,
     ]
       .map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`)
-      .join(',')
-  );
+      .join(',');
+  });
   const csv = [headers.join(','), ...rows].join('\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
-  link.download = `kaisifos-tracker-${new Date().toISOString().split('T')[0]}.csv`;
+  link.download = `openscout-tracker-${new Date().toISOString().split('T')[0]}.csv`;
   link.click();
 }
 
-function detectSource(id: string): string {
+export function detectSource(id: string): string {
+  if (id.startsWith('greenhouse_')) return 'Greenhouse ATS';
+  if (id.startsWith('lever_')) return 'Lever ATS';
+  if (id.startsWith('ashby_')) return 'Ashby ATS';
+  if (id.startsWith('freehire_')) return 'FreeHire ATS';
+  if (id.startsWith('arbeitnow_')) return 'Arbeitnow';
   if (id.startsWith('internshala_')) return 'Internshala';
   if (id.startsWith('remoteok_')) return 'RemoteOK';
   if (id.startsWith('remotive_')) return 'Remotive';
@@ -122,6 +138,8 @@ export default function TrackerPage() {
   const [jobs, setJobs] = useState<JobRow[]>([]);
   const [storageMode, setStorageMode] = useState<string>('local-store');
   const [loading, setLoading] = useState(true);
+  const [scoutingLive, setScoutingLive] = useState(false);
+  const [scoutBanner, setScoutBanner] = useState<string | null>(null);
   const [filter, setFilter] = useState('ALL');
   const [sourceFilter, setSourceFilter] = useState('ALL');
   const [minScoreFilter, setMinScoreFilter] = useState<number>(0);
@@ -135,6 +153,7 @@ export default function TrackerPage() {
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
   const [showAnalytics, setShowAnalytics] = useState(true);
   const [showEvaluatorModal, setShowEvaluatorModal] = useState(false);
+  const [auditDrawerJob, setAuditDrawerJob] = useState<JobRow | null>(null);
 
   const [editingDmRowId, setEditingDmRowId] = useState<number | null>(null);
   const [draftDmText, setDraftDmText] = useState<string>('');
@@ -186,6 +205,25 @@ export default function TrackerPage() {
   useEffect(() => {
     fetchJobs();
   }, [fetchJobs]);
+
+  const runLiveFreeHireScout = async () => {
+    setScoutingLive(true);
+    setScoutBanner(null);
+    try {
+      const res = await fetch('/api/scout/live', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setScoutBanner(
+          `Scanned ${data.scanned} live ATS & remote postings · Added ${data.addedCount} top-scoring matches.`
+        );
+        fetchJobs();
+      }
+    } catch (e) {
+      console.error('Live scout failed:', e);
+    } finally {
+      setScoutingLive(false);
+    }
+  };
 
   const updateStatus = async (rowId: number, newStatus: string) => {
     const originalJobs = [...jobs];
@@ -242,7 +280,8 @@ export default function TrackerPage() {
         (j) =>
           j.title.toLowerCase().includes(q) ||
           j.company.toLowerCase().includes(q) ||
-          j.reasons.toLowerCase().includes(q)
+          j.reasons.toLowerCase().includes(q) ||
+          j.source.toLowerCase().includes(q)
       );
     }
     return [...result].sort((a, b) => {
@@ -282,24 +321,23 @@ export default function TrackerPage() {
   const analytics = useMemo(() => {
     if (jobs.length === 0) return null;
     const now = new Date();
-    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const twoWeeksAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
 
-    const thisWeekJobs = jobs.filter((j) => new Date(j.date) >= weekAgo);
-    const lastWeekJobs = jobs.filter((j) => {
-      const d = new Date(j.date);
-      return d >= twoWeeksAgo && d < weekAgo;
-    });
-    const thisWeekApplied = thisWeekJobs.filter((j) =>
-      ['APPLIED', 'REPLIED', 'INTERVIEW', 'OFFER', 'REJECTED'].includes(j.status)
-    ).length;
-    const lastWeekApplied = lastWeekJobs.filter((j) =>
-      ['APPLIED', 'REPLIED', 'INTERVIEW', 'OFFER', 'REJECTED'].includes(j.status)
-    ).length;
+    const sources: Record<string, { count: number; totalScore: number }> = {};
+    let roleSum = 0;
+    let skillSum = 0;
+    let senSum = 0;
+    let compSum = 0;
 
-    const sources: Record<string, number> = {};
     jobs.forEach((j) => {
-      sources[j.source] = (sources[j.source] || 0) + 1;
+      if (!sources[j.source]) sources[j.source] = { count: 0, totalScore: 0 };
+      sources[j.source].count += 1;
+      sources[j.source].totalScore += j.score;
+
+      const p = deriveJobPillarBreakdown(j);
+      roleSum += p.role.earned;
+      skillSum += p.skill.earned;
+      senSum += p.seniority.earned;
+      compSum += p.compGeo.earned;
     });
 
     const staleCount = jobs.filter(isStale).length;
@@ -331,22 +369,92 @@ export default function TrackerPage() {
         avgScore: Math.round(dailyScores[date].total / dailyScores[date].count),
       }));
 
+    const total = jobs.length;
+    const shortlistedOrBeyond = jobs.filter((j) =>
+      ['SHORTLISTED', 'APPLIED', 'REPLIED', 'INTERVIEW', 'OFFER'].includes(j.status)
+    ).length;
+    const appliedOrBeyond = jobs.filter((j) =>
+      ['APPLIED', 'REPLIED', 'INTERVIEW', 'OFFER'].includes(j.status)
+    ).length;
+    const repliedOrBeyond = jobs.filter((j) =>
+      ['REPLIED', 'INTERVIEW', 'OFFER'].includes(j.status)
+    ).length;
+    const interviewOrBeyond = jobs.filter((j) => ['INTERVIEW', 'OFFER'].includes(j.status)).length;
+    const offers = jobs.filter((j) => j.status === 'OFFER').length;
+
+    const funnelData = [
+      { stage: 'Discovered', count: total, conversionPct: 100 },
+      {
+        stage: 'Shortlisted',
+        count: shortlistedOrBeyond,
+        conversionPct: Math.round((shortlistedOrBeyond / total) * 100),
+      },
+      {
+        stage: 'Applied',
+        count: appliedOrBeyond,
+        conversionPct: Math.round((appliedOrBeyond / total) * 100),
+      },
+      {
+        stage: 'Replied',
+        count: repliedOrBeyond,
+        conversionPct: Math.round((repliedOrBeyond / total) * 100),
+      },
+      {
+        stage: 'Interview',
+        count: interviewOrBeyond,
+        conversionPct: Math.round((interviewOrBeyond / total) * 100),
+      },
+      { stage: 'Offer', count: offers, conversionPct: Math.round((offers / total) * 100) },
+    ];
+
+    const sourceYieldData = Object.entries(sources)
+      .map(([source, v]) => ({
+        source: source.replace(' ATS', ''),
+        count: v.count,
+        avgScore: Math.round(v.totalScore / v.count),
+      }))
+      .sort((a, b) => b.avgScore - a.avgScore);
+
+    const pillarData = [
+      {
+        pillar: 'Role (/40)',
+        earned: Math.round(roleSum / total),
+        max: 40,
+        pct: Math.round((roleSum / total / 40) * 100),
+      },
+      {
+        pillar: 'Skill (/30)',
+        earned: Math.round(skillSum / total),
+        max: 30,
+        pct: Math.round((skillSum / total / 30) * 100),
+      },
+      {
+        pillar: 'Seniority (/15)',
+        earned: Math.round(senSum / total),
+        max: 15,
+        pct: Math.round((senSum / total / 15) * 100),
+      },
+      {
+        pillar: 'Comp/Geo (/15)',
+        earned: Math.round(compSum / total),
+        max: 15,
+        pct: Math.round((compSum / total / 15) * 100),
+      },
+    ];
+
     return {
       totalLeads: jobs.length,
-      appliedCount: jobs.filter((j) =>
-        ['APPLIED', 'REPLIED', 'INTERVIEW', 'OFFER', 'REJECTED', 'SHORTLISTED'].includes(j.status)
-      ).length,
-      intCount: jobs.filter((j) => j.status === 'INTERVIEW').length,
-      offerCount: jobs.filter((j) => j.status === 'OFFER').length,
+      appliedCount: appliedOrBeyond,
+      intCount: interviewOrBeyond,
+      offerCount: offers,
       avgScore: Math.round(jobs.reduce((a, b) => a + b.score, 0) / jobs.length),
-      thisWeekScouted: thisWeekJobs.length,
-      lastWeekScouted: lastWeekJobs.length,
-      thisWeekApplied,
-      lastWeekApplied,
       sources,
       staleCount,
       pipeline,
       chartData,
+      funnelData,
+      sourceYieldData,
+      pillarData,
     };
   }, [jobs]);
 
@@ -381,22 +489,39 @@ export default function TrackerPage() {
 
   return (
     <div className="flex flex-col flex-1 w-full bg-[#0B0F17] text-[#F8FAFC]">
+      <JobAuditDrawer job={auditDrawerJob} onClose={() => setAuditDrawerJob(null)} />
+
       <div className="flex-1 p-4 sm:p-6 max-w-[1680px] mx-auto w-full space-y-6 pb-24">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800/90 pb-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
           <div>
             <h1 className="text-2xl font-display font-bold tracking-tight text-white">
-              Pipeline Intelligence Tracker
+              Pipeline Telemetry & 4-Pillar Audit Ledger
             </h1>
             <p className="text-xs text-slate-400 mt-0.5">
               Storage:{' '}
               <span className="font-mono text-slate-300">
                 {storageMode === 'cloud-sheets' ? 'Google Sheets v4 Sync' : 'Hybrid Local Store'}
               </span>{' '}
-              · Keyboard navigation active (<span className="font-mono">j/k/x/s/Enter</span>)
+              · Click <span className="font-mono text-emerald-400">Audit 4-Pillar</span> on any row
+              to inspect exact subscores
             </p>
           </div>
 
-          <div className="flex items-center gap-2.5 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={runLiveFreeHireScout}
+              disabled={scoutingLive}
+              className="bg-[#111827] border-slate-700 hover:bg-slate-800 text-slate-200 text-xs px-3 py-2"
+            >
+              <Radar
+                className={`h-3.5 w-3.5 mr-1.5 text-emerald-400 ${
+                  scoutingLive ? 'animate-spin' : ''
+                }`}
+              />
+              {scoutingLive ? 'Sweeping ATS Boards...' : 'Run FreeHire ATS Sweep'}
+            </Button>
             <Button
               type="button"
               onClick={() => setShowEvaluatorModal(!showEvaluatorModal)}
@@ -404,7 +529,7 @@ export default function TrackerPage() {
             >
               {showEvaluatorModal ? (
                 <>
-                  <X className="h-3.5 w-3.5 mr-1.5" /> Close Role Evaluator
+                  <X className="h-3.5 w-3.5 mr-1.5" /> Close Evaluator
                 </>
               ) : (
                 <>
@@ -420,10 +545,23 @@ export default function TrackerPage() {
               className="bg-slate-900 border-slate-800 hover:bg-slate-800 text-slate-300 text-xs whitespace-nowrap shrink-0"
             >
               <BarChart3 className="h-3.5 w-3.5 mr-1.5" />
-              {showAnalytics ? 'Hide Telemetry' : 'Show Telemetry'}
+              {showAnalytics ? 'Hide Charts' : 'Show Charts'}
             </Button>
           </div>
         </div>
+
+        {scoutBanner && (
+          <div className="bg-emerald-950/40 border border-emerald-700/60 text-emerald-300 px-4 py-2.5 rounded-md text-xs font-mono flex items-center justify-between">
+            <span>{scoutBanner}</span>
+            <button
+              type="button"
+              onClick={() => setScoutBanner(null)}
+              className="text-slate-400 hover:text-white"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
 
         <AnimatePresence>
           {showEvaluatorModal && (
@@ -442,37 +580,65 @@ export default function TrackerPage() {
           )}
         </AnimatePresence>
 
+        {/* Top Multi-Tab Analytics Workbench */}
+        {showAnalytics && analytics && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+            <div className="lg:col-span-4 grid grid-cols-2 gap-3">
+              <div className="bg-[#111827] border border-slate-800 rounded-lg p-4 flex flex-col justify-between">
+                <div className="text-xs text-slate-400">Total Pipeline Leads</div>
+                <div className="text-2xl font-mono font-bold text-white tabular-nums mt-1">
+                  {analytics.totalLeads}
+                </div>
+                <div className="text-[11px] font-mono text-slate-500 mt-1">
+                  Across {Object.keys(analytics.sources).length} ingestion channels
+                </div>
+              </div>
+              <div className="bg-[#111827] border border-slate-800 rounded-lg p-4 flex flex-col justify-between">
+                <div className="text-xs text-slate-400">Mean Fit Score</div>
+                <div className="text-2xl font-mono font-bold text-emerald-400 tabular-nums mt-1">
+                  {analytics.avgScore}
+                  <span className="text-xs text-slate-500 font-normal">/100</span>
+                </div>
+                <div className="text-[11px] font-mono text-slate-500 mt-1">
+                  4-Pillar Rubric v3.0
+                </div>
+              </div>
+              <div className="bg-[#111827] border border-slate-800 rounded-lg p-4 flex flex-col justify-between">
+                <div className="text-xs text-slate-400">Applied & Active</div>
+                <div className="text-2xl font-mono font-bold text-blue-400 tabular-nums mt-1">
+                  {analytics.appliedCount}
+                </div>
+                <div className="text-[11px] font-mono text-slate-500 mt-1 tabular-nums">
+                  {Math.round((analytics.appliedCount / analytics.totalLeads) * 100)}% application
+                  rate
+                </div>
+              </div>
+              <div className="bg-[#111827] border border-slate-800 rounded-lg p-4 flex flex-col justify-between">
+                <div className="text-xs text-slate-400">Interviews & Offers</div>
+                <div className="text-2xl font-mono font-bold text-white tabular-nums mt-1">
+                  {analytics.intCount}
+                </div>
+                <div className="text-[11px] font-mono text-emerald-400 mt-1 tabular-nums">
+                  {analytics.offerCount} confirmed offer(s)
+                </div>
+              </div>
+            </div>
+
+            <div className="lg:col-span-8 bg-[#111827] border border-slate-800 rounded-lg p-4">
+              <ClientChart
+                mode="full"
+                data={analytics.chartData}
+                funnelData={analytics.funnelData}
+                sourceYieldData={analytics.sourceYieldData}
+                pillarData={analytics.pillarData}
+              />
+            </div>
+          </div>
+        )}
+
         <div className="flex flex-col lg:grid lg:grid-cols-12 gap-6">
           {showAnalytics && analytics && (
             <div className="lg:col-span-3 space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div className="bg-[#111827] border border-slate-800/90 rounded-xl p-4">
-                  <div className="text-xs text-slate-400 mb-1">Total Tracked</div>
-                  <div className="text-2xl font-mono font-bold text-white tabular-nums">
-                    {analytics.totalLeads}
-                  </div>
-                </div>
-                <div className="bg-[#111827] border border-slate-800/90 rounded-xl p-4">
-                  <div className="text-xs text-slate-400 mb-1">Mean Score</div>
-                  <div className="text-2xl font-mono font-bold text-emerald-400 tabular-nums">
-                    {analytics.avgScore}
-                    <span className="text-xs text-slate-500 font-normal">/100</span>
-                  </div>
-                </div>
-                <div className="bg-[#111827] border border-slate-800/90 rounded-xl p-4">
-                  <div className="text-xs text-slate-400 mb-1">Active Funnel</div>
-                  <div className="text-2xl font-mono font-bold text-blue-400 tabular-nums">
-                    {analytics.appliedCount}
-                  </div>
-                </div>
-                <div className="bg-[#111827] border border-slate-800/90 rounded-xl p-4">
-                  <div className="text-xs text-slate-400 mb-1">Interviews / Offers</div>
-                  <div className="text-2xl font-mono font-bold text-violet-400 tabular-nums">
-                    {analytics.intCount + analytics.offerCount}
-                  </div>
-                </div>
-              </div>
-
               {analytics.staleCount > 0 && (
                 <button
                   type="button"
@@ -480,7 +646,7 @@ export default function TrackerPage() {
                     setStaleOnly(!staleOnly);
                     setFilter('ALL');
                   }}
-                  className={`w-full text-left border rounded-xl p-4 transition-colors ${
+                  className={`w-full text-left border rounded-lg p-4 transition-colors cursor-pointer ${
                     staleOnly
                       ? 'bg-amber-950/60 border-amber-600/60'
                       : 'bg-amber-950/30 border-amber-800/50 hover:bg-amber-950/50'
@@ -490,11 +656,11 @@ export default function TrackerPage() {
                     <div className="flex items-center gap-2">
                       <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0" />
                       <span className="text-xs font-semibold text-amber-300 tabular-nums">
-                        {analytics.staleCount} Stale Application(s)
+                        {analytics.staleCount} SLA Follow-Up Alert(s)
                       </span>
                     </div>
                     <span className="text-[11px] font-mono text-amber-400 underline">
-                      {staleOnly ? 'Show All' : 'Filter'}
+                      {staleOnly ? 'Show All' : 'Isolate'}
                     </span>
                   </div>
                   <p className="text-xs text-amber-200/70 mt-1">
@@ -503,9 +669,9 @@ export default function TrackerPage() {
                 </button>
               )}
 
-              <div className="bg-[#111827] border border-slate-800/90 rounded-xl p-4">
+              <div className="bg-[#111827] border border-slate-800 rounded-lg p-4">
                 <div className="text-xs font-medium text-slate-300 mb-3">
-                  Stage Distribution
+                  Stage Distribution Filter
                 </div>
                 <div className="space-y-2">
                   {['NEW', 'SHORTLISTED', 'APPLIED', 'REPLIED', 'INTERVIEW', 'OFFER'].map((s) => {
@@ -517,12 +683,12 @@ export default function TrackerPage() {
                         key={s}
                         type="button"
                         onClick={() => setFilter(filter === s ? 'ALL' : s)}
-                        className="w-full flex items-center gap-2.5 group text-left"
+                        className="w-full flex items-center gap-2.5 group text-left cursor-pointer"
                       >
                         <span className="text-[11px] text-slate-400 group-hover:text-white w-24 font-mono truncate">
                           {s}
                         </span>
-                        <div className="flex-1 bg-slate-800/80 h-1.5 rounded-sm overflow-hidden">
+                        <div className="flex-1 bg-slate-800/80 h-1.5 rounded-xs overflow-hidden">
                           <div
                             style={{ width: `${pct}%` }}
                             className="h-full bg-emerald-500/80 transition-all"
@@ -537,15 +703,15 @@ export default function TrackerPage() {
                 </div>
               </div>
 
-              <div className="bg-[#111827] border border-slate-800/90 rounded-xl p-4">
+              <div className="bg-[#111827] border border-slate-800 rounded-lg p-4">
                 <div className="text-xs font-medium text-slate-300 mb-3">
-                  Ingestion Sources
+                  FreeHire ATS & Board Yield
                 </div>
                 <div className="divide-y divide-slate-800/70">
                   {Object.entries(analytics.sources)
-                    .sort(([, a], [, b]) => b - a)
-                    .map(([source, count]) => {
-                      const pct = Math.round((count / analytics.totalLeads) * 100);
+                    .sort(([, a], [, b]) => b.count - a.count)
+                    .map(([source, stat]) => {
+                      const avg = Math.round(stat.totalScore / stat.count);
                       return (
                         <button
                           key={source}
@@ -553,43 +719,32 @@ export default function TrackerPage() {
                           onClick={() =>
                             setSourceFilter(sourceFilter === source ? 'ALL' : source)
                           }
-                          className="w-full py-1.5 flex items-center justify-between text-xs hover:text-white transition-colors"
+                          className="w-full py-2 flex items-center justify-between text-xs hover:text-white transition-colors cursor-pointer"
                         >
                           <span
                             className={
                               sourceFilter === source
                                 ? 'text-emerald-400 font-medium'
-                                : 'text-slate-400'
+                                : 'text-slate-300'
                             }
                           >
                             {source}
                           </span>
                           <span className="font-mono tabular-nums text-slate-400">
-                            {count} ({pct}%)
+                            {stat.count} · <span className="text-emerald-400">{avg}</span>/100
                           </span>
                         </button>
                       );
                     })}
                 </div>
               </div>
-
-              {analytics.chartData.length > 0 && (
-                <div className="bg-[#111827] border border-slate-800/90 rounded-xl p-4">
-                  <div className="text-xs font-medium text-slate-300 mb-3">
-                    30-Day Fit Score Trajectory
-                  </div>
-                  <div className="h-28 w-full">
-                    <ClientChart data={analytics.chartData} />
-                  </div>
-                </div>
-              )}
             </div>
           )}
 
           <div
             className={`${
               showAnalytics ? 'lg:col-span-9' : 'lg:col-span-12'
-            } flex flex-col bg-[#111827] border border-slate-800/90 rounded-xl overflow-hidden`}
+            } flex flex-col bg-[#111827] border border-slate-800 rounded-lg overflow-hidden`}
           >
             <div className="p-3.5 border-b border-slate-800 flex flex-col gap-3 bg-[#0D131F]">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -602,7 +757,7 @@ export default function TrackerPage() {
                         setFilter(f);
                         setStaleOnly(false);
                       }}
-                      className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                      className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                         filter === f && !staleOnly
                           ? 'bg-slate-800 text-white border border-slate-700'
                           : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
@@ -618,13 +773,16 @@ export default function TrackerPage() {
                     aria-label="Filter by source"
                     value={sourceFilter}
                     onChange={(e) => setSourceFilter(e.target.value)}
-                    className="bg-[#0B0F17] border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-emerald-500"
+                    className="bg-[#0B0F17] border border-slate-800 rounded-md px-2.5 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-emerald-500"
                   >
-                    <option value="ALL">All Sources</option>
+                    <option value="ALL">All Sources & ATS</option>
+                    <option value="Greenhouse ATS">Greenhouse ATS</option>
+                    <option value="Lever ATS">Lever ATS</option>
+                    <option value="Ashby ATS">Ashby ATS</option>
                     <option value="Internshala">Internshala</option>
                     <option value="RemoteOK">RemoteOK</option>
                     <option value="Remotive">Remotive</option>
-                    <option value="JSearch">JSearch</option>
+                    <option value="Arbeitnow">Arbeitnow</option>
                     <option value="Evaluated">Evaluated</option>
                   </select>
 
@@ -632,7 +790,7 @@ export default function TrackerPage() {
                     aria-label="Filter by minimum score"
                     value={minScoreFilter}
                     onChange={(e) => setMinScoreFilter(Number(e.target.value))}
-                    className="bg-[#0B0F17] border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-300 focus:outline-none focus:border-emerald-500"
+                    className="bg-[#0B0F17] border border-slate-800 rounded-md px-2.5 py-1.5 text-xs font-mono text-slate-300 focus:outline-none focus:border-emerald-500"
                   >
                     <option value={0}>Score: All</option>
                     <option value={85}>Score ≥ 85</option>
@@ -643,10 +801,10 @@ export default function TrackerPage() {
                   <div className="relative flex-1 sm:w-52">
                     <input
                       type="text"
-                      placeholder="Filter role, company, reason..."
+                      placeholder="Filter role, company, ATS..."
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      className="w-full bg-[#0B0F17] border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 transition-colors"
+                      className="w-full bg-[#0B0F17] border border-slate-800 rounded-md px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 transition-colors"
                     />
                   </div>
 
@@ -656,7 +814,7 @@ export default function TrackerPage() {
                     variant="outline"
                     size="sm"
                     className="shrink-0 bg-[#0B0F17] border-slate-800 hover:bg-slate-800 text-slate-300 text-xs h-8 px-2.5 whitespace-nowrap"
-                    title="Download CSV"
+                    title="Download CSV with 4-Pillar Subscores"
                   >
                     <Download className="h-3.5 w-3.5 mr-1.5" /> CSV
                   </Button>
@@ -734,7 +892,7 @@ export default function TrackerPage() {
                       />
                     </TableHead>
                     <TableHead
-                      className="w-[105px] cursor-pointer group hover:text-slate-200 transition-colors text-xs whitespace-nowrap"
+                      className="w-[100px] cursor-pointer group hover:text-slate-200 transition-colors text-xs whitespace-nowrap"
                       onClick={() => toggleSort('date')}
                     >
                       Date <SortIcon field="date" />
@@ -745,21 +903,23 @@ export default function TrackerPage() {
                     >
                       Company & Role <SortIcon field="company" />
                     </TableHead>
-                    <TableHead className="text-xs w-[100px] whitespace-nowrap">Source</TableHead>
+                    <TableHead className="text-xs w-[115px] whitespace-nowrap">
+                      Source / ATS
+                    </TableHead>
                     <TableHead
                       className="cursor-pointer group hover:text-slate-200 transition-colors text-xs w-[125px] whitespace-nowrap"
                       onClick={() => toggleSort('score')}
                     >
                       Fit Score <SortIcon field="score" />
                     </TableHead>
-                    <TableHead className="text-right text-xs w-[85px] whitespace-nowrap">
+                    <TableHead className="text-right text-xs w-[80px] whitespace-nowrap">
                       Reply Est.
                     </TableHead>
-                    <TableHead className="text-center text-xs w-[120px] whitespace-nowrap">
+                    <TableHead className="text-center text-xs w-[115px] whitespace-nowrap">
                       Stage
                     </TableHead>
-                    <TableHead className="text-right text-xs w-[85px] whitespace-nowrap">
-                      Link
+                    <TableHead className="text-right text-xs w-[140px] whitespace-nowrap">
+                      Actions
                     </TableHead>
                   </TableRow>
                 </TableHeader>
@@ -788,7 +948,7 @@ export default function TrackerPage() {
                           No matching pipeline records
                         </div>
                         <p className="text-xs text-slate-400 mb-4">
-                          Adjust your active filters or evaluate a new role to populate the ledger.
+                          Reset your active filters or run a live FreeHire ATS sweep.
                         </p>
                         <Button
                           type="button"
@@ -854,14 +1014,14 @@ export default function TrackerPage() {
                                   </div>
                                   {stale && (
                                     <div className="text-[11px] text-amber-400 flex items-center gap-1 mt-0.5">
-                                      <AlertTriangle className="h-3 w-3" /> Follow-up recommended
-                                      (7+ days since applied)
+                                      <AlertTriangle className="h-3 w-3" /> SLA Alert: 7+ days since
+                                      applied
                                     </div>
                                   )}
                                 </div>
                               </div>
                             </TableCell>
-                            <TableCell className="text-xs text-slate-400 py-2.5 whitespace-nowrap">
+                            <TableCell className="text-xs font-mono text-slate-400 py-2.5 whitespace-nowrap">
                               {job.source}
                             </TableCell>
                             <TableCell className="py-2.5">
@@ -912,14 +1072,24 @@ export default function TrackerPage() {
                               className="text-right py-2.5"
                               onClick={(e) => e.stopPropagation()}
                             >
-                              <a
-                                href={job.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="inline-flex items-center gap-1 text-xs font-medium text-emerald-400 hover:text-emerald-300 whitespace-nowrap"
-                              >
-                                Apply <ArrowUpRight className="h-3 w-3" />
-                              </a>
+                              <div className="inline-flex items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setAuditDrawerJob(job)}
+                                  className="px-2 py-1 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-200 inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                                  title="Open 4-Pillar Rubric Audit Drawer"
+                                >
+                                  <Layers className="h-3 w-3 text-emerald-400" /> Audit
+                                </button>
+                                <a
+                                  href={job.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="inline-flex items-center gap-1 text-xs font-medium text-emerald-400 hover:text-emerald-300 whitespace-nowrap"
+                                >
+                                  Apply <ArrowUpRight className="h-3 w-3" />
+                                </a>
+                              </div>
                             </TableCell>
                           </TableRow>
 
@@ -937,8 +1107,17 @@ export default function TrackerPage() {
                                     <div className="p-5 pl-11 bg-[#0B0F17] border-b border-slate-800 grid grid-cols-1 lg:grid-cols-12 gap-6">
                                       <div className="lg:col-span-6 space-y-4">
                                         <div>
-                                          <div className="text-xs font-medium text-slate-400 mb-1.5">
-                                            Rubric Alignment Breakdown
+                                          <div className="flex items-center justify-between mb-1.5">
+                                            <span className="text-xs font-medium text-slate-400">
+                                              Rubric Alignment Breakdown
+                                            </span>
+                                            <button
+                                              type="button"
+                                              onClick={() => setAuditDrawerJob(job)}
+                                              className="text-[11px] font-mono text-emerald-400 hover:underline cursor-pointer"
+                                            >
+                                              Open Full 4-Pillar Inspector →
+                                            </button>
                                           </div>
                                           <p className="text-xs text-slate-200 leading-relaxed">
                                             {job.reasons || 'N/A'}
@@ -998,13 +1177,14 @@ export default function TrackerPage() {
                                             </span>
                                             <div className="flex items-center gap-2">
                                               {editingDmRowId === job.rowId ? (
-                                                <button
+                                                <Button
                                                   type="button"
+                                                  size="sm"
                                                   onClick={() => saveInlineDm(job.rowId)}
-                                                  className="px-2.5 py-1 rounded text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white inline-flex items-center gap-1"
+                                                  className="h-7 px-2.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white"
                                                 >
-                                                  <Save className="h-3 w-3" /> Save Draft
-                                                </button>
+                                                  Save Draft
+                                                </Button>
                                               ) : (
                                                 <button
                                                   type="button"
@@ -1012,29 +1192,31 @@ export default function TrackerPage() {
                                                     setEditingDmRowId(job.rowId);
                                                     setDraftDmText(job.dm);
                                                   }}
-                                                  className="px-2 py-1 rounded text-xs text-slate-400 hover:text-white bg-slate-800/80"
+                                                  className="text-xs text-slate-400 hover:text-white"
                                                 >
-                                                  Edit Draft
+                                                  Edit
                                                 </button>
                                               )}
-                                              <button
-                                                type="button"
-                                                onClick={() =>
-                                                  copyText(job.dm, `dm_${job.rowId}`)
-                                                }
-                                                className="px-2.5 py-1 rounded text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 inline-flex items-center gap-1"
-                                              >
-                                                {copiedId === `dm_${job.rowId}` ? (
-                                                  <>
-                                                    <Check className="h-3 w-3 text-emerald-400" />{' '}
-                                                    Copied
-                                                  </>
-                                                ) : (
-                                                  <>
-                                                    <Copy className="h-3 w-3" /> Copy DM
-                                                  </>
-                                                )}
-                                              </button>
+                                              {job.dm && (
+                                                <button
+                                                  type="button"
+                                                  onClick={() =>
+                                                    copyText(job.dm, `dm_${job.rowId}`)
+                                                  }
+                                                  className="px-2.5 py-1 rounded text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 inline-flex items-center gap-1"
+                                                >
+                                                  {copiedId === `dm_${job.rowId}` ? (
+                                                    <>
+                                                      <Check className="h-3 w-3 text-emerald-400" />{' '}
+                                                      Copied
+                                                    </>
+                                                  ) : (
+                                                    <>
+                                                      <Copy className="h-3 w-3" /> Copy DM
+                                                    </>
+                                                  )}
+                                                </button>
+                                              )}
                                             </div>
                                           </div>
 
@@ -1043,21 +1225,13 @@ export default function TrackerPage() {
                                               rows={3}
                                               value={draftDmText}
                                               onChange={(e) => setDraftDmText(e.target.value)}
-                                              className="w-full bg-[#0B0F17] border border-slate-700 rounded p-2.5 text-xs text-slate-100 leading-relaxed focus:outline-none focus:border-emerald-500"
+                                              className="w-full bg-[#0B0F17] border border-slate-700 rounded p-2.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
                                             />
                                           ) : (
                                             <p className="text-xs text-slate-300 leading-relaxed">
-                                              {job.dm || 'No outreach draft generated yet.'}
+                                              {job.dm || 'No DM draft generated.'}
                                             </p>
                                           )}
-                                        </div>
-
-                                        <div className="pt-3 mt-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400 font-mono tabular-nums">
-                                          <span>Record ID: {job.id}</span>
-                                          <span>
-                                            Estimated Reply Likelihood:{' '}
-                                            {prediction >= 0 ? `${prediction}%` : 'Completed Stage'}
-                                          </span>
                                         </div>
                                       </div>
                                     </div>
@@ -1072,48 +1246,6 @@ export default function TrackerPage() {
                   )}
                 </TableBody>
               </Table>
-            </div>
-
-            <div className="px-4 py-2.5 border-t border-slate-800 bg-[#0D131F] flex flex-wrap items-center justify-between gap-4 text-xs text-slate-400 font-mono">
-              <div className="flex items-center gap-4">
-                <span>
-                  <kbd className="px-1.5 py-0.5 bg-slate-800 text-slate-200 rounded text-[10px]">
-                    j
-                  </kbd>{' '}
-                  /{' '}
-                  <kbd className="px-1.5 py-0.5 bg-slate-800 text-slate-200 rounded text-[10px]">
-                    k
-                  </kbd>{' '}
-                  navigate rows
-                </span>
-                <span>
-                  <kbd className="px-1.5 py-0.5 bg-slate-800 text-slate-200 rounded text-[10px]">
-                    x
-                  </kbd>{' '}
-                  select row
-                </span>
-                <span>
-                  <kbd className="px-1.5 py-0.5 bg-slate-800 text-slate-200 rounded text-[10px]">
-                    s
-                  </kbd>{' '}
-                  cycle stage
-                </span>
-                <span>
-                  <kbd className="px-1.5 py-0.5 bg-slate-800 text-slate-200 rounded text-[10px]">
-                    Enter
-                  </kbd>{' '}
-                  inspect
-                </span>
-                <span>
-                  <kbd className="px-1.5 py-0.5 bg-slate-800 text-slate-200 rounded text-[10px]">
-                    Esc
-                  </kbd>{' '}
-                  clear
-                </span>
-              </div>
-              <div className="tabular-nums">
-                Showing {filteredJobs.length} of {jobs.length} records
-              </div>
             </div>
           </div>
         </div>
