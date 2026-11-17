@@ -851,8 +851,181 @@ Skills: SQL, Python, GTM Strategy`;
       expect(evaluateHardEligibility(validGlobalRemoteJob, strictHydProfile).eligible).toBe(true);
       expect(deterministicEvaluateJob(validGlobalRemoteJob, strictHydProfile).score).toBeGreaterThanOrEqual(85);
     });
+
+    it('canonicalizes cross-source duplicates and enforces strict positive geo allowlist against US/German leaks', async () => {
+      const { buildCanonicalJobKey, getSourceUrlPriority, evaluateHardEligibility } = await import(
+        '../lib/eligibility.js'
+      );
+
+      // Same role scraped from Greenhouse vs JSearch vs Career Page produces identical canonical key
+      const k1 = buildCanonicalJobKey(
+        'Razorpay Software Pvt. Ltd.',
+        'Associate Product Manager (Entry Level) - Remote',
+        'Hyderabad, Telangana'
+      );
+      const k2 = buildCanonicalJobKey(
+        'Razorpay',
+        'APM',
+        'Hyderabad, India'
+      );
+      expect(k1).toBe(k2);
+
+      // Different country bucket produces distinct key
+      const kUs = buildCanonicalJobKey('Cheez', 'Associate Product Manager', 'Largo, US');
+      const kHyd = buildCanonicalJobKey('Cheez', 'Associate Product Manager', 'Hyderabad, India');
+      expect(kUs).not.toBe(kHyd);
+
+      // Direct Career Page / ATS outranks JSearch aggregator
+      expect(getSourceUrlPriority('https://boards.greenhouse.io/razorpay/jobs/1')).toBeGreaterThan(
+        getSourceUrlPriority('jsearch_123')
+      );
+
+      const strictHydProfile = {
+        ...validProfile,
+        target_cities: ['Hyderabad'],
+        open_to_relocation: false,
+        experience_years: 0,
+        experience_level: 'Fresher (0 yrs)',
+      };
+
+      // Real-world leaked roles from user log must be hard-blocked
+      const leakedRoles = [
+        {
+          title: 'Associate Product Manager @ Social app startup',
+          company: 'Cheez',
+          location: 'Largo, US',
+          description: 'Social app startup looking for an Associate Product Manager.',
+        },
+        {
+          title: 'Associate Product Manager',
+          company: 'Volexity',
+          location: 'Silver Spring, US',
+          description: 'Associate Product Manager role in Silver Spring, Maryland. Global offices include Hyderabad.',
+        },
+        {
+          title: 'Associate Product Manager at ATCC in Gaithersburg, Maryland',
+          company: 'disABLEDperson Inc',
+          location: 'Manassas Park, US',
+          description: 'Entry level APM role.',
+        },
+        {
+          title: 'Digital Marketing Associate',
+          company: 'AV',
+          location: 'Arlington, US',
+          description: 'Digital Marketing Associate.',
+        },
+        {
+          title: 'Werkstudent:in Marketing',
+          company: 'Tokura GmbH',
+          location: 'Berlin',
+          description: 'Working student marketing role in Berlin.',
+        },
+      ];
+
+      for (const badJob of leakedRoles) {
+        const res = evaluateHardEligibility(badJob, strictHydProfile);
+        expect(res.eligible).toBe(false);
+        expect(res.flags.geoBlocked).toBe(true);
+      }
+    });
+
+    it('classifies deterministic fallback engine_used properly and updates local rows by canonicalKey', async () => {
+      const fs = await import('fs');
+      const os = await import('os');
+      const path = await import('path');
+      const { deterministicEvaluateJob } = await import('../lib/llm');
+      const {
+        appendLocalJobRecordDetailed,
+        updateLocalJobRow,
+        batchUpdateLocalJobRows,
+        readLocalJobRecords,
+      } = await import('../lib/sheets');
+
+      const detEval = deterministicEvaluateJob(
+        {
+          title: 'Associate Product Manager',
+          company: 'HyderaTech',
+          location: 'Hyderabad',
+          salary: '12 LPA',
+          description: 'Entry-level APM role with SEO and Python EDA.',
+        },
+        validProfile
+      );
+      expect(detEval.engine_used.toLowerCase()).toContain('deterministic');
+
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kaisifos-retry-'));
+      const prevDir = process.env.KAISIFOS_DATA_DIR;
+      process.env.KAISIFOS_DATA_DIR = tmpDir;
+
+      try {
+        const cKey = 'hydratech::associate product manager::india-hyderabad';
+        const writeRes = appendLocalJobRecordDetailed({
+          date: '2026-11-17',
+          id: 'greenhouse_hydratech_1',
+          canonicalKey: cKey,
+          title: 'Associate Product Manager',
+          company: 'HyderaTech',
+          location: 'Hyderabad',
+          score: 76,
+          reasons: 'Matched core role',
+          gap: 'None',
+          url: 'https://boards.greenhouse.io/hydratech/jobs/1',
+          dm: 'Hi team',
+          resumeAngle: 'PM execution',
+          status: 'NEW',
+          evaluationStatus: 'DETERMINISTIC_ONLY',
+          needsLlmRetry: true,
+        });
+        expect(writeRes.ok).toBe(true);
+
+        // Update via canonicalKey only (no id or rowId)
+        const patchOk = updateLocalJobRow(
+          { canonicalKey: cKey },
+          {
+            score: 92,
+            status: 'SHORTLISTED',
+            evaluationStatus: 'LLM_SCORED',
+            needsLlmRetry: false,
+            emailDraft: 'Subject: Application for APM',
+          }
+        );
+        expect(patchOk).toBe(true);
+
+        const afterPatch = readLocalJobRecords();
+        expect(afterPatch).toHaveLength(1);
+        expect(afterPatch[0].score).toBe(92);
+        expect(afterPatch[0].status).toBe('SHORTLISTED');
+        expect(afterPatch[0].evaluationStatus).toBe('LLM_SCORED');
+        expect(afterPatch[0].needsLlmRetry).toBe(false);
+        expect(afterPatch[0].emailDraft).toBe('Subject: Application for APM');
+
+        // Batch update via canonicalKey
+        const batchCount = batchUpdateLocalJobRows([{ canonicalKey: cKey }], 'APPLIED');
+        expect(batchCount).toBe(1);
+        expect(readLocalJobRecords()[0].status).toBe('APPLIED');
+      } finally {
+        if (prevDir === undefined) delete process.env.KAISIFOS_DATA_DIR;
+        else process.env.KAISIFOS_DATA_DIR = prevDir;
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('exports consistent computeProfileVersionHash and Neon DB module surface', async () => {
+      const neon = await import('../lib/neon-db.js');
+      const hashA = neon.computeProfileVersionHash(FORK_PROFILE_TEMPLATES.pm_growth);
+      const hashB = neon.computeProfileVersionHash({
+        ...FORK_PROFILE_TEMPLATES.pm_growth,
+        open_to_relocation: !FORK_PROFILE_TEMPLATES.pm_growth.open_to_relocation,
+      });
+      expect(hashA).toMatch(/^v_[0-9a-f]+$/);
+      expect(hashA).not.toBe(hashB);
+      expect(typeof neon.getNeonPipelineJobs).toBe('function');
+      expect(typeof neon.upsertNeonCanonicalJob).toBe('function');
+      expect(typeof neon.recordNeonScoutRun).toBe('function');
+    });
   });
 });
+
 
 
 

@@ -8,7 +8,17 @@ import {
   decodeAndStripHtml,
   extractRequiredYearsStrict,
   evaluateHardEligibility,
+  buildCanonicalJobKey,
+  getSourceUrlPriority,
 } from '../lib/eligibility.js';
+import {
+  isNeonPostgresConfigured,
+  getNeonCanonicalStateMap,
+  upsertNeonCanonicalJob,
+  readNeonCandidateProfile,
+  writeNeonCandidateProfile,
+  recordNeonScoutRun,
+} from '../lib/neon-db.js';
 
 dotenv.config();
 
@@ -481,6 +491,29 @@ async function ensureSheetsReady(sheets, auth) {
 }
 
 async function loadProfileForCli(sheets, auth, fallbackPath) {
+  const localProfile = JSON.parse(fs.readFileSync(fallbackPath, 'utf8'));
+
+  if (isNeonPostgresConfigured()) {
+    try {
+      const neonRes = await readNeonCandidateProfile();
+      if (neonRes?.profile && typeof neonRes.profile === 'object') {
+        const merged = { ...localProfile, ...neonRes.profile };
+        if (localProfile.open_to_relocation === false) {
+          merged.open_to_relocation = false;
+          if (merged.relocation_preference) merged.relocation_preference.willing = false;
+        }
+        console.log('[Scout] Loaded active candidate profile from Neon Postgres candidate_profiles.');
+        return merged;
+      } else {
+        await writeNeonCandidateProfile(localProfile);
+        console.log('[Scout] Seeded Neon Postgres candidate_profiles from local data/profile.json.');
+        return localProfile;
+      }
+    } catch (err) {
+      console.warn('[Scout] Neon profile read fallback:', err.message);
+    }
+  }
+
   if (process.env.GOOGLE_SHEET_ID && auth) {
     try {
       const res = await sheets.spreadsheets.values.get({
@@ -490,14 +523,20 @@ async function loadProfileForCli(sheets, auth, fallbackPath) {
       });
       const raw = res.data.values?.[0]?.[0];
       if (typeof raw === 'string' && raw.trim().startsWith('{')) {
+        const cloudProfile = JSON.parse(raw);
+        const merged = { ...localProfile, ...cloudProfile };
+        if (localProfile.open_to_relocation === false && cloudProfile.open_to_relocation === true) {
+          merged.open_to_relocation = false;
+          if (merged.relocation_preference) merged.relocation_preference.willing = false;
+        }
         console.log('[Scout] Loaded active candidate profile from Google Sheets Profile!A1.');
-        return JSON.parse(raw);
+        return merged;
       }
     } catch {
       // Fall back safely to local data/profile.json
     }
   }
-  return JSON.parse(fs.readFileSync(fallbackPath, 'utf8'));
+  return localProfile;
 }
 
 async function getExistingJobIds(sheets, auth) {
@@ -835,7 +874,25 @@ export async function fetchFreeHireAtsJobs(profile) {
     }
   }
 
-  // 4B. Greenhouse Public Boards API (up to 12 boards)
+  const scorePostingForBoardSlice = (title, loc) => {
+    const l = String(loc || '').toLowerCase();
+    const t = String(title || '').toLowerCase();
+    let s = 0;
+    if (/\b(hyderabad|telangana|secunderabad)\b/.test(l)) s += 60;
+    else if (/\b(india|bengaluru|bangalore|mumbai|pune|gurgaon|gurugram|noida|chennai|delhi)\b/.test(l))
+      s += 35;
+    else if (/\b(remote|worldwide|anywhere|global|distributed)\b/.test(l)) s += 20;
+    if (
+      /\b(associate product|apm|product marketing|pmm|growth|founder|product analyst|product manager|marketing operations|digital content)\b/.test(
+        t
+      )
+    )
+      s += 30;
+    if (!/\b(senior|sr\.?|staff|principal|director|vp|vice president|head of)\b/.test(t)) s += 12;
+    return s;
+  };
+
+  // 4B. Greenhouse Public Boards API (up to 12 boards, pre-sorted before slice)
   const ghBoards = (atsConfig.greenhouse || []).slice(0, 12);
   await Promise.allSettled(
     ghBoards.map(async (slug) => {
@@ -846,7 +903,14 @@ export async function fetchFreeHireAtsJobs(profile) {
         );
         if (!res.ok) return;
         const data = await res.json();
-        for (const item of (data.jobs || []).slice(0, 12)) {
+        const sorted = [...(data.jobs || [])]
+          .sort(
+            (a, b) =>
+              scorePostingForBoardSlice(b.title, b.location?.name) -
+              scorePostingForBoardSlice(a.title, a.location?.name)
+          )
+          .slice(0, 14);
+        for (const item of sorted) {
           const desc = stripHtmlTags(item.content || '').trim();
           jobs.push({
             id: `greenhouse_${slug}_${item.id}`,
@@ -856,13 +920,14 @@ export async function fetchFreeHireAtsJobs(profile) {
             redirect_url: item.absolute_url || `https://boards.greenhouse.io/${slug}`,
             location: item.location?.name || 'Remote / Hybrid',
             has_relocation: /relocation|visa|sponsorship/i.test(desc),
+            source_label: 'Greenhouse',
           });
         }
       } catch (_) {}
     })
   );
 
-  // 4C. Lever Public Postings API (up to 12 boards)
+  // 4C. Lever Public Postings API (up to 12 boards, pre-sorted before slice)
   const leverBoards = (atsConfig.lever || []).slice(0, 12);
   await Promise.allSettled(
     leverBoards.map(async (slug) => {
@@ -874,7 +939,14 @@ export async function fetchFreeHireAtsJobs(profile) {
         if (!res.ok) return;
         const data = await res.json();
         if (!Array.isArray(data)) return;
-        for (const item of data.slice(0, 10)) {
+        const sorted = [...data]
+          .sort(
+            (a, b) =>
+              scorePostingForBoardSlice(b.text, b.categories?.location) -
+              scorePostingForBoardSlice(a.text, a.categories?.location)
+          )
+          .slice(0, 12);
+        for (const item of sorted) {
           const desc = stripHtmlTags(item.descriptionPlain || item.description || '').trim();
           jobs.push({
             id: `lever_${slug}_${item.id}`,
@@ -884,13 +956,14 @@ export async function fetchFreeHireAtsJobs(profile) {
             redirect_url: item.hostedUrl || item.applyUrl || '',
             location: item.categories?.location || 'Remote / Hybrid',
             has_relocation: /relocation|visa|sponsorship/i.test(desc),
+            source_label: 'Lever',
           });
         }
       } catch (_) {}
     })
   );
 
-  // 4D. Ashby Public Job Board API (up to 12 boards)
+  // 4D. Ashby Public Job Board API (up to 12 boards, pre-sorted before slice)
   const ashbyBoards = (atsConfig.ashby || []).slice(0, 12);
   await Promise.allSettled(
     ashbyBoards.map(async (slug) => {
@@ -901,7 +974,14 @@ export async function fetchFreeHireAtsJobs(profile) {
         );
         if (!res.ok) return;
         const data = await res.json();
-        for (const item of (data.jobs || []).slice(0, 10)) {
+        const sorted = [...(data.jobs || [])]
+          .sort(
+            (a, b) =>
+              scorePostingForBoardSlice(b.title, b.location) -
+              scorePostingForBoardSlice(a.title, a.location)
+          )
+          .slice(0, 12);
+        for (const item of sorted) {
           const desc = stripHtmlTags(item.descriptionPlain || item.descriptionHtml || '').trim();
           jobs.push({
             id: `ashby_${slug}_${item.id}`,
@@ -911,13 +991,14 @@ export async function fetchFreeHireAtsJobs(profile) {
             redirect_url: item.jobUrl || item.applyUrl || '',
             location: item.location || 'Remote',
             has_relocation: /relocation|visa|sponsorship/i.test(desc),
+            source_label: 'Ashby',
           });
         }
       } catch (_) {}
     })
   );
 
-  // 4E. Workable Public Widget API + v3 detail fetch
+  // 4E. Workable Public Widget API + v3 detail fetch (pre-sorted before slice)
   const workableBoards = (atsConfig.workable || []).slice(0, 12);
   await Promise.allSettled(
     workableBoards.map(async (slug) => {
@@ -929,7 +1010,14 @@ export async function fetchFreeHireAtsJobs(profile) {
         if (!res.ok) return;
         const data = await res.json();
         const companyName = data.name || slug.charAt(0).toUpperCase() + slug.slice(1);
-        for (const item of (data.jobs || []).slice(0, 8)) {
+        const sorted = [...(data.jobs || [])]
+          .sort(
+            (a, b) =>
+              scorePostingForBoardSlice(b.title, [b.city, b.country].filter(Boolean).join(', ')) -
+              scorePostingForBoardSlice(a.title, [a.city, a.country].filter(Boolean).join(', '))
+          )
+          .slice(0, 10);
+        for (const item of sorted) {
           const loc =
             [item.city, item.country].filter(Boolean).join(', ') ||
             (item.telecommuting ? 'Remote' : 'Flexible');
@@ -967,24 +1055,38 @@ export async function fetchFreeHireAtsJobs(profile) {
             redirect_url: applyUrl,
             location: loc,
             has_relocation: /relocation|visa\s*sponsor|sponsorship/i.test(finalDesc),
+            source_label: 'Workable',
           });
         }
       } catch (_) {}
     })
   );
 
-  // 4F. SmartRecruiters Public Postings API + detail fetch
+  // 4F. SmartRecruiters Public Postings API + detail fetch (pre-sorted before slice)
   const srBoards = (atsConfig.smartrecruiters || []).slice(0, 12);
   await Promise.allSettled(
     srBoards.map(async (slug) => {
       try {
         const res = await fetch(
-          `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(slug)}/postings?limit=10`,
+          `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(slug)}/postings?limit=35`,
           { signal: AbortSignal.timeout(7000) }
         );
         if (!res.ok) return;
         const data = await res.json();
-        for (const item of (data.content || []).slice(0, 8)) {
+        const sorted = [...(data.content || [])]
+          .sort(
+            (a, b) =>
+              scorePostingForBoardSlice(
+                b.name,
+                [b.location?.city, b.location?.country].filter(Boolean).join(', ')
+              ) -
+              scorePostingForBoardSlice(
+                a.name,
+                [a.location?.city, a.location?.country].filter(Boolean).join(', ')
+              )
+          )
+          .slice(0, 10);
+        for (const item of sorted) {
           const companyName = item.company?.name || slug;
           const companyIdentifier = item.company?.identifier || slug;
           const loc =
@@ -1026,13 +1128,14 @@ export async function fetchFreeHireAtsJobs(profile) {
             redirect_url: applyUrl,
             location: loc,
             has_relocation: /relocation|visa\s*sponsor|sponsorship/i.test(finalDesc),
+            source_label: 'SmartRecruiters',
           });
         }
       } catch (_) {}
     })
   );
 
-  // 4G. Recruitee Public Offers API
+  // 4G. Recruitee Public Offers API (pre-sorted before slice)
   const recruiteeBoards = (atsConfig.recruitee || []).slice(0, 12);
   await Promise.allSettled(
     recruiteeBoards.map(async (slug) => {
@@ -1044,7 +1147,14 @@ export async function fetchFreeHireAtsJobs(profile) {
         });
         if (!res.ok) return;
         const data = await res.json();
-        for (const item of (data.offers || []).slice(0, 8)) {
+        const sorted = [...(data.offers || [])]
+          .sort(
+            (a, b) =>
+              scorePostingForBoardSlice(b.title, b.location || (b.remote ? 'Remote' : 'Hybrid')) -
+              scorePostingForBoardSlice(a.title, a.location || (a.remote ? 'Remote' : 'Hybrid'))
+          )
+          .slice(0, 10);
+        for (const item of sorted) {
           const desc = stripHtmlTags(item.description || '').trim();
           const applyUrl =
             item.careers_url ||
@@ -1058,6 +1168,7 @@ export async function fetchFreeHireAtsJobs(profile) {
             redirect_url: applyUrl,
             location: item.location || (item.remote ? 'Remote' : 'Hybrid'),
             has_relocation: /relocation|visa|sponsorship/i.test(desc),
+            source_label: 'Recruitee',
           });
         }
       } catch (_) {}
@@ -1262,11 +1373,18 @@ export async function fetchJSearchJobs(profile) {
   }
   const jobs = [];
   const roles = (profile?.target_roles || ['Associate Product Manager', 'Growth Analyst']).slice(0, 3);
-  const query = `(${roles.map((r) => `"${r}"`).join(' OR ')}) (fresher OR "entry level" OR junior OR associate)`;
+  const cityConstraint =
+    profile?.open_to_relocation === false
+      ? `in ${(profile?.target_cities || ['Hyderabad']).join(' OR ')}, India`
+      : '';
+  const query = `(${roles.map((r) => `"${r}"`).join(' OR ')}) (fresher OR "entry level" OR junior OR associate) ${cityConstraint}`.trim();
   const url = new URL('https://jsearch.p.rapidapi.com/search');
   url.searchParams.append('query', query);
   url.searchParams.append('num_pages', '1');
   url.searchParams.append('date_posted', 'week');
+  if (profile?.open_to_relocation === false) {
+    url.searchParams.append('country', 'in');
+  }
 
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
@@ -1811,21 +1929,36 @@ async function main() {
     const groqKey = process.env.GROQ_API_KEY || '';
     const groq = groqKey && !groqKey.startsWith('xai-') ? new Groq({ apiKey: groqKey }) : null;
     const profilePath = path.join(__dirname, '../data/profile.json');
-
-    console.log(
-      '[Scout] Starting — sources: Company Career Pages + 6 Direct-ATS (Greenhouse/Lever/Ashby/Workable/SmartRecruiters/Recruitee) + Internshala + RemoteOK + Remotive + Himalayas + Arbeitnow + JSearch'
+    const neonConfigured = isNeonPostgresConfigured();
+    const hasSheetsConfig = Boolean(
+      process.env.GOOGLE_SERVICE_KEY_BASE64?.trim() && process.env.GOOGLE_SHEET_ID?.trim()
     );
 
-    const auth = await getAuth();
-    const sheets = google.sheets('v4');
-    await ensureSheetsReady(sheets, auth);
+    console.log(
+      '[Scout] Starting v4.0 — sources: Company Career Pages + 6 Direct-ATS (Greenhouse/Lever/Ashby/Workable/SmartRecruiters/Recruitee) + Internshala + RemoteOK + Remotive + Himalayas + Arbeitnow + JSearch'
+    );
+
+    let auth = null;
+    let sheets = null;
+    if (hasSheetsConfig) {
+      try {
+        auth = await getAuth();
+        sheets = google.sheets('v4');
+        await ensureSheetsReady(sheets, auth);
+      } catch (e) {
+        console.warn('[Sheets] Auth initialization skipped:', e.message);
+      }
+    }
 
     const profile = await loadProfileForCli(sheets, auth, profilePath);
-    const [seenIds, existingSheetIds] = await Promise.all([
-      getSeenJobIds(sheets, auth),
-      getExistingJobIds(sheets, auth).catch(() => new Set()),
+    const [seenIds, existingSheetIds, neonStateMap] = await Promise.all([
+      sheets && auth ? getSeenJobIds(sheets, auth).catch(() => new Set()) : Promise.resolve(new Set()),
+      sheets && auth ? getExistingJobIds(sheets, auth).catch(() => new Set()) : Promise.resolve(new Set()),
+      neonConfigured ? getNeonCanonicalStateMap() : Promise.resolve(new Map()),
     ]);
-    console.log(`[Scout] ${seenIds.size} seen job IDs + ${existingSheetIds.size} ledger IDs.`);
+    console.log(
+      `[Scout] State loaded — Neon canonical keys: ${neonStateMap.size} | Seen IDs: ${seenIds.size} | Sheet IDs: ${existingSheetIds.size}`
+    );
 
     const [rawFreeHire, rawInternshala, rawRemoteOK, rawRemotive, rawHimalayas, rawJSearch] =
       await Promise.all([
@@ -1849,37 +1982,76 @@ async function main() {
       `[Scout] Raw: ${rawJobs.length} (FreeHire ATS: ${rawFreeHire.length} | Internshala: ${rawInternshala.length} | RemoteOK: ${rawRemoteOK.length} | Remotive: ${rawRemotive.length} | Himalayas: ${rawHimalayas.length} | JSearch: ${rawJSearch.length})`
     );
 
-    // Canonical Fingerprint Deduplication (ID + normalized company::title)
-    const deduped = new Map();
-    const fingerprints = new Set();
+    // Canonical Cross-Source Deduplication (buildCanonicalJobKey: company::title::geoBucket)
+    const dedupedByCanonical = new Map();
+    let canonicalDuplicatesMerged = 0;
+
     for (const job of rawJobs) {
       if (!job.id || !job.title) continue;
-      const fp = `${(job.company?.display_name || '').toLowerCase().replace(/[^a-z0-9]/g, '')}::${job.title.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
-      if (fingerprints.has(fp)) continue;
-      fingerprints.add(fp);
-      deduped.set(String(job.id), job);
+      const companyName = job.company?.display_name || 'Unknown';
+      const cKey = buildCanonicalJobKey(companyName, job.title, job.location);
+      job.canonicalKey = cKey;
+      const sourceLabel = job.source_label || String(job.id).split('_')[0] || 'scout';
+
+      const existing = dedupedByCanonical.get(cKey);
+      if (existing) {
+        canonicalDuplicatesMerged += 1;
+        const seenList = existing.sourcesSeen || [
+          { source: existing.source_label || String(existing.id).split('_')[0], url: existing.redirect_url || '' },
+        ];
+        if (!seenList.some((s) => s.source === sourceLabel)) {
+          seenList.push({ source: sourceLabel, url: job.redirect_url || '', id: job.id });
+        }
+        existing.sourcesSeen = seenList;
+        if ((job.description || '').length > (existing.description || '').length) {
+          existing.description = job.description;
+        }
+        if (
+          getSourceUrlPriority(job.redirect_url || job.id) >
+          getSourceUrlPriority(existing.redirect_url || existing.id)
+        ) {
+          existing.redirect_url = job.redirect_url;
+          existing.id = job.id;
+        }
+        continue;
+      }
+
+      job.sourcesSeen = [{ source: sourceLabel, url: job.redirect_url || '', id: job.id }];
+      dedupedByCanonical.set(cKey, job);
     }
 
-    const newJobs = Array.from(deduped.values()).filter(
-      (j) => !seenIds.has(String(j.id)) && !existingSheetIds.has(String(j.id))
+    const newJobs = [];
+    for (const [cKey, job] of dedupedByCanonical.entries()) {
+      const neonState = neonStateMap.get(cKey);
+      if (neonState) {
+        // Re-evaluate if previous run failed LLM scoring (needs_llm_retry = true)
+        if (!neonState.needsLlmRetry) continue;
+      } else if (
+        seenIds.has(String(job.id)) ||
+        seenIds.has(cKey) ||
+        existingSheetIds.has(String(job.id))
+      ) {
+        continue;
+      }
+      newJobs.push(job);
+    }
+    console.log(
+      `[Scout] After canonical dedup (${canonicalDuplicatesMerged} cross-source duplicates merged) + state filter: ${newJobs.length} candidate jobs.`
     );
-    console.log(`[Scout] After fingerprint dedup + seen/ledger filter: ${newJobs.length} new jobs.`);
 
-    const roleKeywords = (profile.target_roles || [])
-      .map((r) => r.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/))
-      .flat()
-      .filter((w) => w.length > 3);
-    roleKeywords.push('apm', 'pmm', 'growth', 'product', 'founder', 'analyst');
-    const whitelistRegex = new RegExp(`\\b(${Array.from(new Set(roleKeywords)).join('|')})\\b`, 'i');
+    // Role relevance filter: match target_roles or high-signal PM/PMM/Growth/Founder/Analyst terms, excluding retail/offline "Marketing Executive" or "Werkstudent"
+    const whitelistRegex =
+      /\b(product\s+manager|associate\s+product|apm|product\s+marketing|pmm|growth|founder'?s?\s+associate|founder'?s?\s+office|chief\s+of\s+staff|product\s+analyst|marketing\s+operations|marketing\s+analyst|digital\s+marketing|digital\s+content|gtm)\b/i;
 
     const titleSeniorityRegex =
       /\b(senior|sr\.?|director|vp|vice president|head of|chief|principal|staff)\b/i;
     const fresherLeadRegex = /\b(lead)\b/i;
     const descBlacklistRegex =
-      /\b((?:[4-9]|1\d)\+?\s*years?|video\s+editor|graphic\s+designer|telecaller|inside\s+sales|telemarketing|customer\s+support|data\s+entry|tutor|teacher)\b/i;
+      /\b((?:[4-9]|1\d)\+?\s*years?|video\s+editor|graphic\s+designer|telecaller|inside\s+sales|telemarketing|customer\s+support|data\s+entry|tutor|teacher|werkstudent|field\s+sales|store\s+manager)\b/i;
 
     const expYears = profile.experience_years || 0;
     const rejectedNonMatchIds = [];
+    const hardGateReasons = {};
     const prunedJobs = [];
 
     for (const job of newJobs) {
@@ -1894,15 +2066,27 @@ async function main() {
 
       if (!matchesRole || hitsSeniorTitle || hitsBlacklist) {
         rejectedNonMatchIds.push(String(job.id));
+        if (job.canonicalKey) rejectedNonMatchIds.push(job.canonicalKey);
+        const reasonKey = !matchesRole ? 'Non-target role title' : 'Seniority or blacklist filter';
+        hardGateReasons[reasonKey] = (hardGateReasons[reasonKey] || 0) + 1;
       } else {
         prunedJobs.push(job);
       }
     }
 
+    // Sort prunedJobs so Hyderabad / target-city jobs are enriched FIRST before running enrichQuota
+    const targetCityTokens = (profile.target_cities || ['Hyderabad']).map((c) => c.toLowerCase());
+    prunedJobs.sort((a, b) => {
+      const aHub = targetCityTokens.some((c) => String(a.location || '').toLowerCase().includes(c)) ? 1 : 0;
+      const bHub = targetCityTokens.some((c) => String(b.location || '').toLowerCase().includes(c)) ? 1 : 0;
+      if (bHub !== aHub) return bHub - aHub;
+      return getSourceUrlPriority(b.redirect_url || b.id) - getSourceUrlPriority(a.redirect_url || a.id);
+    });
+
     // Enrich thin/stub JDs (e.g. Career Page anchors, Internshala HTML cards) before running strict eligibility gate
-    let enrichQuota = 14;
+    let enrichQuota = 16;
     await Promise.allSettled(
-      prunedJobs.slice(0, 20).map(async (job) => {
+      prunedJobs.slice(0, 22).map(async (job) => {
         if ((job.description || '').length >= 260 || !job.redirect_url || enrichQuota <= 0) return;
         try {
           const parsed = new URL(job.redirect_url);
@@ -1952,14 +2136,37 @@ async function main() {
         item.baseline.score < 56
       ) {
         rejectedNonMatchIds.push(String(item.job.id));
+        if (item.job.canonicalKey) rejectedNonMatchIds.push(item.job.canonicalKey);
+        const gateReason = item.eligibility.eligible
+          ? 'Below rubric pre-triage floor'
+          : item.eligibility.reasons?.[0] || 'Filtered by hard gate';
+        const reasonKey = gateReason.split(':')[0].trim();
+        hardGateReasons[reasonKey] = (hardGateReasons[reasonKey] || 0) + 1;
+        if (neonConfigured) {
+          upsertNeonCanonicalJob({
+            id: item.job.id,
+            canonicalKey: item.job.canonicalKey,
+            title: item.job.title,
+            company: item.job.company?.display_name || 'Unknown',
+            location: item.job.location || '',
+            url: item.job.redirect_url || '',
+            source: item.job.id,
+            sourcesSeen: item.job.sourcesSeen,
+            score: 0,
+            evaluationStatus: 'REJECTED_GATE',
+            needsLlmRetry: false,
+            pipelineStage: 'REJECTED',
+            hardRejectReason: gateReason,
+          }).catch(() => {});
+        }
       } else {
         llmEligible.push(item);
       }
     }
 
     llmEligible.sort((a, b) => {
-      const aHub = a.eligibility.flags.matchesTargetHub ? 15 : 0;
-      const bHub = b.eligibility.flags.matchesTargetHub ? 15 : 0;
+      const aHub = a.eligibility.flags.matchesTargetHub ? 20 : 0;
+      const bHub = b.eligibility.flags.matchesTargetHub ? 20 : 0;
       return bHub + b.baseline.score - (aHub + a.baseline.score);
     });
 
@@ -1970,6 +2177,7 @@ async function main() {
 
     const scoredMatches = [];
     const seenScoredIds = [];
+    let queuedForRetryCount = 0;
     let deadlineTriggered = false;
 
     for (let i = 0; i < jobsToScore.length; i += 2) {
@@ -1987,11 +2195,51 @@ async function main() {
 
       for (const { job, scoreData } of results) {
         const score = scoreData?.score ?? 0;
+        const isDeterministicFallback =
+          scoreData?.engine_used === 'Deterministic 4-Pillar Rubric v3.2';
+        const evalStatus = isDeterministicFallback ? 'DETERMINISTIC_ONLY' : 'LLM_SCORED';
+        const needsLlmRetry = isDeterministicFallback && score >= 56;
+
         console.log(
-          `  [Score] "${job.title}" @ ${job.company?.display_name} [${job.location}] → ${score}/100 (${scoreData?.engine_used || 'LLM'})`
+          `  [Score] "${job.title}" @ ${job.company?.display_name} [${job.location}] → ${score}/100 (${scoreData?.engine_used || 'LLM'}${needsLlmRetry ? ' · queued for LLM retry' : ''})`
         );
-        if (score > 0) seenScoredIds.push(String(job.id));
-        if (score >= 90) scoredMatches.push({ job, scoreData });
+
+        // CRITICAL: Never lock DETERMINISTIC_ONLY jobs into SeenJobs so they can be retried when LLM recovers!
+        if (!needsLlmRetry && score > 0) {
+          seenScoredIds.push(String(job.id));
+          if (job.canonicalKey) seenScoredIds.push(job.canonicalKey);
+        } else if (needsLlmRetry) {
+          queuedForRetryCount += 1;
+        }
+
+        // Persist to Neon Postgres (both high matches and DETERMINISTIC_ONLY retry candidates)
+        const qualifiesForCommit = isDeterministicFallback ? score >= 72 : score >= 80;
+        if (neonConfigured && (qualifiesForCommit || needsLlmRetry)) {
+          await upsertNeonCanonicalJob({
+            id: job.id,
+            canonicalKey: job.canonicalKey,
+            title: job.title,
+            company: job.company?.display_name || 'Unknown',
+            location: job.location || 'Hyderabad',
+            salary: job.salary_min ? `${job.salary_min}` : '',
+            description: job.description,
+            url: job.redirect_url || '',
+            source: job.id,
+            sourcesSeen: job.sourcesSeen,
+            score,
+            evaluationStatus: evalStatus,
+            needsLlmRetry,
+            pipelineStage: score >= 90 ? 'SHORTLISTED' : 'NEW',
+            reasons: (scoreData.match_reasons || []).join(' | '),
+            gap: scoreData.gap || '',
+            dmDraft: scoreData.dm_draft || '',
+            resumeAngle: scoreData.resume_angle || '',
+          }).catch((e) => console.warn('[Neon] Upsert warning:', e.message));
+        }
+
+        if (qualifiesForCommit) {
+          scoredMatches.push({ job, scoreData });
+        }
       }
 
       const anyLlmStillOpen =
@@ -2005,16 +2253,18 @@ async function main() {
     }
 
     if (deadlineTriggered) {
-      console.warn('[Scout] Reached 5.5m global LLM budget — completed remaining roles deterministically.');
+      console.warn('[Scout] Reached 5.5m global LLM budget — completed remaining roles deterministically and queued for retry.');
     }
 
-    // Flush both scored IDs and deterministically rejected non-match IDs to SeenJobs so backlog never stalls
-    await appendSeenJobIds(sheets, auth, [...seenScoredIds, ...rejectedNonMatchIds]);
+    // Flush genuinely LLM-scored IDs and deterministically rejected non-match IDs to SeenJobs (never DETERMINISTIC_ONLY retry jobs)
+    if (sheets && auth) {
+      await appendSeenJobIds(sheets, auth, [...seenScoredIds, ...rejectedNonMatchIds]);
+    }
 
     scoredMatches.sort((a, b) => b.scoreData.score - a.scoreData.score);
-    const topMatches = scoredMatches.slice(0, 5);
+    const topMatches = scoredMatches.slice(0, 8);
 
-    if (topMatches.length > 0) {
+    if (topMatches.length > 0 && sheets && auth) {
       const dateStr = new Date().toISOString().split('T')[0];
       const rows = topMatches.map((m) => [
         sanitizeSheetCell(dateStr, 20),
@@ -2027,13 +2277,27 @@ async function main() {
         sanitizeSheetCell(m.job.redirect_url || '', 500),
         sanitizeSheetCell(m.scoreData.dm_draft || '', 1500),
         sanitizeSheetCell(m.scoreData.resume_angle || '', 500),
-        'NEW',
+        m.scoreData.score >= 90 ? 'SHORTLISTED' : 'NEW',
       ]);
       await appendToSheet(sheets, auth, rows);
     }
 
+    if (neonConfigured) {
+      await recordNeonScoutRun({
+        runner: 'github_actions_cli',
+        rawFetched: rawJobs.length,
+        canonicalDedupSaved: canonicalDuplicatesMerged,
+        hardGateRejected: rejectedNonMatchIds.length,
+        evaluatedCount: jobsToScore.length,
+        committedCount: topMatches.length,
+        queuedForRetryCount,
+        rejectionBreakdown: hardGateReasons,
+        durationMs: Date.now() - runStartMs,
+      }).catch(() => {});
+    }
+
     let weeklyStats = null;
-    if (new Date().getDay() === 0) weeklyStats = await getWeeklyStats(sheets, auth);
+    if (new Date().getDay() === 0 && sheets && auth) weeklyStats = await getWeeklyStats(sheets, auth);
 
     await sendDiscordDigest(
       topMatches,

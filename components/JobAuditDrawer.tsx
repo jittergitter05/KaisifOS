@@ -11,6 +11,7 @@ import {
   RefreshCw,
   BookOpen,
   AlertTriangle,
+  Save,
 } from 'lucide-react';
 import { Button } from './ui/button';
 import StatusBadge from './StatusBadge';
@@ -26,17 +27,24 @@ export { deriveJobPillarBreakdown };
 export interface AuditableJob {
   rowId?: number;
   id: string;
+  canonicalKey?: string;
   date: string;
   title: string;
   company: string;
+  location?: string;
+  salary?: string;
   score: number;
   reasons: string;
   gap: string;
   url: string;
   dm: string;
+  emailDraft?: string;
   resumeAngle: string;
   status: string;
   source: string;
+  evaluationStatus?: 'LLM_SCORED' | 'DETERMINISTIC_ONLY' | 'REJECTED_GATE';
+  needsLlmRetry?: boolean;
+  sourcesSeen?: Array<{ source: string; url: string; id?: string; seenAt?: string }>;
 }
 
 interface PrepPackResult {
@@ -57,6 +65,11 @@ export default function JobAuditDrawer({
 }) {
   const [localJob, setLocalJob] = useState<AuditableJob | null>(job);
   const [copiedField, setCopiedField] = useState<'dm' | 'angle' | 'email' | 'nudge' | null>(null);
+  const [outreachTab, setOutreachTab] = useState<'dm' | 'email' | 'angle'>('dm');
+  const [editableDm, setEditableDm] = useState('');
+  const [editableEmail, setEditableEmail] = useState('');
+  const [editableAngle, setEditableAngle] = useState('');
+  const [savingOutreach, setSavingOutreach] = useState(false);
   const [rescoring, setRescoring] = useState(false);
   const [rescoreNote, setRescoreNote] = useState<string | null>(null);
   const [chainStatus, setChainStatus] = useState<Record<string, string> | null>(null);
@@ -69,6 +82,14 @@ export default function JobAuditDrawer({
 
   useEffect(() => {
     setLocalJob(job);
+    if (job) {
+      setEditableDm(job.dm || '');
+      const defaultEmail =
+        job.emailDraft ||
+        `Subject: ${job.title} @ ${job.company} — Application & Impact Summary\n\nHi ${job.company} Hiring Team,\n\n${job.dm}\n\nPositioning focus for this role: ${job.resumeAngle || 'Direct domain & metric alignment'}\n\nApplication reference: ${job.url}`;
+      setEditableEmail(defaultEmail);
+      setEditableAngle(job.resumeAngle || '');
+    }
     setRescoreNote(null);
     setChainStatus(null);
     setSkillOverlap(null);
@@ -95,13 +116,62 @@ export default function JobAuditDrawer({
     .map((r) => r.trim())
     .filter(Boolean);
 
-  const synthesizedEmail = `Subject: ${localJob.title} @ ${localJob.company} — Application & Impact Summary\n\nHi ${localJob.company} Hiring Team,\n\n${localJob.dm}\n\nPositioning focus for this role: ${localJob.resumeAngle || 'Direct domain & metric alignment'}\n\nApplication reference: ${localJob.url}`;
+  const isDeterministicOnly =
+    localJob.needsLlmRetry ||
+    localJob.evaluationStatus === 'DETERMINISTIC_ONLY' ||
+    /Deterministic 4-Pillar Rubric/i.test(localJob.reasons);
 
   const copyText = async (text: string, key: 'dm' | 'angle' | 'email' | 'nudge') => {
     const ok = await copyToClipboardSafe(text);
     if (ok) {
       setCopiedField(key);
       setTimeout(() => setCopiedField(null), 1800);
+    }
+  };
+
+  const handleSaveOutreach = async (markDrafted = false) => {
+    setSavingOutreach(true);
+    setDrawerError(null);
+    setRescoreNote(null);
+    const nextStatus =
+      markDrafted && (localJob.status === 'NEW' || localJob.status === 'SHORTLISTED')
+        ? 'OUTREACH_DRAFTED'
+        : localJob.status;
+    try {
+      const res = await fetch('/api/sheet-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: localJob.id,
+          canonicalKey: localJob.canonicalKey,
+          rowId: localJob.rowId,
+          dm: editableDm,
+          emailDraft: editableEmail,
+          resumeAngle: editableAngle,
+          status: nextStatus,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.error || `Failed to save outreach (HTTP ${res.status})`);
+      }
+      setLocalJob({
+        ...localJob,
+        dm: editableDm,
+        emailDraft: editableEmail,
+        resumeAngle: editableAngle,
+        status: nextStatus,
+      });
+      setRescoreNote(
+        markDrafted && nextStatus === 'OUTREACH_DRAFTED'
+          ? 'Outreach saved & stage advanced to Outreach Drafted'
+          : 'Outreach drafts saved to ledger'
+      );
+      if (onJobUpdated) onJobUpdated();
+    } catch (e) {
+      setDrawerError((e as Error).message || 'Unable to save outreach drafts.');
+    } finally {
+      setSavingOutreach(false);
     }
   };
 
@@ -116,8 +186,8 @@ export default function JobAuditDrawer({
         body: JSON.stringify({
           title: localJob.title,
           company: localJob.company,
-          location: 'Remote / Hybrid',
-          salary: '',
+          location: localJob.location || 'Hyderabad / Remote',
+          salary: localJob.salary || '',
           description: `${localJob.title} at ${localJob.company}. Existing signals: ${localJob.reasons}. Potential risk/gap: ${localJob.gap}`,
         }),
       });
@@ -136,6 +206,7 @@ export default function JobAuditDrawer({
         missing: Array.isArray(evalData.missing_skills) ? evalData.missing_skills : [],
       });
 
+      const usedLlm = !String(evalData.engine_used || '').toLowerCase().includes('deterministic');
       const updated: AuditableJob = {
         ...localJob,
         score: evalData.score ?? localJob.score,
@@ -143,8 +214,12 @@ export default function JobAuditDrawer({
         gap: evalData.gap ?? localJob.gap,
         dm: evalData.dm_draft ?? localJob.dm,
         resumeAngle: evalData.resume_angle ?? localJob.resumeAngle,
+        evaluationStatus: usedLlm ? 'LLM_SCORED' : 'DETERMINISTIC_ONLY',
+        needsLlmRetry: !usedLlm,
       };
       setLocalJob(updated);
+      setEditableDm(updated.dm);
+      setEditableAngle(updated.resumeAngle);
 
       if (localJob.id || (localJob.rowId && localJob.rowId >= 2)) {
         const syncRes = await fetch('/api/sheet-sync', {
@@ -152,12 +227,15 @@ export default function JobAuditDrawer({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             id: localJob.id || undefined,
+            canonicalKey: localJob.canonicalKey,
             rowId: localJob.rowId,
             score: updated.score,
             reasons: updated.reasons,
             gap: updated.gap,
             dm: updated.dm,
             resumeAngle: updated.resumeAngle,
+            evaluationStatus: updated.evaluationStatus,
+            needsLlmRetry: updated.needsLlmRetry,
           }),
         });
         if (syncRes.ok) {
@@ -203,6 +281,11 @@ export default function JobAuditDrawer({
     }
   };
 
+  const sourcesList =
+    Array.isArray(localJob.sourcesSeen) && localJob.sourcesSeen.length > 0
+      ? localJob.sourcesSeen
+      : [{ source: localJob.source, url: localJob.url, id: localJob.id }];
+
   return (
     <div
       className="fixed inset-0 z-50 flex justify-end bg-black/50 dark:bg-black/60 backdrop-blur-xs"
@@ -219,18 +302,31 @@ export default function JobAuditDrawer({
           {/* Header */}
           <div className="flex items-start justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
             <div className="min-w-0">
-              <div className="flex items-center gap-2 text-xs font-mono text-slate-500 dark:text-slate-400">
+              <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-slate-500 dark:text-slate-400">
                 <span>{localJob.source}</span>
                 <span aria-hidden="true">·</span>
                 <span className="tabular-nums">{localJob.date}</span>
                 <span aria-hidden="true">·</span>
-                <span className="truncate">{localJob.id}</span>
+                <span
+                  className={`px-1.5 py-0.5 rounded text-[10px] border ${
+                    isDeterministicOnly
+                      ? 'bg-amber-50 text-amber-800 border-amber-300 dark:bg-amber-950/50 dark:text-amber-300 dark:border-amber-800/60'
+                      : 'bg-emerald-50 text-emerald-800 border-emerald-300 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800/60'
+                  }`}
+                >
+                  {isDeterministicOnly ? 'Deterministic · Queued for LLM Retry' : 'LLM Verified'}
+                </span>
               </div>
               <h2 className="text-lg font-display font-bold text-slate-900 dark:text-white mt-1">
                 {localJob.title}
               </h2>
-              <div className="text-sm text-slate-600 dark:text-slate-300 mt-0.5">
-                {localJob.company}
+              <div className="text-sm text-slate-600 dark:text-slate-300 mt-0.5 flex flex-wrap items-center gap-2">
+                <span>{localJob.company}</span>
+                {localJob.location && (
+                  <span className="text-xs font-mono text-slate-500 dark:text-slate-400">
+                    · {localJob.location}
+                  </span>
+                )}
               </div>
               {externalUrl !== '#' && (
                 <a
@@ -241,6 +337,34 @@ export default function JobAuditDrawer({
                 >
                   {externalUrl} <ArrowUpRight className="h-3 w-3 shrink-0" />
                 </a>
+              )}
+              {sourcesList.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                  <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
+                    Seen on ({sourcesList.length}):
+                  </span>
+                  {sourcesList.map((s, idx) => {
+                    const sHref = safeExternalUrl(s.url);
+                    return sHref !== '#' ? (
+                      <a
+                        key={`${s.source}-${idx}`}
+                        href={sHref}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-emerald-500 inline-flex items-center gap-1"
+                      >
+                        {s.source} <ArrowUpRight className="h-2.5 w-2.5" />
+                      </a>
+                    ) : (
+                      <span
+                        key={`${s.source}-${idx}`}
+                        className="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400"
+                      >
+                        {s.source}
+                      </span>
+                    );
+                  })}
+                </div>
               )}
             </div>
             <button
@@ -502,77 +626,109 @@ export default function JobAuditDrawer({
             </div>
           </div>
 
-          {/* Outreach & Positioning */}
-          <div className="space-y-4">
-            <div className="bg-slate-50 dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-xs font-medium text-blue-600 dark:text-blue-400">
-                  Recommended Resume Lead Angle
-                </span>
-                <button
-                  type="button"
-                  onClick={() => copyText(localJob.resumeAngle, 'angle')}
-                  className="text-[11px] font-mono text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 cursor-pointer"
-                >
-                  {copiedField === 'angle' ? (
-                    <>
-                      <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" /> Copied
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="h-3 w-3" /> Copy Angle
-                    </>
-                  )}
-                </button>
+          {/* Interactive Outreach Composer */}
+          <div className="bg-slate-50 dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-3">
+            <div className="flex items-center justify-between flex-wrap gap-2 border-b border-slate-200 dark:border-slate-800 pb-2.5">
+              <div className="flex items-center gap-1">
+                {[
+                  { id: 'dm' as const, label: 'LinkedIn DM' },
+                  { id: 'email' as const, label: 'Cold Email' },
+                  { id: 'angle' as const, label: 'Resume Lead Angle' },
+                ].map((t) => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => setOutreachTab(t.id)}
+                    className={`px-2.5 py-1 rounded text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      outreachTab === t.id
+                        ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white border border-slate-200 dark:border-slate-700'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
               </div>
-              <p className="text-xs font-mono text-slate-800 dark:text-slate-200 leading-relaxed">
-                {localJob.resumeAngle || 'Lead with top quantified metrics'}
-              </p>
+              <button
+                type="button"
+                onClick={() =>
+                  copyText(
+                    outreachTab === 'dm'
+                      ? editableDm
+                      : outreachTab === 'email'
+                      ? editableEmail
+                      : editableAngle,
+                    outreachTab
+                  )
+                }
+                className="px-2.5 py-1 rounded text-[11px] font-mono bg-slate-200/80 dark:bg-slate-800 hover:bg-slate-300/80 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 inline-flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+              >
+                {copiedField === outreachTab ? (
+                  <>
+                    <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" /> Copied
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3 w-3" /> CopyActive Draft
+                  </>
+                )}
+              </button>
             </div>
 
-            <div className="bg-slate-50 dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-2.5">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <span className="text-xs font-medium text-slate-900 dark:text-white">
-                  Synthesized Outreach (LinkedIn DM & Cold Email)
-                </span>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => copyText(localJob.dm, 'dm')}
-                    className="px-2.5 py-1 rounded text-[11px] font-mono bg-slate-200/80 dark:bg-slate-800 hover:bg-slate-300/80 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
-                  >
-                    {copiedField === 'dm' ? (
-                      <>
-                        <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" /> DM
-                        Copied
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="h-3 w-3" /> Copy DM
-                      </>
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => copyText(synthesizedEmail, 'email')}
-                    className="px-2.5 py-1 rounded text-[11px] font-mono bg-slate-200/80 dark:bg-slate-800 hover:bg-slate-300/80 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
-                  >
-                    {copiedField === 'email' ? (
-                      <>
-                        <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" /> Email
-                        Copied
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="h-3 w-3" /> Copy Cold Email
-                      </>
-                    )}
-                  </button>
-                </div>
+            {outreachTab === 'dm' && (
+              <textarea
+                rows={4}
+                value={editableDm}
+                onChange={(e) => setEditableDm(e.target.value)}
+                aria-label="LinkedIn DM Draft"
+                className="w-full bg-white dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md p-2.5 text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 leading-relaxed"
+              />
+            )}
+            {outreachTab === 'email' && (
+              <textarea
+                rows={6}
+                value={editableEmail}
+                onChange={(e) => setEditableEmail(e.target.value)}
+                aria-label="Cold Email Draft"
+                className="w-full bg-white dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md p-2.5 text-xs font-mono text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 leading-relaxed"
+              />
+            )}
+            {outreachTab === 'angle' && (
+              <textarea
+                rows={3}
+                value={editableAngle}
+                onChange={(e) => setEditableAngle(e.target.value)}
+                aria-label="Resume Lead Angle"
+                className="w-full bg-white dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md p-2.5 text-xs font-mono text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 leading-relaxed"
+              />
+            )}
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+              <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
+                Edit &amp; persist tailored outreach directly to your pipeline record
+              </span>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={savingOutreach}
+                  onClick={() => handleSaveOutreach(false)}
+                  className="bg-white dark:bg-[#0B0F17] border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-xs h-7 px-2.5 whitespace-nowrap shrink-0"
+                >
+                  <Save className="h-3 w-3 mr-1" />
+                  {savingOutreach ? 'Saving...' : 'Save Draft'}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={savingOutreach}
+                  onClick={() => handleSaveOutreach(true)}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs h-7 px-2.5 whitespace-nowrap shrink-0"
+                >
+                  Save &amp; Mark Outreach Drafted
+                </Button>
               </div>
-              <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed border-t border-slate-200 dark:border-slate-800 pt-2.5">
-                {localJob.dm}
-              </p>
             </div>
           </div>
         </div>

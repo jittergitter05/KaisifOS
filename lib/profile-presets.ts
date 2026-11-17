@@ -38,13 +38,23 @@ export interface CandidateProfile {
 export const DEFAULT_CAREER_URLS: string[] = [
   'https://www.postman.com/company/careers/',
   'https://razorpay.com/jobs/',
+  'https://www.darwinbox.com/careers',
+  'https://www.keka.com/careers',
   'https://linear.app/careers',
   'https://posthog.com/careers',
 ];
 
 export const DEFAULT_ATS_COMPANIES: AtsCompanyTargets = {
-  greenhouse: ['razorpay', 'postman', 'stripe', 'vercel', 'cloudflare'],
-  lever: ['zepto', 'cred', 'mistral'],
+  greenhouse: [
+    'razorpay',
+    'postman',
+    'browserstack',
+    'chargebee',
+    'stripe',
+    'vercel',
+    'cloudflare',
+  ],
+  lever: ['zepto', 'cred', 'meesho', 'mistral'],
   ashby: ['linear', 'posthog', 'supabase', 'langchain'],
   workable: ['raycast'],
   smartrecruiters: ['Visa'],

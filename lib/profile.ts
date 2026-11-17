@@ -12,10 +12,17 @@ import {
   writeCloudProfileJson,
   writeRuntimeJsonFile,
 } from './sheets';
+import {
+  isNeonPostgresConfigured,
+  readNeonCandidateProfile,
+  writeNeonCandidateProfile,
+  computeProfileVersionHash,
+} from './neon-db.js';
 
 export * from './profile-presets';
 
 export type ProfilePersistenceMode =
+  | 'neon-postgres'
   | 'cloud-sheets'
   | 'local-disk'
   | 'ephemeral-tmp'
@@ -165,9 +172,10 @@ export function getCandidateProfile(): CandidateProfile {
 /**
  * Multi-tier async profile reader:
  * 1. Short 5s memory cache (invalidated immediately on save)
- * 2. Cloud Sheets Profile!A1 (authoritative in read-only Cloud Run / serverless hosts)
- * 3. Runtime file overlay (/tmp/kaisifos-data/profile.json or data/profile.json)
- * 4. Built-in PM preset fallback
+ * 2. Neon Postgres candidate_profiles table (when DATABASE_URL is configured)
+ * 3. Cloud Sheets Profile!A1 (legacy cloud fallback)
+ * 4. Runtime file overlay (/tmp/kaisifos-data/profile.json or data/profile.json)
+ * 5. Built-in PM preset fallback
  */
 export async function getCandidateProfileAsync(options?: {
   bypassCache?: boolean;
@@ -181,14 +189,47 @@ export async function getCandidateProfileAsync(options?: {
     return cloudProfileCache.profile;
   }
 
+  const localProfile = getCandidateProfile();
+
+  if (isNeonPostgresConfigured()) {
+    try {
+      const neonProfile = await readNeonCandidateProfile();
+      if (neonProfile && typeof neonProfile === 'object') {
+        const normalized = normalizeCandidateProfile(
+          neonProfile as Partial<CandidateProfile>,
+          localProfile
+        );
+        cloudProfileCache = { profile: normalized, fetchedAt: now };
+        writeRuntimeJsonFile('profile.json', normalized);
+        return normalized;
+      } else {
+        // Seed Neon with local profile on first boot
+        await writeNeonCandidateProfile(localProfile);
+        cloudProfileCache = { profile: localProfile, fetchedAt: now };
+        return localProfile;
+      }
+    } catch (err) {
+      console.warn('[Profile] Neon Postgres profile read fell back:', (err as Error).message);
+    }
+  }
+
   if (isCloudSheetsConfigured()) {
     try {
       const cloudRes = await readCloudProfileJson();
       if (cloudRes?.json) {
         const parsed = JSON.parse(cloudRes.json) as Partial<CandidateProfile>;
-        const normalized = normalizeCandidateProfile(parsed);
+        const normalized = normalizeCandidateProfile(parsed, localProfile);
+        // Protect against stale Profile!A1 where open_to_relocation was true for Hyderabad-locked profile
+        if (
+          localProfile.open_to_relocation === false &&
+          normalized.open_to_relocation === true &&
+          computeProfileVersionHash(normalized) !== computeProfileVersionHash(localProfile) &&
+          !cloudRes.updatedAt
+        ) {
+          normalized.open_to_relocation = false;
+          normalized.relocation_preference.willing = false;
+        }
         cloudProfileCache = { profile: normalized, fetchedAt: now };
-        // Best-effort sync to writable local/tmp copy so synchronous helpers see fresh state
         writeRuntimeJsonFile('profile.json', normalized);
         return normalized;
       }
@@ -197,13 +238,14 @@ export async function getCandidateProfileAsync(options?: {
     }
   }
 
-  return getCandidateProfile();
+  return localProfile;
 }
 
 /**
  * Multi-tier async profile writer:
- * 1. Cloud Sheets Profile!A1 (durable across serverless restarts)
- * 2. Local data/profile.json or ephemeral /tmp/kaisifos-data/profile.json
+ * 1. Neon Postgres candidate_profiles table (durable relational primary store)
+ * 2. Cloud Sheets Profile!A1 (durable legacy fallback)
+ * 3. Local data/profile.json or ephemeral /tmp/kaisifos-data/profile.json
  */
 export async function saveCandidateProfileAsync(
   profileInput: Partial<CandidateProfile>
@@ -212,20 +254,42 @@ export async function saveCandidateProfileAsync(
   const normalized = normalizeCandidateProfile(profileInput, current);
   const serialized = JSON.stringify(normalized, null, 2);
 
+  let neonSaved = false;
   let cloudSaved = false;
   let cloudError: string | undefined;
+
+  if (isNeonPostgresConfigured()) {
+    try {
+      neonSaved = Boolean(await writeNeonCandidateProfile(normalized));
+    } catch (err) {
+      cloudError = (err as Error).message;
+      console.warn('[Profile] Neon profile write failed:', cloudError);
+    }
+  }
 
   if (isCloudSheetsConfigured()) {
     try {
       cloudSaved = await writeCloudProfileJson(serialized);
     } catch (err) {
-      cloudError = (err as Error).message;
-      console.warn('[Profile] Cloud profile write failed:', cloudError);
+      if (!neonSaved) {
+        cloudError = (err as Error).message;
+      }
+      console.warn('[Profile] Cloud profile write failed:', (err as Error).message);
     }
   }
 
   const localRes = writeRuntimeJsonFile('profile.json', normalized);
   cloudProfileCache = { profile: normalized, fetchedAt: Date.now() };
+
+  if (neonSaved) {
+    return {
+      ok: true,
+      profile: normalized,
+      persistenceMode: 'neon-postgres',
+      cloudSaved: true,
+      localSaved: localRes.ok,
+    };
+  }
 
   if (cloudSaved) {
     return {
@@ -243,10 +307,10 @@ export async function saveCandidateProfileAsync(
     const warning =
       mode === 'ephemeral-tmp'
         ? cloudError
-          ? `Google Sheets profile sync failed (${cloudError}). Saved to container ephemeral /tmp storage for active session only.`
-          : 'Container mounts data/ as read-only. Saved to ephemeral /tmp storage (resets on cold restart). Add GOOGLE_SHEET_ID + GOOGLE_SERVICE_KEY_BASE64 for permanent cloud persistence.'
+          ? `Cloud profile sync failed (${cloudError}). Saved to container ephemeral /tmp storage for active session only.`
+          : 'Container mounts data/ as read-only. Saved to ephemeral /tmp storage (resets on cold restart). Add DATABASE_URL (Neon Postgres) or GOOGLE_SHEET_ID for permanent cloud persistence.'
         : cloudError
-        ? `Saved locally; Google Sheets profile sync failed (${cloudError}).`
+        ? `Saved locally; cloud profile sync failed (${cloudError}).`
         : undefined;
 
     return {
@@ -268,6 +332,6 @@ export async function saveCandidateProfileAsync(
     error:
       cloudError ||
       localRes.error ||
-      'Unable to persist profile to Google Sheets, data/, or /tmp storage.',
+      'Unable to persist profile to Neon Postgres, Google Sheets, data/, or /tmp storage.',
   };
 }

@@ -11,7 +11,12 @@ import {
   fetchRecruiteeBoards,
   enrichThinJobDescriptions,
 } from './career-scraper';
-import { decodeAndStripHtml, evaluateHardEligibility } from './eligibility';
+import {
+  decodeAndStripHtml,
+  evaluateHardEligibility,
+  buildCanonicalJobKey,
+  getSourceUrlPriority,
+} from './eligibility';
 import { deterministicEvaluateJob, evaluateRoleWithLLM } from './llm';
 import {
   appendCloudSeenJobIds,
@@ -21,16 +26,25 @@ import {
   getAllSheetRows,
   getCloudSeenJobIds,
   isCloudSheetsConfigured,
+  isNeonPostgresConfigured,
+  readLocalJobRecords,
   readLocalSeenJobIds,
+  updateLocalJobRow,
+  upsertNeonCanonicalJob,
 } from './sheets';
 import {
+  getNeonCanonicalStateMap,
+  getNeonJobsPendingLlmRetry,
+  recordNeonScoutRun,
+} from './neon-db.js';
+import {
   deriveDynamicSearchParams,
-  normalizeCanonicalFingerprint,
   validateSafePublicUrl,
 } from './utils';
 
 export interface RawScoutedJob {
   id: string;
+  canonicalKey?: string;
   title: string;
   company: string;
   location: string;
@@ -38,6 +52,7 @@ export interface RawScoutedJob {
   description: string;
   url: string;
   source: string;
+  sourcesSeen?: Array<{ source: string; url: string; id?: string; seenAt?: string }>;
 }
 
 export interface SourceHealthMetric {
@@ -51,22 +66,32 @@ export interface SourceHealthMetric {
 
 export interface ScoutRunSummary {
   timestamp: string;
+  mode?: 'live_sweep' | 'retry_pending';
   sources_queried: string[];
   source_counts: Record<string, number>;
   source_health: Record<string, SourceHealthMetric>;
-  persistence_mode: 'cloud-sheets' | 'local-disk' | 'ephemeral-tmp';
+  persistence_mode: 'neon-postgres' | 'cloud-sheets' | 'local-disk' | 'ephemeral-tmp';
   warnings: string[];
   total_fetched: number;
+  canonical_dedup_saved?: number;
   new_after_dedup: number;
+  hard_gate_rejected?: number;
+  hard_gate_reasons?: Record<string, number>;
   evaluated_count: number;
   committed_count: number;
+  queued_for_retry_count?: number;
   committed_jobs: Array<{
     id: string;
+    canonicalKey?: string;
     title: string;
     company: string;
+    location?: string;
     source: string;
+    sourcesSeen?: Array<{ source: string; url: string }>;
     score: number;
     status: string;
+    evaluationStatus?: string;
+    needsLlmRetry?: boolean;
     url: string;
   }>;
 }
@@ -76,6 +101,28 @@ const SWEEP_DEADLINE_MS = 42000;
 
 function stripHtml(html: string): string {
   return decodeAndStripHtml(html);
+}
+
+function scoreAtsCandidateBeforeSlice(title: string, location: string): number {
+  const loc = String(location || '').toLowerCase();
+  const t = String(title || '').toLowerCase();
+  let score = 0;
+  if (/\b(hyderabad|telangana|secunderabad)\b/.test(loc)) score += 60;
+  else if (/\b(india|bengaluru|bangalore|mumbai|pune|gurgaon|gurugram|noida|chennai|delhi)\b/.test(loc))
+    score += 35;
+  else if (/\b(remote|worldwide|anywhere|global|distributed)\b/.test(loc)) score += 20;
+
+  if (
+    /\b(associate product|apm|product marketing|pmm|growth|founder|product analyst|product manager|marketing operations|digital content)\b/.test(
+      t
+    )
+  ) {
+    score += 30;
+  }
+  if (!/\b(senior|sr\.?|staff|principal|director|vp|vice president|head of)\b/.test(t)) {
+    score += 12;
+  }
+  return score;
 }
 
 interface BoardFetchResult {
@@ -125,7 +172,7 @@ async function fetchRemoteOK(tags: string[]): Promise<RawScoutedJob[]> {
   );
   const res = await fetch(`https://remoteok.com/api?tags=${tagParam}`, {
     headers: {
-      'User-Agent': 'KaisifOS-FreeHire-Scout/3.2',
+      'User-Agent': 'KaisifOS-FreeHire-Scout/4.0',
       Accept: 'application/json',
     },
     signal: AbortSignal.timeout(7000),
@@ -217,7 +264,7 @@ async function fetchRemotive(categories: string[], keywords: string[]): Promise<
 
 async function fetchHimalayas(): Promise<RawScoutedJob[]> {
   const res = await fetch('https://himalayas.app/jobs/api?limit=15', {
-    headers: { Accept: 'application/json', 'User-Agent': 'KaisifOS-FreeHire-Scout/3.2' },
+    headers: { Accept: 'application/json', 'User-Agent': 'KaisifOS-FreeHire-Scout/4.0' },
     signal: AbortSignal.timeout(7000),
   });
   if (!res.ok) throw new Error(`Himalayas HTTP ${res.status}`);
@@ -343,7 +390,15 @@ async function fetchGreenhouseBoards(boards: string[]): Promise<BoardFetchResult
           return;
         }
         const data = await res.json();
-        for (const job of (data.jobs || []).slice(0, 12)) {
+        const allJobs = Array.isArray(data.jobs) ? data.jobs : [];
+        const sortedJobs = [...allJobs]
+          .sort(
+            (a: any, b: any) =>
+              scoreAtsCandidateBeforeSlice(b.title || '', b.location?.name || '') -
+              scoreAtsCandidateBeforeSlice(a.title || '', a.location?.name || '')
+          )
+          .slice(0, 14);
+        for (const job of sortedJobs) {
           results.push({
             id: `greenhouse_${board}_${job.id}`,
             title: String(job.title || ''),
@@ -383,7 +438,14 @@ async function fetchLeverBoards(boards: string[]): Promise<BoardFetchResult> {
         }
         const data = await res.json();
         if (!Array.isArray(data)) return;
-        for (const job of data.slice(0, 10)) {
+        const sortedJobs = [...data]
+          .sort(
+            (a: any, b: any) =>
+              scoreAtsCandidateBeforeSlice(b.text || '', b.categories?.location || '') -
+              scoreAtsCandidateBeforeSlice(a.text || '', a.categories?.location || '')
+          )
+          .slice(0, 12);
+        for (const job of sortedJobs) {
           results.push({
             id: `lever_${board}_${job.id}`,
             title: String(job.text || ''),
@@ -424,7 +486,15 @@ async function fetchAshbyBoards(boards: string[]): Promise<BoardFetchResult> {
           return;
         }
         const data = await res.json();
-        for (const job of (data.jobs || []).slice(0, 12)) {
+        const allJobs = Array.isArray(data.jobs) ? data.jobs : [];
+        const sortedJobs = [...allJobs]
+          .sort(
+            (a: any, b: any) =>
+              scoreAtsCandidateBeforeSlice(b.title || '', b.location || '') -
+              scoreAtsCandidateBeforeSlice(a.title || '', a.location || '')
+          )
+          .slice(0, 12);
+        for (const job of sortedJobs) {
           results.push({
             id: `ashby_${board}_${job.id}`,
             title: String(job.title || ''),
@@ -548,10 +618,11 @@ async function fetchInternshalaHyderabad(profile: CandidateProfile): Promise<Raw
 
 /**
  * Executes a bounded-concurrency live multi-source + direct ATS job scout run driven by profile targeting,
- * deduplicates canonically across Sheet1 + SeenJobs, evaluates top candidates within a 42s budget,
- * and honestly reports persistence status.
+ * deduplicates canonically across Neon Postgres / Sheet1 / SeenJobs, supports retry_pending mode for
+ * DETERMINISTIC_ONLY jobs, and reports persistence + deduplication telemetry.
  */
 export async function executeLiveScoutRun(options?: {
+  mode?: 'live_sweep' | 'retry_pending';
   minScoreToCommit?: number;
   maxToEvaluate?: number;
   customBoards?: {
@@ -565,10 +636,163 @@ export async function executeLiveScoutRun(options?: {
   };
 }): Promise<ScoutRunSummary> {
   const sweepStartMs = Date.now();
+  const runMode = options?.mode === 'retry_pending' ? 'retry_pending' : 'live_sweep';
   const warnings: string[] = [];
   const profile: CandidateProfile = await getCandidateProfileAsync();
-  const minScore = options?.minScoreToCommit ?? 82;
-  const maxToEvaluate = Math.min(20, Math.max(1, options?.maxToEvaluate ?? 6));
+  const minScore = options?.minScoreToCommit ?? 80;
+  const maxToEvaluate = Math.min(20, Math.max(1, options?.maxToEvaluate ?? 8));
+  const neonConfigured = isNeonPostgresConfigured();
+  const cloudConfigured = isCloudSheetsConfigured();
+
+  // Mode 1: Retry Pending LLM Evaluations (re-scores DETERMINISTIC_ONLY jobs)
+  if (runMode === 'retry_pending') {
+    const pendingJobs: RawScoutedJob[] = [];
+    if (neonConfigured) {
+      const neonPending = await getNeonJobsPendingLlmRetry(maxToEvaluate);
+      for (const p of neonPending) {
+        pendingJobs.push({
+          id: p.id,
+          canonicalKey: p.canonicalKey,
+          title: p.title,
+          company: p.company,
+          location: p.location,
+          salary: p.salary,
+          description: p.description || `${p.title} at ${p.company}`,
+          url: p.url,
+          source: p.source || 'Retry Queue',
+          sourcesSeen: p.sourcesSeen,
+        });
+      }
+    } else {
+      const localRecords = readLocalJobRecords().filter(
+        (r) => r.needsLlmRetry || r.evaluationStatus === 'DETERMINISTIC_ONLY'
+      );
+      for (const r of localRecords.slice(0, maxToEvaluate)) {
+        pendingJobs.push({
+          id: r.id,
+          canonicalKey: r.canonicalKey,
+          title: r.title,
+          company: r.company,
+          location: r.location || 'Hyderabad',
+          salary: r.salary || 'Not listed',
+          description: `${r.title} at ${r.company}. ${r.reasons || ''}`,
+          url: r.url,
+          source: r.id,
+          sourcesSeen: r.sourcesSeen,
+        });
+      }
+    }
+
+    if (pendingJobs.length === 0) {
+      warnings.push('No jobs currently queued with needs_llm_retry = true.');
+    }
+
+    const committedJobs: ScoutRunSummary['committed_jobs'] = [];
+    let stillQueuedCount = 0;
+
+    for (const candidate of pendingJobs) {
+      const evalResult = await evaluateRoleWithLLM(
+        {
+          title: candidate.title,
+          company: candidate.company,
+          location: candidate.location,
+          salary: candidate.salary,
+          description: candidate.description,
+        },
+        profile
+      );
+
+      const isDeterministicFallback = String(evalResult.engine_used || '')
+        .toLowerCase()
+        .includes('deterministic');
+      const isLlmScored = !isDeterministicFallback;
+      const evalStatus = isLlmScored ? 'LLM_SCORED' : 'DETERMINISTIC_ONLY';
+      const needsRetry = !isLlmScored;
+      if (needsRetry) stillQueuedCount++;
+
+      const status = evalResult.score >= 90 ? 'SHORTLISTED' : 'NEW';
+      if (neonConfigured) {
+        await upsertNeonCanonicalJob({
+          id: candidate.id,
+          canonicalKey: candidate.canonicalKey,
+          title: candidate.title,
+          company: candidate.company,
+          location: candidate.location,
+          salary: candidate.salary,
+          description: candidate.description,
+          url: candidate.url,
+          source: candidate.source,
+          sourcesSeen: candidate.sourcesSeen,
+          score: evalResult.score,
+          evaluationStatus: evalStatus,
+          needsLlmRetry: needsRetry,
+          pipelineStage: status,
+          reasons: evalResult.match_reasons.join(' | '),
+          gap: evalResult.gap,
+          dmDraft: evalResult.dm_draft,
+          resumeAngle: evalResult.resume_angle,
+        });
+      }
+      updateLocalJobRow(
+        { id: candidate.id, canonicalKey: candidate.canonicalKey },
+        {
+          score: evalResult.score,
+          reasons: evalResult.match_reasons.join(' | '),
+          gap: evalResult.gap,
+          dm: evalResult.dm_draft,
+          resumeAngle: evalResult.resume_angle,
+          evaluationStatus: evalStatus,
+          needsLlmRetry: needsRetry,
+          ...(evalResult.score >= 90 ? { status: 'SHORTLISTED' } : {}),
+        }
+      );
+
+      committedJobs.push({
+        id: candidate.id,
+        canonicalKey: candidate.canonicalKey,
+        title: candidate.title,
+        company: candidate.company,
+        location: candidate.location,
+        source: candidate.source,
+        sourcesSeen: candidate.sourcesSeen,
+        score: evalResult.score,
+        status,
+        evaluationStatus: evalStatus,
+        needsLlmRetry: needsRetry,
+        url: candidate.url,
+      });
+    }
+
+    return {
+      timestamp: new Date().toISOString(),
+      mode: 'retry_pending',
+      sources_queried: ['Pending LLM Retry Queue'],
+      source_counts: { 'Pending LLM Retry Queue': pendingJobs.length },
+      source_health: {
+        'Pending LLM Retry Queue': {
+          status: pendingJobs.length > 0 ? 'ok' : 'empty',
+          count: pendingJobs.length,
+          durationMs: Date.now() - sweepStartMs,
+        },
+      },
+      persistence_mode: neonConfigured
+        ? 'neon-postgres'
+        : cloudConfigured
+        ? 'cloud-sheets'
+        : 'local-disk',
+      warnings,
+      total_fetched: pendingJobs.length,
+      canonical_dedup_saved: 0,
+      new_after_dedup: pendingJobs.length,
+      hard_gate_rejected: 0,
+      evaluated_count: pendingJobs.length,
+      committed_count: committedJobs.length,
+      queued_for_retry_count: stillQueuedCount,
+      committed_jobs: committedJobs,
+    };
+  }
+
+  // Mode 2: Full Live Career & Direct-ATS Sweep
   const { remoteOkTags, remotiveCategories, remotiveKeywords } = deriveDynamicSearchParams(profile);
 
   const ghBoards =
@@ -604,7 +828,6 @@ export async function executeLiveScoutRun(options?: {
     DEFAULT_CAREER_URLS;
 
   const sourceHealth: Record<string, SourceHealthMetric> = {};
-  const cloudConfigured = isCloudSheetsConfigured();
 
   const [
     internshalaJobs,
@@ -623,6 +846,7 @@ export async function executeLiveScoutRun(options?: {
     freeHire,
     ledgerData,
     seenJobIds,
+    neonStateMap,
   ] = await Promise.all([
     timedFetch('Internshala', () => fetchInternshalaHyderabad(profile), sourceHealth),
     timedFetch('Company Career Pages', () => fetchCompanyCareerPages(careerUrls), sourceHealth),
@@ -644,6 +868,7 @@ export async function executeLiveScoutRun(options?: {
     cloudConfigured
       ? getCloudSeenJobIds().catch(() => readLocalSeenJobIds())
       : Promise.resolve(readLocalSeenJobIds()),
+    neonConfigured ? getNeonCanonicalStateMap() : Promise.resolve(new Map()),
   ]);
 
   for (const [src, metric] of Object.entries(sourceHealth)) {
@@ -655,16 +880,17 @@ export async function executeLiveScoutRun(options?: {
     }
   }
 
+  // Order direct Career Pages & Direct ATS first so canonical deduplication prefers official URLs
   const rawCombined: RawScoutedJob[] = [
-    ...internshalaJobs,
     ...careerPages,
-    ...freeHire,
     ...greenhouse,
-    ...ashby,
     ...lever,
+    ...ashby,
     ...workable,
     ...smartRecruiters,
     ...recruitee,
+    ...internshalaJobs,
+    ...freeHire,
     ...remoteOk,
     ...remotive,
     ...himalayas,
@@ -678,31 +904,70 @@ export async function executeLiveScoutRun(options?: {
   }
 
   const existingIds = new Set(ledgerData.rows.slice(1).map((r) => String(r[1] || '').trim()));
-  const existingFingerprints = new Set(
-    ledgerData.rows
-      .slice(1)
-      .map((r) => normalizeCanonicalFingerprint(String(r[3] || ''), String(r[2] || '')))
+  const existingCanonicalKeys = new Set(
+    (ledgerData.richRecords || []).map(
+      (r) => r.canonicalKey || buildCanonicalJobKey(r.company, r.title, r.location)
+    )
   );
+  for (const r of ledgerData.rows.slice(1)) {
+    existingCanonicalKeys.add(buildCanonicalJobKey(String(r[3] || ''), String(r[2] || '')));
+  }
 
-  const seenBatchIds = new Set<string>();
-  const seenBatchFingerprints = new Set<string>();
-  const unseen: RawScoutedJob[] = [];
+  // Merge duplicates within the current multi-source batch by canonical key
+  const batchByCanonical = new Map<string, RawScoutedJob>();
+  let canonicalDedupSaved = 0;
 
   for (const j of rawCombined) {
     if (!j.title || !j.id) continue;
-    const fp = normalizeCanonicalFingerprint(j.company, j.title);
-    if (
-      existingIds.has(j.id) ||
-      seenJobIds.has(j.id) ||
-      existingFingerprints.has(fp) ||
-      seenBatchIds.has(j.id) ||
-      seenBatchFingerprints.has(fp)
+    const cKey = buildCanonicalJobKey(j.company, j.title, j.location);
+    j.canonicalKey = cKey;
+
+    const existingInBatch = batchByCanonical.get(cKey);
+    if (existingInBatch) {
+      canonicalDedupSaved += 1;
+      const existingSources = existingInBatch.sourcesSeen || [
+        { source: existingInBatch.source, url: existingInBatch.url, id: existingInBatch.id },
+      ];
+      if (!existingSources.some((s) => s.source === j.source)) {
+        existingSources.push({ source: j.source, url: j.url, id: j.id });
+      }
+      existingInBatch.sourcesSeen = existingSources;
+      if ((j.description || '').length > (existingInBatch.description || '').length) {
+        existingInBatch.description = j.description;
+      }
+      if (getSourceUrlPriority(j.url || j.source) > getSourceUrlPriority(existingInBatch.url || existingInBatch.source)) {
+        existingInBatch.url = j.url;
+        existingInBatch.source = j.source;
+        existingInBatch.id = j.id;
+      }
+      continue;
+    }
+
+    batchByCanonical.set(cKey, {
+      ...j,
+      canonicalKey: cKey,
+      sourcesSeen: [{ source: j.source, url: j.url, id: j.id }],
+    });
+  }
+
+  const unseen: RawScoutedJob[] = [];
+  for (const [cKey, job] of batchByCanonical.entries()) {
+    const neonState = neonStateMap.get(cKey);
+    if (neonState) {
+      // Allow re-evaluation if Neon marked needsLlmRetry === true
+      if (!neonState.needsLlmRetry) {
+        canonicalDedupSaved += 1;
+        continue;
+      }
+    } else if (
+      existingIds.has(job.id) ||
+      seenJobIds.has(job.id) ||
+      seenJobIds.has(cKey) ||
+      existingCanonicalKeys.has(cKey)
     ) {
       continue;
     }
-    seenBatchIds.add(j.id);
-    seenBatchFingerprints.add(fp);
-    unseen.push(j);
+    unseen.push(job);
   }
 
   const candidateYears = profile.experience_years ?? 0;
@@ -745,27 +1010,51 @@ export async function executeLiveScoutRun(options?: {
     })
     .sort((a, b) => {
       const targetCities = (profile.target_cities || []).map((c) => c.toLowerCase());
-      const aHubBoost = targetCities.some((c) => a.location.toLowerCase().includes(c)) ? 20 : 0;
-      const bHubBoost = targetCities.some((c) => b.location.toLowerCase().includes(c)) ? 20 : 0;
+      const aHubBoost = targetCities.some((c) => a.location.toLowerCase().includes(c)) ? 35 : 0;
+      const bHubBoost = targetCities.some((c) => b.location.toLowerCase().includes(c)) ? 35 : 0;
       const aScore =
-        aHubBoost + countTokenHits(a.title, roleTokens) * 3 + countTokenHits(a.description, roleTokens);
+        aHubBoost + countTokenHits(a.title, roleTokens) * 4 + countTokenHits(a.description, roleTokens);
       const bScore =
-        bHubBoost + countTokenHits(b.title, roleTokens) * 3 + countTokenHits(b.description, roleTokens);
+        bHubBoost + countTokenHits(b.title, roleTokens) * 4 + countTokenHits(b.description, roleTokens);
       return bScore - aScore;
     });
 
   // Enrich thin/stub descriptions (career anchors, Internshala cards, etc.) before strict eligibility gating
   if (Date.now() - sweepStartMs < SWEEP_DEADLINE_MS - 12000) {
-    await enrichThinJobDescriptions(prelimToEnrich.slice(0, 16), 10);
+    await enrichThinJobDescriptions(prelimToEnrich.slice(0, 18), 10);
   }
 
   const rejectedIneligibleIds: string[] = [];
+  const hardGateReasons: Record<string, number> = {};
   const eligibleCandidates: Array<{ job: RawScoutedJob; matchesTargetHub: boolean }> = [];
 
   for (const j of unseen) {
     const eligibility = evaluateHardEligibility(j, profile);
     if (!eligibility.eligible) {
       rejectedIneligibleIds.push(j.id);
+      if (j.canonicalKey) rejectedIneligibleIds.push(j.canonicalKey);
+      const primaryReason = eligibility.reasons?.[0] || 'Filtered by hard gate';
+      const reasonKey = primaryReason.split(':')[0].trim();
+      hardGateReasons[reasonKey] = (hardGateReasons[reasonKey] || 0) + 1;
+      if (neonConfigured) {
+        upsertNeonCanonicalJob({
+          id: j.id,
+          canonicalKey: j.canonicalKey,
+          title: j.title,
+          company: j.company,
+          location: j.location,
+          salary: j.salary,
+          description: j.description,
+          url: j.url,
+          source: j.source,
+          sourcesSeen: j.sourcesSeen,
+          score: 0,
+          evaluationStatus: 'REJECTED_GATE',
+          needsLlmRetry: false,
+          pipelineStage: 'REJECTED',
+          hardRejectReason: primaryReason,
+        }).catch(() => {});
+      }
       continue;
     }
     eligibleCandidates.push({
@@ -776,18 +1065,22 @@ export async function executeLiveScoutRun(options?: {
 
   if (unseen.length > 0 && eligibleCandidates.length === 0) {
     warnings.push(
-      `All ${unseen.length} unseen postings were filtered out by strict ${(profile.target_cities || ['Hyderabad']).join('/')} & ${profile.experience_level} eligibility gates (US work-auth, STEM OPT, non-target metro remote, or senior experience requirements).`
+      `All ${unseen.length} unseen postings were filtered out by strict ${(profile.target_cities || ['Hyderabad']).join('/')} & ${profile.experience_level} eligibility gates.`
     );
   }
 
   const ranked = [...eligibleCandidates]
     .sort((a, b) => {
+      const aDirectBoost = getSourceUrlPriority(a.job.url || a.job.source) >= 95 ? 12 : 0;
+      const bDirectBoost = getSourceUrlPriority(b.job.url || b.job.source) >= 95 ? 12 : 0;
       const aScore =
-        (a.matchesTargetHub ? 25 : 0) +
+        (a.matchesTargetHub ? 30 : 0) +
+        aDirectBoost +
         countTokenHits(a.job.title, roleTokens) * 4 +
         countTokenHits(a.job.description, roleTokens);
       const bScore =
-        (b.matchesTargetHub ? 25 : 0) +
+        (b.matchesTargetHub ? 30 : 0) +
+        bDirectBoost +
         countTokenHits(b.job.title, roleTokens) * 4 +
         countTokenHits(b.job.description, roleTokens);
       return bScore - aScore;
@@ -798,7 +1091,6 @@ export async function executeLiveScoutRun(options?: {
   const committedJobs: ScoutRunSummary['committed_jobs'] = [];
   const todayStr = new Date().toISOString().split('T')[0];
 
-  // Evaluate in bounded pairs to reduce runtime while respecting API RPM limits & 42s timeout budget
   const evaluatedPairs: Array<{
     candidate: RawScoutedJob;
     evalResult: Awaited<ReturnType<typeof evaluateRoleWithLLM>>;
@@ -843,27 +1135,46 @@ export async function executeLiveScoutRun(options?: {
 
   if (deadlineTriggered) {
     warnings.push(
-      'Sweep deadline budget (42s) reached; remaining candidates scored instantaneously with Deterministic 4-Pillar Rubric v3.2.'
+      'Sweep deadline budget (42s) reached; remaining candidates scored with Deterministic 4-Pillar Rubric and queued with needs_llm_retry = true.'
     );
   }
 
   const newlyEvaluatedIds: string[] = [];
-  let resolvedPersistenceMode: ScoutRunSummary['persistence_mode'] = cloudConfigured
+  let queuedForRetryCount = 0;
+  let resolvedPersistenceMode: ScoutRunSummary['persistence_mode'] = neonConfigured
+    ? 'neon-postgres'
+    : cloudConfigured
     ? 'cloud-sheets'
     : 'local-disk';
 
   for (const { candidate, evalResult } of evaluatedPairs) {
-    if (evalResult.score > 0) {
+    const isDeterministicFallback = String(evalResult.engine_used || '')
+      .toLowerCase()
+      .includes('deterministic');
+    const evaluationStatus = isDeterministicFallback ? 'DETERMINISTIC_ONLY' : 'LLM_SCORED';
+    const needsLlmRetry = isDeterministicFallback && evalResult.score >= 55;
+
+    if (needsLlmRetry) {
+      queuedForRetryCount += 1;
+    } else if (evalResult.score > 0) {
+      // Only lock in SeenJobs if LLM genuinely evaluated the role (never blackhole deterministic fallbacks!)
       newlyEvaluatedIds.push(candidate.id);
+      if (candidate.canonicalKey) newlyEvaluatedIds.push(candidate.canonicalKey);
     }
 
-    if (evalResult.score >= minScore) {
+    // Effective commit threshold: minScore (80) for LLM-scored, or >= 72 for verified Hyderabad/Remote deterministic matches
+    const effectiveThreshold = isDeterministicFallback ? Math.min(minScore, 72) : minScore;
+
+    if (evalResult.score >= effectiveThreshold || needsLlmRetry) {
       const status = evalResult.score >= 90 ? 'SHORTLISTED' : 'NEW';
       const record = {
         date: todayStr,
         id: candidate.id,
+        canonicalKey: candidate.canonicalKey,
         title: candidate.title,
         company: candidate.company,
+        location: candidate.location,
+        salary: candidate.salary,
         score: evalResult.score,
         reasons: evalResult.match_reasons.join(' | '),
         gap: evalResult.gap,
@@ -871,54 +1182,85 @@ export async function executeLiveScoutRun(options?: {
         dm: evalResult.dm_draft,
         resumeAngle: evalResult.resume_angle,
         status,
+        evaluationStatus,
+        needsLlmRetry,
+        sourcesSeen: candidate.sourcesSeen,
       };
 
       const localWrite = appendLocalJobRecordDetailed(record);
+      let neonSaved = false;
       let cloudSaved = false;
       let cloudError: string | undefined;
 
-      if (cloudConfigured) {
+      if (neonConfigured) {
         try {
-          await appendCloudSheetRecord(record);
-          cloudSaved = true;
+          const neonRes = await upsertNeonCanonicalJob({
+            id: record.id,
+            canonicalKey: record.canonicalKey,
+            title: record.title,
+            company: record.company,
+            location: record.location,
+            salary: record.salary,
+            description: candidate.description,
+            url: record.url,
+            source: candidate.source,
+            sourcesSeen: record.sourcesSeen,
+            score: record.score,
+            evaluationStatus: record.evaluationStatus,
+            needsLlmRetry: record.needsLlmRetry,
+            pipelineStage: record.status,
+            reasons: record.reasons,
+            gap: record.gap,
+            dmDraft: record.dm,
+            resumeAngle: record.resumeAngle,
+          });
+          neonSaved = Boolean(neonRes.ok);
         } catch (e) {
           cloudError = (e as Error).message;
         }
       }
 
-      if (cloudSaved) {
+      if (cloudConfigured && evalResult.score >= effectiveThreshold) {
+        try {
+          await appendCloudSheetRecord(record);
+          cloudSaved = true;
+        } catch (e) {
+          if (!neonSaved) cloudError = (e as Error).message;
+        }
+      }
+
+      if (neonSaved) {
+        resolvedPersistenceMode = 'neon-postgres';
+      } else if (cloudSaved) {
         resolvedPersistenceMode = 'cloud-sheets';
       } else if (localWrite.ok) {
         resolvedPersistenceMode =
           localWrite.mode === 'ephemeral-tmp' ? 'ephemeral-tmp' : 'local-disk';
         if (cloudError) {
-          warnings.push(`Cloud sheet append failed (${cloudError}); saved to ${localWrite.mode}.`);
-        } else if (localWrite.mode === 'ephemeral-tmp' && !warnings.some((w) => w.includes('/tmp'))) {
-          warnings.push(
-            'Container mounts data/ as read-only; committed matches saved in ephemeral /tmp memory. Configure GOOGLE_SHEET_ID for durable cloud persistence.'
-          );
+          warnings.push(`Cloud persistence failed (${cloudError}); saved to ${localWrite.mode}.`);
         }
-      } else {
-        throw new Error(
-          cloudError
-            ? `Failed persisting scouted job "${record.title}" to Google Sheets (${cloudError}) and runtime disk is read-only.`
-            : `Read-only storage prevented committing "${record.title}". Configure GOOGLE_SHEET_ID + GOOGLE_SERVICE_KEY_BASE64 for cloud persistence.`
-        );
       }
 
-      committedJobs.push({
-        id: record.id,
-        title: record.title,
-        company: record.company,
-        source: candidate.source,
-        score: record.score,
-        status: record.status,
-        url: record.url,
-      });
+      if (evalResult.score >= effectiveThreshold) {
+        committedJobs.push({
+          id: record.id,
+          canonicalKey: record.canonicalKey,
+          title: record.title,
+          company: record.company,
+          location: record.location,
+          source: candidate.source,
+          sourcesSeen: record.sourcesSeen,
+          score: record.score,
+          status: record.status,
+          evaluationStatus: record.evaluationStatus,
+          needsLlmRetry: record.needsLlmRetry,
+          url: record.url,
+        });
+      }
     }
   }
 
-  // Persist seen IDs (both LLM-scored and eligibility-blocked) so rejected roles aren't re-evaluated in the next sweep
+  // Persist seen IDs (only genuinely LLM-scored or hard-gate rejected roles; never deterministic fallback roles)
   const allSeenToPersist = Array.from(new Set([...newlyEvaluatedIds, ...rejectedIneligibleIds]));
   if (allSeenToPersist.length > 0) {
     appendLocalSeenJobIds(allSeenToPersist);
@@ -931,15 +1273,30 @@ export async function executeLiveScoutRun(options?: {
     }
   }
 
+  if (neonConfigured) {
+    recordNeonScoutRun({
+      runner: 'web_live_scout',
+      rawFetched: rawCombined.length,
+      canonicalDedupSaved,
+      hardGateRejected: rejectedIneligibleIds.length,
+      evaluatedCount: candidatesToScore.length,
+      committedCount: committedJobs.length,
+      queuedForRetryCount,
+      sourceCounts,
+      rejectionBreakdown: hardGateReasons,
+      durationMs: Date.now() - sweepStartMs,
+    }).catch(() => {});
+  }
+
   const sourcesQueried = [
-    'Internshala Jobs',
     'Company Career Pages',
     'Greenhouse Direct ATS',
-    'Ashby Direct ATS',
     'Lever Direct ATS',
+    'Ashby Direct ATS',
     'Workable Direct ATS',
     'SmartRecruiters Direct ATS',
     'Recruitee Direct ATS',
+    'Internshala Jobs',
     'RemoteOK API',
     'Remotive API',
     'Himalayas API',
@@ -952,15 +1309,20 @@ export async function executeLiveScoutRun(options?: {
 
   return {
     timestamp: new Date().toISOString(),
+    mode: 'live_sweep',
     sources_queried: sourcesQueried,
     source_counts: sourceCounts,
     source_health: sourceHealth,
     persistence_mode: resolvedPersistenceMode,
     warnings,
     total_fetched: rawCombined.length,
+    canonical_dedup_saved: canonicalDedupSaved,
     new_after_dedup: unseen.length,
+    hard_gate_rejected: Object.values(hardGateReasons).reduce((a, b) => a + b, 0),
+    hard_gate_reasons: hardGateReasons,
     evaluated_count: candidatesToScore.length,
     committed_count: committedJobs.length,
+    queued_for_retry_count: queuedForRetryCount,
     committed_jobs: committedJobs,
   };
 }

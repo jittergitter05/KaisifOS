@@ -32,7 +32,14 @@ export interface HardEligibilityResult {
 
 export function decodeAndStripHtml(input: string): string;
 export function extractRequiredYearsStrict(fullText: string): number | null;
+export function buildCanonicalJobKey(
+  company: string | { display_name?: string } | undefined | null,
+  title: string | undefined | null,
+  location?: string | null
+): string;
+export function getSourceUrlPriority(sourceOrUrl: string | undefined | null): number;
 export function evaluateHardEligibility(
   job: EligibilityJobInput,
   profile: EligibilityProfileInput
 ): HardEligibilityResult;
+

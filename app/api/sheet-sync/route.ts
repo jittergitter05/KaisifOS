@@ -6,6 +6,7 @@ import {
   getPublicStats,
   getStorageHealthInfo,
   isCloudSheetsConfigured,
+  isNeonPostgresConfigured,
   resolveRuntimeDataDir,
   updateLocalJobRow,
   batchUpdateLocalJobRows,
@@ -13,12 +14,18 @@ import {
   appendCloudSheetRecord,
   updateCloudSheetRowFields,
   batchUpdateCloudSheetRows,
+  upsertNeonCanonicalJob,
+  updateNeonJobFields,
+  batchUpdateNeonJobStage,
+  getNeonTelemetrySummary,
   sanitizePlainField,
 } from '@/lib/sheets';
+import { buildCanonicalJobKey, detectSource } from '@/lib/utils';
 
 const ALLOWED_STATUSES = new Set([
   'NEW',
   'SHORTLISTED',
+  'OUTREACH_DRAFTED',
   'APPLIED',
   'REPLIED',
   'INTERVIEW',
@@ -27,6 +34,7 @@ const ALLOWED_STATUSES = new Set([
   'WITHDRAWN',
   'GHOSTED',
   'IGNORED',
+  'ARCHIVED',
 ]);
 
 export const dynamic = 'force-dynamic';
@@ -50,10 +58,14 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(stats);
     }
 
-    const { rows, mode, cloudError } = await getAllSheetRows();
+    const { rows, mode, cloudError, richRecords } = await getAllSheetRows();
     const storageHealth = getStorageHealthInfo(cloudError);
+    const telemetry = isNeonPostgresConfigured() ? await getNeonTelemetrySummary() : null;
+
     return NextResponse.json({
       rows,
+      richRecords: richRecords || [],
+      telemetry,
       mode,
       persistenceMode: storageHealth.storageMode,
       cloudError,
@@ -68,7 +80,7 @@ export async function GET(request: NextRequest) {
             applications_sent: 0,
             response_rate: '0%',
           }
-        : { rows: [], mode: 'local-store', persistenceMode: 'read-only' }
+        : { rows: [], richRecords: [], mode: 'local-store', persistenceMode: 'read-only' }
     );
   }
 }
@@ -96,22 +108,35 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      const targets = (body.targets as Array<{ id?: unknown; rowId?: unknown }>)
+      const targets = (body.targets as Array<{ id?: unknown; canonicalKey?: unknown; rowId?: unknown }>)
         .slice(0, 200)
         .map((t) => ({
           id: typeof t.id === 'string' && t.id.trim() ? t.id.trim().slice(0, 120) : undefined,
+          canonicalKey:
+            typeof t.canonicalKey === 'string' && t.canonicalKey.trim()
+              ? t.canonicalKey.trim().slice(0, 180)
+              : undefined,
           rowId:
             t.rowId !== undefined && Number.isInteger(Number(t.rowId)) && Number(t.rowId) >= 2
               ? Number(t.rowId)
               : undefined,
         }))
-        .filter((t) => t.id || t.rowId);
+        .filter((t) => t.id || t.canonicalKey || t.rowId);
 
       if (targets.length === 0) {
         return NextResponse.json(
           { error: 'No valid targets provided for batch update.' },
           { status: 400 }
         );
+      }
+
+      let neonCount = 0;
+      if (isNeonPostgresConfigured()) {
+        try {
+          neonCount = await batchUpdateNeonJobStage(targets, normalized);
+        } catch (neonErr) {
+          console.warn('[sheet-sync] Neon batch update failed:', (neonErr as Error).message);
+        }
       }
 
       let cloudCount = 0;
@@ -126,13 +151,13 @@ export async function POST(request: NextRequest) {
       }
 
       const localCount = batchUpdateLocalJobRows(targets, normalized);
-      if (cloudCount === 0 && localCount === 0) {
-        if (!dirInfo.writable && (!isCloudSheetsConfigured() || cloudError)) {
+      if (neonCount === 0 && cloudCount === 0 && localCount === 0) {
+        if (!dirInfo.writable && !isNeonPostgresConfigured() && (!isCloudSheetsConfigured() || cloudError)) {
           return NextResponse.json(
             {
               error:
                 cloudError ||
-                'Storage is read-only and Google Sheets is not writable in this environment.',
+                'Storage is read-only and Neon Postgres / Google Sheets is not writable in this environment.',
             },
             { status: 503 }
           );
@@ -145,10 +170,13 @@ export async function POST(request: NextRequest) {
 
       return NextResponse.json({
         success: true,
+        neonCount,
         cloudCount,
         localCount,
         persistenceMode:
-          cloudCount > 0
+          neonCount > 0
+            ? 'neon-postgres'
+            : cloudCount > 0
             ? 'cloud-sheets'
             : dirInfo.mode === 'ephemeral-tmp'
             ? 'ephemeral-tmp'
@@ -161,23 +189,65 @@ export async function POST(request: NextRequest) {
       const dateStr = sanitizePlainField(job.date || new Date().toISOString().split('T')[0], 20);
       const rawStatus = String(job.status || 'NEW').toUpperCase();
       const safeStatus = ALLOWED_STATUSES.has(rawStatus) ? rawStatus : 'NEW';
+      const titleStr = sanitizePlainField(job.title || 'Untitled Role', 200);
+      const companyStr = sanitizePlainField(job.company || 'Unknown Company', 160);
+      const locationStr = sanitizePlainField(job.location || '', 120);
+      const idStr = sanitizePlainField(job.id || `manual_${Date.now()}`, 120);
+      const urlStr = sanitizePlainField(job.url || '', 500);
+      const canonicalKey = buildCanonicalJobKey(companyStr, titleStr, locationStr);
 
       const record = {
         date: dateStr,
-        id: sanitizePlainField(job.id || `manual_${Date.now()}`, 120),
-        title: sanitizePlainField(job.title || 'Untitled Role', 200),
-        company: sanitizePlainField(job.company || 'Unknown Company', 160),
+        id: idStr,
+        canonicalKey,
+        title: titleStr,
+        company: companyStr,
+        location: locationStr,
+        salary: sanitizePlainField(job.salary || '', 120),
         score: Math.max(0, Math.min(100, Math.round(Number(job.score ?? 85)))),
         reasons: sanitizePlainField(
           Array.isArray(job.reasons) ? job.reasons.join(' | ') : String(job.reasons || ''),
           1000
         ),
         gap: sanitizePlainField(job.gap || '', 500),
-        url: sanitizePlainField(job.url || '', 500),
+        url: urlStr,
         dm: sanitizePlainField(job.dm || '', 1500),
+        emailDraft: sanitizePlainField(job.emailDraft || '', 2000),
         resumeAngle: sanitizePlainField(job.resumeAngle || '', 500),
         status: safeStatus,
+        evaluationStatus: 'LLM_SCORED' as const,
+        needsLlmRetry: false,
+        sourcesSeen: [{ source: detectSource(idStr), url: urlStr, id: idStr }],
       };
+
+      let neonSaved = false;
+      if (isNeonPostgresConfigured()) {
+        try {
+          const neonRes = await upsertNeonCanonicalJob({
+            canonicalKey,
+            id: record.id,
+            date: record.date,
+            title: record.title,
+            company: record.company,
+            location: record.location,
+            salary: record.salary,
+            score: record.score,
+            reasons: record.reasons,
+            gap: record.gap,
+            url: record.url,
+            dm: record.dm,
+            emailDraft: record.emailDraft,
+            resumeAngle: record.resumeAngle,
+            status: record.status,
+            evaluationStatus: 'LLM_SCORED',
+            needsLlmRetry: false,
+            sourcesSeen: record.sourcesSeen,
+          });
+          neonSaved = Boolean(neonRes?.ok);
+        } catch (neonErr) {
+          console.warn('[sheet-sync] Neon append failed:', (neonErr as Error).message);
+        }
+      }
 
       let cloudSaved = false;
       let cloudError: string | undefined;
@@ -192,13 +262,13 @@ export async function POST(request: NextRequest) {
       }
 
       const localWrite = appendLocalJobRecordDetailed(record);
-      if (!cloudSaved && !localWrite.ok) {
+      if (!neonSaved && !cloudSaved && !localWrite.ok) {
         return NextResponse.json(
           {
             error:
               cloudError ||
               localWrite.error ||
-              'Unable to persist record (storage is read-only without writable Cloud Sheets).',
+              'Unable to persist record (storage is read-only without writable Neon Postgres or Cloud Sheets).',
           },
           { status: 503 }
         );
@@ -206,9 +276,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         success: true,
         record,
+        neonSaved,
         cloudSaved,
         localSaved: localWrite.ok,
-        persistenceMode: cloudSaved
+        persistenceMode: neonSaved
+          ? 'neon-postgres'
+          : cloudSaved
           ? 'cloud-sheets'
           : localWrite.mode === 'ephemeral-tmp'
           ? 'ephemeral-tmp'
@@ -216,11 +289,15 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const { id, rowId, status, dm, resumeAngle, gap, score, reasons } = body;
+    const { id, canonicalKey, rowId, status, dm, emailDraft, resumeAngle, gap, score, reasons, evaluationStatus, needsLlmRetry } = body;
     const targetId = typeof id === 'string' && id.trim() ? id.trim().slice(0, 120) : undefined;
+    const targetCanonicalKey =
+      typeof canonicalKey === 'string' && canonicalKey.trim()
+        ? canonicalKey.trim().slice(0, 180)
+        : undefined;
     const numericRowId = rowId !== undefined ? Number(rowId) : undefined;
 
-    if (!targetId && (!numericRowId || !Number.isInteger(numericRowId) || numericRowId < 2)) {
+    if (!targetId && !targetCanonicalKey && (!numericRowId || !Number.isInteger(numericRowId) || numericRowId < 2)) {
       return NextResponse.json({ error: 'Invalid or missing job id / rowId' }, { status: 400 });
     }
 
@@ -239,6 +316,7 @@ export async function POST(request: NextRequest) {
     const patch = {
       status: safeStatus,
       dm: dm !== undefined ? sanitizePlainField(dm, 1500) : undefined,
+      emailDraft: emailDraft !== undefined ? sanitizePlainField(emailDraft, 2000) : undefined,
       resumeAngle: resumeAngle !== undefined ? sanitizePlainField(resumeAngle, 500) : undefined,
       gap: gap !== undefined ? sanitizePlainField(gap, 500) : undefined,
       score:
@@ -249,7 +327,24 @@ export async function POST(request: NextRequest) {
         reasons !== undefined
           ? sanitizePlainField(Array.isArray(reasons) ? reasons.join(' | ') : reasons, 1000)
           : undefined,
+      evaluationStatus:
+        evaluationStatus === 'LLM_SCORED' || evaluationStatus === 'DETERMINISTIC_ONLY' || evaluationStatus === 'REJECTED_GATE'
+          ? (evaluationStatus as 'LLM_SCORED' | 'DETERMINISTIC_ONLY' | 'REJECTED_GATE')
+          : undefined,
+      needsLlmRetry: typeof needsLlmRetry === 'boolean' ? needsLlmRetry : undefined,
     };
+
+    let neonUpdated = false;
+    if (isNeonPostgresConfigured()) {
+      try {
+        neonUpdated = await updateNeonJobFields(
+          { id: targetId, canonicalKey: targetCanonicalKey },
+          patch
+        );
+      } catch (neonErr) {
+        console.warn('[sheet-sync] Neon field update failed:', (neonErr as Error).message);
+      }
+    }
 
     let cloudUpdated = false;
     let cloudError: string | undefined;
@@ -265,14 +360,17 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const localUpdated = updateLocalJobRow({ id: targetId, rowId: numericRowId }, patch);
-    if (!cloudUpdated && !localUpdated) {
-      if (!dirInfo.writable && (!isCloudSheetsConfigured() || cloudError)) {
+    const localUpdated = updateLocalJobRow(
+      { id: targetId, canonicalKey: targetCanonicalKey, rowId: numericRowId },
+      patch
+    );
+    if (!neonUpdated && !cloudUpdated && !localUpdated) {
+      if (!dirInfo.writable && !isNeonPostgresConfigured() && (!isCloudSheetsConfigured() || cloudError)) {
         return NextResponse.json(
           {
             error:
               cloudError ||
-              'Storage is read-only and Google Sheets update failed in this environment.',
+              'Storage is read-only and Neon Postgres / Google Sheets update failed in this environment.',
           },
           { status: 503 }
         );
@@ -285,9 +383,12 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      neonUpdated,
       cloudUpdated,
       localUpdated,
-      persistenceMode: cloudUpdated
+      persistenceMode: neonUpdated
+        ? 'neon-postgres'
+        : cloudUpdated
         ? 'cloud-sheets'
         : dirInfo.mode === 'ephemeral-tmp'
         ? 'ephemeral-tmp'
@@ -298,3 +399,4 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Operation failed' }, { status: 500 });
   }
 }
+

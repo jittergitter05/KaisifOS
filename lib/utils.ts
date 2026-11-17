@@ -1,5 +1,8 @@
 import { type ClassValue, clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { buildCanonicalJobKey, getSourceUrlPriority } from './eligibility.js';
+
+export { buildCanonicalJobKey, getSourceUrlPriority };
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -71,13 +74,12 @@ export function extractExternalHost(rawUrl: string | undefined | null): string {
 /**
  * Produces a deterministic canonical fingerprint for deduplicating company + role pairs across boards.
  */
-export function normalizeCanonicalFingerprint(company: string, title: string): string {
-  const norm = (v: string) =>
-    String(v || '')
-      .toLowerCase()
-      .replace(/\b(inc|llc|ltd|corp|co|pvt|technologies|tech|ai|labs)\b/g, '')
-      .replace(/[^a-z0-9]/g, '');
-  return `${norm(company)}::${norm(title)}`;
+export function normalizeCanonicalFingerprint(
+  company: string,
+  title: string,
+  location?: string
+): string {
+  return buildCanonicalJobKey(company, title, location);
 }
 
 /**

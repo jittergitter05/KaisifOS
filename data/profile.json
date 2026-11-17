@@ -68,6 +68,8 @@
     "greenhouse": [
       "razorpay",
       "postman",
+      "browserstack",
+      "chargebee",
       "stripe",
       "vercel",
       "cloudflare"
@@ -75,6 +77,7 @@
     "lever": [
       "zepto",
       "cred",
+      "meesho",
       "mistral"
     ],
     "ashby": [
@@ -96,6 +99,8 @@
   "career_urls": [
     "https://www.postman.com/company/careers/",
     "https://razorpay.com/jobs/",
+    "https://www.darwinbox.com/careers",
+    "https://www.keka.com/careers",
     "https://linear.app/careers",
     "https://posthog.com/careers"
   ]

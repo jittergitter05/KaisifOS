@@ -2,29 +2,54 @@ import { google, sheets_v4 } from 'googleapis';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { parseIsoDateTimestamp } from './utils';
+import { buildCanonicalJobKey, getSourceUrlPriority, parseIsoDateTimestamp } from './utils';
+import {
+  isNeonPostgresConfigured,
+  getNeonPipelineJobs,
+  upsertNeonCanonicalJob,
+  updateNeonJobFields,
+  batchUpdateNeonJobStage,
+  getNeonTelemetrySummary,
+} from './neon-db.js';
+
+export {
+  isNeonPostgresConfigured,
+  getNeonPipelineJobs,
+  upsertNeonCanonicalJob,
+  updateNeonJobFields,
+  batchUpdateNeonJobStage,
+  getNeonTelemetrySummary,
+};
 
 export interface StoredJobRecord {
   date?: string;
   daysAgo?: number;
   id: string;
+  canonicalKey?: string;
   title: string;
   company: string;
+  location?: string;
+  salary?: string;
   score: number;
   reasons: string;
   gap: string;
   url: string;
   dm: string;
+  emailDraft?: string;
   resumeAngle: string;
   status: string;
+  evaluationStatus?: string;
+  needsLlmRetry?: boolean;
+  sourcesSeen?: Array<{ source: string; url: string; id?: string; seenAt?: string }>;
 }
 
 export type RuntimeStorageMode = 'custom-dir' | 'local-disk' | 'ephemeral-tmp' | 'read-only';
 
 export interface StorageHealthInfo {
-  storageMode: 'cloud-sheets' | 'local-disk' | 'ephemeral-tmp' | 'read-only';
+  storageMode: 'neon-postgres' | 'cloud-sheets' | 'local-disk' | 'ephemeral-tmp' | 'read-only';
   localWritable: boolean;
   ephemeralFallback: boolean;
+  neonConfigured: boolean;
   cloudConfigured: boolean;
   cloudError?: string;
   resolvedDataDir: string;
@@ -198,11 +223,14 @@ export function writeRuntimeJsonFile(
 }
 
 export function getStorageHealthInfo(cloudError?: string): StorageHealthInfo {
+  const neonConfigured = isNeonPostgresConfigured();
   const cloudConfigured = isCloudSheetsConfigured();
   const dirInfo = resolveRuntimeDataDir();
 
   let storageMode: StorageHealthInfo['storageMode'] = 'read-only';
-  if (cloudConfigured && !cloudError) {
+  if (neonConfigured && !cloudError) {
+    storageMode = 'neon-postgres';
+  } else if (cloudConfigured && !cloudError) {
     storageMode = 'cloud-sheets';
   } else if (dirInfo.mode === 'local-disk' || dirInfo.mode === 'custom-dir') {
     storageMode = 'local-disk';
@@ -214,7 +242,8 @@ export function getStorageHealthInfo(cloudError?: string): StorageHealthInfo {
     storageMode,
     localWritable: dirInfo.writable,
     ephemeralFallback: dirInfo.mode === 'ephemeral-tmp',
-    cloudConfigured,
+    neonConfigured,
+    cloudConfigured: neonConfigured || cloudConfigured,
     cloudError,
     resolvedDataDir: dirInfo.dir,
   };
@@ -431,10 +460,13 @@ export async function updateCloudSheetRowStatus(rowId: number, status: string): 
 export interface JobFieldPatch {
   status?: string;
   dm?: string;
+  emailDraft?: string;
   resumeAngle?: string;
   gap?: string;
   score?: number;
   reasons?: string;
+  evaluationStatus?: string;
+  needsLlmRetry?: boolean;
 }
 
 export async function updateCloudSheetRowFields(
@@ -678,10 +710,30 @@ function resolveDateString(record: StoredJobRecord): string {
   return d.toISOString().split('T')[0];
 }
 
-export function readLocalJobRows(): string[][] {
+export function readLocalJobRecords(): StoredJobRecord[] {
   try {
     const raw = readRuntimeJsonFile<StoredJobRecord[]>('jobs-store.json', []);
-    if (!Array.isArray(raw) || raw.length === 0) return [];
+    if (!Array.isArray(raw)) return [];
+    return raw.map((item) => ({
+      ...item,
+      date: resolveDateString(item),
+      canonicalKey:
+        item.canonicalKey || buildCanonicalJobKey(item.company, item.title, item.location),
+      evaluationStatus: item.evaluationStatus || 'LLM_SCORED',
+      needsLlmRetry: Boolean(item.needsLlmRetry),
+      sourcesSeen: Array.isArray(item.sourcesSeen)
+        ? item.sourcesSeen
+        : [{ source: item.id || 'scout', url: item.url || '' }],
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export function readLocalJobRows(): string[][] {
+  try {
+    const raw = readLocalJobRecords();
+    if (raw.length === 0) return [];
     const dataRows = raw.map((item) => [
       resolveDateString(item),
       String(item.id || ''),
@@ -703,7 +755,7 @@ export function readLocalJobRows(): string[][] {
 }
 
 export function updateLocalJobRow(
-  target: number | { id?: string; rowId?: number },
+  target: number | { id?: string; canonicalKey?: string; rowId?: number },
   patch: JobFieldPatch
 ): boolean {
   try {
@@ -711,16 +763,28 @@ export function updateLocalJobRow(
     if (!Array.isArray(raw) || raw.length === 0) return false;
 
     const targetId = typeof target === 'object' ? target.id : undefined;
+    const targetCanonicalKey = typeof target === 'object' ? target.canonicalKey : undefined;
     const targetRowId = typeof target === 'number' ? target : target.rowId;
 
-    let idx = targetId ? raw.findIndex((item) => item.id === targetId) : -1;
-    if (idx < 0 && !targetId && typeof targetRowId === 'number') {
+    let idx =
+      targetId || targetCanonicalKey
+        ? raw.findIndex(
+            (item) =>
+              (targetId && (item.id === targetId || item.canonicalKey === targetId)) ||
+              (targetCanonicalKey &&
+                (item.canonicalKey === targetCanonicalKey || item.id === targetCanonicalKey))
+          )
+        : -1;
+    if (idx < 0 && !targetId && !targetCanonicalKey && typeof targetRowId === 'number') {
       idx = targetRowId - 2;
     }
 
     if (idx < 0 || idx >= raw.length) return false;
     if (patch.status !== undefined) raw[idx].status = sanitizePlainField(patch.status, 40);
     if (patch.dm !== undefined) raw[idx].dm = sanitizePlainField(patch.dm, 1500);
+    if (patch.emailDraft !== undefined) {
+      raw[idx].emailDraft = sanitizePlainField(patch.emailDraft, 2000);
+    }
     if (patch.resumeAngle !== undefined) {
       raw[idx].resumeAngle = sanitizePlainField(patch.resumeAngle, 500);
     }
@@ -729,6 +793,12 @@ export function updateLocalJobRow(
       raw[idx].score = Math.max(0, Math.min(100, Math.round(Number(patch.score) || 0)));
     }
     if (patch.reasons !== undefined) raw[idx].reasons = sanitizePlainField(patch.reasons, 1000);
+    if (patch.evaluationStatus !== undefined) {
+      raw[idx].evaluationStatus = sanitizePlainField(patch.evaluationStatus, 40);
+    }
+    if (patch.needsLlmRetry !== undefined) {
+      raw[idx].needsLlmRetry = Boolean(patch.needsLlmRetry);
+    }
     return writeRuntimeJsonFile('jobs-store.json', raw).ok;
   } catch (e) {
     console.error('[LocalStore] Failed updating row:', e);
@@ -737,7 +807,7 @@ export function updateLocalJobRow(
 }
 
 export function batchUpdateLocalJobRows(
-  targets: Array<{ id?: string; rowId?: number }>,
+  targets: Array<{ id?: string; canonicalKey?: string; rowId?: number }>,
   status: string
 ): number {
   try {
@@ -747,8 +817,16 @@ export function batchUpdateLocalJobRows(
     const cleanStatus = sanitizePlainField(status, 40);
 
     for (const target of targets) {
-      let idx = target.id ? raw.findIndex((item) => item.id === target.id) : -1;
-      if (idx < 0 && !target.id && typeof target.rowId === 'number') {
+      let idx =
+        target.id || target.canonicalKey
+          ? raw.findIndex(
+              (item) =>
+                (target.id && (item.id === target.id || item.canonicalKey === target.id)) ||
+                (target.canonicalKey &&
+                  (item.canonicalKey === target.canonicalKey || item.id === target.canonicalKey))
+            )
+          : -1;
+      if (idx < 0 && !target.id && !target.canonicalKey && typeof target.rowId === 'number') {
         idx = target.rowId - 2;
       }
       if (idx >= 0 && idx < raw.length) {
@@ -775,21 +853,78 @@ export function appendLocalJobRecordDetailed(record: StoredJobRecord): {
 } {
   try {
     const existing = readRuntimeJsonFile<StoredJobRecord[]>('jobs-store.json', []);
-    const deduped = record.id ? existing.filter((item) => item.id !== record.id) : [...existing];
-    deduped.unshift({
-      ...record,
-      title: sanitizePlainField(record.title, 200),
-      company: sanitizePlainField(record.company, 160),
-      reasons: sanitizePlainField(record.reasons, 1000),
-      gap: sanitizePlainField(record.gap, 500),
-      url: sanitizePlainField(record.url, 500),
-      dm: sanitizePlainField(record.dm, 1500),
-      resumeAngle: sanitizePlainField(record.resumeAngle, 500),
-      status: sanitizePlainField(record.status || 'NEW', 40),
-      date: record.date || new Date().toISOString().split('T')[0],
-      daysAgo: 0,
-    });
-    const res = writeRuntimeJsonFile('jobs-store.json', deduped);
+    const incomingCanonical =
+      record.canonicalKey || buildCanonicalJobKey(record.company, record.title, record.location);
+    const existingIdx = existing.findIndex(
+      (item) =>
+        (item.id && item.id === record.id) ||
+        (item.canonicalKey || buildCanonicalJobKey(item.company, item.title, item.location)) ===
+          incomingCanonical
+    );
+
+    const incomingSources = Array.isArray(record.sourcesSeen)
+      ? record.sourcesSeen
+      : [{ source: record.id || 'scout', url: record.url || '' }];
+
+    if (existingIdx >= 0) {
+      const prev = existing[existingIdx];
+      const prevSources = Array.isArray(prev.sourcesSeen)
+        ? prev.sourcesSeen
+        : [{ source: prev.id || 'scout', url: prev.url || '' }];
+      const mergedMap = new Map<string, { source: string; url: string; id?: string; seenAt?: string }>();
+      for (const s of [...prevSources, ...incomingSources]) {
+        if (s && s.source) mergedMap.set(s.source, s);
+      }
+
+      const preferIncomingUrl =
+        getSourceUrlPriority(record.url || record.id) >= getSourceUrlPriority(prev.url || prev.id);
+
+      existing[existingIdx] = {
+        ...prev,
+        ...record,
+        id: preferIncomingUrl ? record.id || prev.id : prev.id || record.id,
+        canonicalKey: incomingCanonical,
+        title: sanitizePlainField(record.title || prev.title, 200),
+        company: sanitizePlainField(record.company || prev.company, 160),
+        score: Math.max(Number(prev.score) || 0, Number(record.score) || 0),
+        reasons: sanitizePlainField(record.reasons || prev.reasons, 1000),
+        gap: sanitizePlainField(record.gap || prev.gap, 500),
+        url: sanitizePlainField(preferIncomingUrl ? record.url || prev.url : prev.url || record.url, 500),
+        dm: sanitizePlainField(record.dm || prev.dm, 1500),
+        emailDraft: sanitizePlainField(record.emailDraft || prev.emailDraft || '', 2000),
+        resumeAngle: sanitizePlainField(record.resumeAngle || prev.resumeAngle, 500),
+        status: sanitizePlainField(
+          prev.status && prev.status !== 'NEW' ? prev.status : record.status || 'NEW',
+          40
+        ),
+        evaluationStatus: record.evaluationStatus || prev.evaluationStatus || 'LLM_SCORED',
+        needsLlmRetry:
+          record.needsLlmRetry !== undefined ? Boolean(record.needsLlmRetry) : Boolean(prev.needsLlmRetry),
+        sourcesSeen: Array.from(mergedMap.values()),
+        date: prev.date || record.date || new Date().toISOString().split('T')[0],
+      };
+    } else {
+      existing.unshift({
+        ...record,
+        canonicalKey: incomingCanonical,
+        title: sanitizePlainField(record.title, 200),
+        company: sanitizePlainField(record.company, 160),
+        reasons: sanitizePlainField(record.reasons, 1000),
+        gap: sanitizePlainField(record.gap, 500),
+        url: sanitizePlainField(record.url, 500),
+        dm: sanitizePlainField(record.dm, 1500),
+        emailDraft: sanitizePlainField(record.emailDraft || '', 2000),
+        resumeAngle: sanitizePlainField(record.resumeAngle, 500),
+        status: sanitizePlainField(record.status || 'NEW', 40),
+        evaluationStatus: record.evaluationStatus || 'LLM_SCORED',
+        needsLlmRetry: Boolean(record.needsLlmRetry),
+        sourcesSeen: incomingSources,
+        date: record.date || new Date().toISOString().split('T')[0],
+        daysAgo: 0,
+      });
+    }
+
+    const res = writeRuntimeJsonFile('jobs-store.json', existing);
     return { ok: res.ok, mode: res.mode, error: res.error };
   } catch (e) {
     return {
@@ -806,10 +941,97 @@ export function appendLocalJobRecord(record: StoredJobRecord): boolean {
 
 export async function getAllSheetRows(): Promise<{
   rows: string[][];
-  mode: 'cloud-sheets' | 'local-store';
+  mode: 'neon-postgres' | 'cloud-sheets' | 'local-store';
   cloudError?: string;
+  richRecords?: StoredJobRecord[];
 }> {
   let cloudError: string | undefined;
+
+  if (isNeonPostgresConfigured()) {
+    try {
+      const neonJobs = await getNeonPipelineJobs({ includeRetryPending: true });
+      if (Array.isArray(neonJobs) && neonJobs.length > 0) {
+        const richRecords: StoredJobRecord[] = neonJobs.map((j) => ({
+          date: j.date,
+          id: j.id,
+          canonicalKey: j.canonicalKey,
+          title: j.title,
+          company: j.company,
+          location: j.location,
+          salary: j.salary,
+          score: j.score,
+          reasons: j.reasons,
+          gap: j.gap,
+          url: j.url,
+          dm: j.dm,
+          emailDraft: j.emailDraft,
+          resumeAngle: j.resumeAngle,
+          status: j.status,
+          evaluationStatus: j.evaluationStatus,
+          needsLlmRetry: j.needsLlmRetry,
+          sourcesSeen: j.sourcesSeen,
+        }));
+        const dataRows = richRecords.map((item) => [
+          item.date || new Date().toISOString().split('T')[0],
+          String(item.id || ''),
+          String(item.title || ''),
+          String(item.company || ''),
+          String(item.score ?? 0),
+          String(item.reasons || ''),
+          String(item.gap || ''),
+          String(item.url || ''),
+          String(item.dm || ''),
+          String(item.resumeAngle || ''),
+          String(item.status || 'NEW'),
+        ]);
+        return {
+          rows: [CANONICAL_SHEET1_HEADERS, ...dataRows],
+          mode: 'neon-postgres',
+          richRecords,
+        };
+      }
+      // If Neon DB is freshly created with 0 rows, seed it from local store if available
+      if (Array.isArray(neonJobs)) {
+        const localSeed = readLocalJobRecords();
+        if (localSeed.length > 0) {
+          for (const rec of localSeed.slice(0, 50)) {
+            await upsertNeonCanonicalJob({
+              id: rec.id,
+              canonicalKey:
+                rec.canonicalKey || buildCanonicalJobKey(rec.company, rec.title, rec.location),
+              title: rec.title,
+              company: rec.company,
+              location: rec.location || 'Hyderabad',
+              salary: rec.salary || '',
+              url: rec.url,
+              source: rec.id,
+              sourcesSeen: rec.sourcesSeen,
+              score: rec.score,
+              evaluationStatus: rec.evaluationStatus || 'LLM_SCORED',
+              needsLlmRetry: Boolean(rec.needsLlmRetry),
+              pipelineStage: rec.status || 'NEW',
+              reasons: rec.reasons,
+              gap: rec.gap,
+              dmDraft: rec.dm,
+              emailDraft: rec.emailDraft || '',
+              resumeAngle: rec.resumeAngle,
+            });
+          }
+          const seededRows = readLocalJobRows();
+          return {
+            rows: seededRows.length > 0 ? seededRows : [CANONICAL_SHEET1_HEADERS],
+            mode: 'neon-postgres',
+            richRecords: localSeed,
+          };
+        }
+        return { rows: [CANONICAL_SHEET1_HEADERS], mode: 'neon-postgres', richRecords: [] };
+      }
+    } catch (e) {
+      cloudError = (e as Error).message;
+      console.warn('[Neon] Postgres fetch failed, falling back:', cloudError);
+    }
+  }
+
   if (isCloudSheetsConfigured()) {
     try {
       const auth = await getAuth();
@@ -832,12 +1054,13 @@ export async function getAllSheetRows(): Promise<{
       console.warn('[Sheets] Cloud fetch failed, falling back to runtime store:', cloudError);
     }
   }
-  return { rows: readLocalJobRows(), mode: 'local-store', cloudError };
+  const richRecords = readLocalJobRecords();
+  return { rows: readLocalJobRows(), mode: 'local-store', cloudError, richRecords };
 }
 
 export async function getPublicStats() {
   try {
-    const { rows, mode, cloudError } = await getAllSheetRows();
+    const { rows, mode, cloudError, richRecords } = await getAllSheetRows();
     const dataRows = rows.slice(1).filter((r) => r[0]);
 
     const nowMs = Date.now();
@@ -877,6 +1100,7 @@ export async function getPublicStats() {
       .slice(0, 5);
 
     const storageHealth = getStorageHealthInfo(cloudError);
+    const richById = new Map((richRecords || []).map((r) => [r.id, r]));
 
     return {
       jobs_scouted_this_week: scoutedWeek,
@@ -889,19 +1113,24 @@ export async function getPublicStats() {
       storage_mode: mode,
       persistence_mode: storageHealth.storageMode,
       cloud_error: cloudError,
-      recent_matches: sortedRecent.map((r) => ({
-        date: r[0],
-        id: r[1],
-        title: r[2],
-        company: r[3],
-        score: parseInt(r[4] || '0', 10),
-        reasons: r[5],
-        gap: r[6],
-        url: r[7],
-        dm: r[8],
-        resumeAngle: r[9],
-        status: r[10] || 'NEW',
-      })),
+      recent_matches: sortedRecent.map((r) => {
+        const rich = richById.get(r[1]);
+        return {
+          date: r[0],
+          id: r[1],
+          title: r[2],
+          company: r[3],
+          score: parseInt(r[4] || '0', 10),
+          reasons: r[5],
+          gap: r[6],
+          url: r[7],
+          dm: r[8],
+          resumeAngle: r[9],
+          status: r[10] || 'NEW',
+          sourcesSeen: rich?.sourcesSeen,
+          evaluationStatus: rich?.evaluationStatus,
+        };
+      }),
     };
   } catch (e) {
     console.error('Failed to get public stats:', e);

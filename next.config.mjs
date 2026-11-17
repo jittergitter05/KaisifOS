@@ -9,7 +9,9 @@ const nextConfig = {
     ignoreBuildErrors: false,
   },
   experimental: {
-    serverComponentsExternalPackages: ['googleapis', '@google/genai', 'groq-sdk'],
+    serverComponentsExternalPackages: ['googleapis', '@google/genai', 'groq-sdk', 'pg'],
+    cpus: 1,
+    workerThreads: false,
   },
   webpack: (config) => {
     config.cache = false;
@@ -17,3 +19,4 @@ const nextConfig = {
   },
 };
 export default nextConfig;
+

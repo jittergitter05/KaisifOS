@@ -182,6 +182,95 @@ export function extractJsonLdJobPostings(
   return jobs;
 }
 
+export function extractNextDataJobPostings(
+  html: string,
+  baseUrl: string,
+  fallbackCompany?: string
+): ScrapedCareerJob[] {
+  const jobs: ScrapedCareerJob[] = [];
+  const companyFallback = fallbackCompany || inferCompanyFromUrl(baseUrl);
+  const nextMatch = html.match(
+    /<script[^>]+id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i
+  );
+  if (!nextMatch || !nextMatch[1]) return jobs;
+
+  try {
+    const parsed: unknown = JSON.parse(nextMatch[1]);
+    const candidates: Array<Record<string, any>> = [];
+    const collect = (node: unknown, depth = 0) => {
+      if (!node || typeof node !== 'object' || depth > 7 || candidates.length >= 25) return;
+      if (Array.isArray(node)) {
+        for (const item of node) collect(item, depth + 1);
+        return;
+      }
+      const obj = node as Record<string, any>;
+      const title = obj.title || obj.jobTitle || obj.position || obj.name;
+      const urlField = obj.applyUrl || obj.jobUrl || obj.hostedUrl || obj.absolute_url || obj.url || obj.slug;
+      const hasJobSignals =
+        typeof title === 'string' &&
+        title.length >= 4 &&
+        title.length <= 120 &&
+        (typeof obj.location === 'string' ||
+          typeof obj.locationName === 'string' ||
+          typeof obj.department === 'string' ||
+          typeof obj.team === 'string' ||
+          typeof obj.applyUrl === 'string' ||
+          typeof obj.jobUrl === 'string');
+
+      if (hasJobSignals && urlField) {
+        candidates.push(obj);
+        return;
+      }
+      for (const val of Object.values(obj)) {
+        if (val && typeof val === 'object') collect(val, depth + 1);
+      }
+    };
+    collect(parsed);
+
+    for (const item of candidates.slice(0, 15)) {
+      const title = String(item.title || item.jobTitle || item.position || item.name || '').trim();
+      if (!title) continue;
+      const rawUrl = String(
+        item.applyUrl || item.jobUrl || item.hostedUrl || item.absolute_url || item.url || item.slug || ''
+      ).trim();
+      let resolvedUrl = baseUrl;
+      if (rawUrl) {
+        try {
+          resolvedUrl = new URL(rawUrl, baseUrl).toString();
+        } catch {
+          resolvedUrl = baseUrl;
+        }
+      }
+      const location = String(
+        item.location?.name || item.locationName || item.location || item.city || 'Remote / Hybrid'
+      ).trim();
+      const desc = stripHtml(
+        String(
+          item.description ||
+            item.descriptionPlain ||
+            item.summary ||
+            `${title} (${item.department || item.team || 'Product & Growth'}) at ${companyFallback} — ${location}`
+        )
+      ).substring(0, 12000);
+
+      jobs.push({
+        id: `career_${stableShortHash(`${resolvedUrl}::${title}`)}`,
+        title,
+        company: companyFallback,
+        location,
+        salary: 'Direct Career Page',
+        description: desc,
+        url: resolvedUrl,
+        source: 'Company Career Page',
+      });
+    }
+  } catch {
+    // Ignore non-JSON or unexpected __NEXT_DATA__ structures
+  }
+
+  return jobs;
+}
+
 export function extractCareerPageAnchors(
   html: string,
   baseUrl: string,
@@ -229,10 +318,25 @@ export function extractCareerPageAnchors(
       source: 'Company Career Page',
     });
 
-    if (jobs.length >= 10) break;
+    if (jobs.length >= 12) break;
   }
 
   return jobs;
+}
+
+function scoreBoardPostingPriority(title: string, location: string, department = ''): number {
+  const loc = String(location || '').toLowerCase();
+  const t = `${title} ${department}`.toLowerCase();
+  let score = 0;
+  if (/\b(hyderabad|telangana|secunderabad)\b/.test(loc)) score += 50;
+  else if (/\b(india|bengaluru|bangalore|mumbai|pune|gurgaon|gurugram|noida|chennai|delhi)\b/.test(loc))
+    score += 30;
+  else if (/\b(remote|worldwide|anywhere|global|distributed)\b/.test(loc)) score += 20;
+
+  if (/\b(associate product|apm|product marketing|pmm|growth|founder|product analyst|product manager|marketing)\b/.test(t))
+    score += 25;
+  if (!/\b(senior|sr\.?|staff|principal|director|vp|head of)\b/.test(t)) score += 10;
+  return score;
 }
 
 export async function fetchWorkableBoards(boards: string[]): Promise<CareerFetchResult> {
@@ -254,7 +358,17 @@ export async function fetchWorkableBoards(boards: string[]): Promise<CareerFetch
         }
         const data = await res.json();
         const companyName = String(data.name || slugToTitleCase(board));
-        const rawList = (data.jobs || []).slice(0, 8);
+        const allJobs = Array.isArray(data.jobs) ? data.jobs : [];
+        const rawList = [...allJobs]
+          .sort((a: any, b: any) => {
+            const locA = [a.city, a.country, a.telecommuting ? 'Remote' : ''].filter(Boolean).join(', ');
+            const locB = [b.city, b.country, b.telecommuting ? 'Remote' : ''].filter(Boolean).join(', ');
+            return (
+              scoreBoardPostingPriority(b.title || '', locB, b.department || '') -
+              scoreBoardPostingPriority(a.title || '', locA, a.department || '')
+            );
+          })
+          .slice(0, 10);
         await Promise.all(
           rawList.map(async (job: any) => {
             const loc =
@@ -324,7 +438,7 @@ export async function fetchSmartRecruitersBoards(boards: string[]): Promise<Care
     activeBoards.map(async (board) => {
       try {
         const res = await fetch(
-          `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(board)}/postings?limit=10`,
+          `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(board)}/postings?limit=35`,
           { signal: AbortSignal.timeout(6500) }
         );
         if (!res.ok) {
@@ -332,7 +446,21 @@ export async function fetchSmartRecruitersBoards(boards: string[]): Promise<Care
           return;
         }
         const data = await res.json();
-        const rawList = (data.content || []).slice(0, 8);
+        const allPostings = Array.isArray(data.content) ? data.content : [];
+        const rawList = [...allPostings]
+          .sort((a: any, b: any) => {
+            const locA = [a.location?.city, a.location?.country, a.location?.remote ? 'Remote' : '']
+              .filter(Boolean)
+              .join(', ');
+            const locB = [b.location?.city, b.location?.country, b.location?.remote ? 'Remote' : '']
+              .filter(Boolean)
+              .join(', ');
+            return (
+              scoreBoardPostingPriority(b.name || '', locB, b.department?.label || '') -
+              scoreBoardPostingPriority(a.name || '', locA, a.department?.label || '')
+            );
+          })
+          .slice(0, 10);
         await Promise.all(
           rawList.map(async (job: any) => {
             const companyName = String(job.company?.name || slugToTitleCase(board));
@@ -411,7 +539,18 @@ export async function fetchRecruiteeBoards(boards: string[]): Promise<CareerFetc
           return;
         }
         const data = await res.json();
-        for (const job of (data.offers || []).slice(0, 8)) {
+        const allOffers = Array.isArray(data.offers) ? data.offers : [];
+        const sortedOffers = [...allOffers]
+          .sort((a: any, b: any) => {
+            const locA = a.location || (a.remote ? 'Remote' : 'Hybrid');
+            const locB = b.location || (b.remote ? 'Remote' : 'Hybrid');
+            return (
+              scoreBoardPostingPriority(b.title || '', String(locB), b.department || '') -
+              scoreBoardPostingPriority(a.title || '', String(locA), a.department || '')
+            );
+          })
+          .slice(0, 10);
+        for (const job of sortedOffers) {
           const companyName = String(job.company_name || slugToTitleCase(cleanSlug));
           const loc = job.location || (job.remote ? 'Remote' : 'Hybrid');
           const applyUrl =
@@ -448,7 +587,7 @@ export async function fetchRecruiteeBoards(boards: string[]): Promise<CareerFetc
 export async function fetchCompanyCareerPages(careerUrls: string[]): Promise<CareerFetchResult> {
   const results: ScrapedCareerJob[] = [];
   const failedBoards: string[] = [];
-  const activeUrls = careerUrls.slice(0, 10);
+  const activeUrls = careerUrls.slice(0, 12);
   const truncatedBoards = Math.max(0, careerUrls.length - activeUrls.length);
 
   await Promise.all(
@@ -477,6 +616,12 @@ export async function fetchCompanyCareerPages(careerUrls: string[]): Promise<Car
         const ldJobs = extractJsonLdJobPostings(html, check.url.toString(), companyName);
         if (ldJobs.length > 0) {
           results.push(...ldJobs);
+          return;
+        }
+
+        const nextDataJobs = extractNextDataJobPostings(html, check.url.toString(), companyName);
+        if (nextDataJobs.length > 0) {
+          results.push(...nextDataJobs);
           return;
         }
 

@@ -13,6 +13,7 @@ import {
   Download,
   Radar,
   ArrowUpRight,
+  Sparkles,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -25,11 +26,22 @@ import {
 } from '@/lib/utils';
 
 export default function DigestPage() {
-  const [jobs, setJobs] = useState<(JobData & { id: string; source: string })[]>([]);
+  const [jobs, setJobs] = useState<
+    (JobData & {
+      id: string;
+      source: string;
+      canonicalKey?: string;
+      location?: string;
+      needsLlmRetry?: boolean;
+      sourcesSeen?: Array<{ source: string; url: string }>;
+    })[]
+  >([]);
   const [loading, setLoading] = useState(true);
   const [scoutingLive, setScoutingLive] = useState(false);
+  const [retryingLlm, setRetryingLlm] = useState(false);
   const [sweepNotice, setSweepNotice] = useState<{
     summary: string;
+    telemetryLine?: string;
     committedJobs: Array<{ title: string; company: string; score: number; url?: string; source?: string }>;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -54,22 +66,41 @@ export default function DigestPage() {
       })
       .then((data) => {
         if (data && data.rows) {
+          const richById = new Map<string, Record<string, any>>();
+          if (Array.isArray(data.richRecords)) {
+            for (const rec of data.richRecords) {
+              if (rec && typeof rec.id === 'string') richById.set(rec.id, rec);
+            }
+          }
           const parsedJobs = data.rows
-            .map((r: string[], i: number) => ({
-              rowId: i + 1,
-              Date: r[0] || '',
-              id: r[1] || '',
-              Title: r[2] || '',
-              Company: r[3] || '',
-              Score: parseInt(r[4] || '0', 10),
-              Reasons: r[5] || '',
-              Gap: r[6] || '',
-              URL: r[7] || '',
-              DM: r[8] || '',
-              ResumeAngle: r[9] || '',
-              Status: r[10] || 'NEW',
-              source: detectSource(r[1] || ''),
-            }))
+            .map((r: string[], i: number) => {
+              const id = r[1] || '';
+              const reasons = r[5] || '';
+              const rich = richById.get(id);
+              const needsLlmRetry =
+                typeof rich?.needsLlmRetry === 'boolean'
+                  ? rich.needsLlmRetry
+                  : /Deterministic 4-Pillar Rubric/i.test(reasons);
+              return {
+                rowId: i + 1,
+                Date: r[0] || '',
+                id,
+                canonicalKey: rich?.canonicalKey,
+                location: rich?.location || '',
+                Title: r[2] || '',
+                Company: r[3] || '',
+                Score: parseInt(r[4] || '0', 10),
+                Reasons: reasons,
+                Gap: r[6] || '',
+                URL: r[7] || '',
+                DM: r[8] || '',
+                ResumeAngle: r[9] || '',
+                Status: r[10] || 'NEW',
+                source: detectSource(id),
+                needsLlmRetry,
+                sourcesSeen: Array.isArray(rich?.sourcesSeen) ? rich.sourcesSeen : undefined,
+              };
+            })
             .filter((j: JobData) => j.Title !== 'Title' && Boolean(j.Date));
 
           setJobs(parsedJobs);
@@ -87,12 +118,22 @@ export default function DigestPage() {
     fetchDigest();
   }, [fetchDigest]);
 
-  const runLiveCareerScout = async () => {
-    setScoutingLive(true);
+  const pendingRetryCount = useMemo(
+    () => jobs.filter((j) => j.needsLlmRetry).length,
+    [jobs]
+  );
+
+  const executeCareerScout = async (mode: 'live_sweep' | 'retry_pending') => {
+    if (mode === 'retry_pending') setRetryingLlm(true);
+    else setScoutingLive(true);
     setActionError(null);
     setSweepNotice(null);
     try {
-      const res = await fetch('/api/scout/live', { method: 'POST' });
+      const res = await fetch('/api/scout/live', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
       if (res.status === 401) {
         window.location.href = '/login';
         return;
@@ -102,8 +143,13 @@ export default function DigestPage() {
         throw new Error(data?.error || `Live Career & ATS scout failed (HTTP ${res.status})`);
       }
       const committed = Array.isArray(data.committedJobs) ? data.committedJobs : [];
+      const telemetryLine = `Canonical Duplicates Merged: ${data.canonicalDedupSaved ?? 0} · Hard-Gate Rejections: ${data.hardGateRejected ?? 0} · Queued for LLM Retry: ${data.queuedForRetryCount ?? 0}`;
       setSweepNotice({
-        summary: `Scanned ${data.scanned ?? 0} live Career Page, Direct-ATS & remote roles · Added ${data.addedCount ?? 0} real matches.`,
+        summary:
+          mode === 'retry_pending'
+            ? `Re-evaluated ${data.evaluatedCount ?? 0} deterministic fallback roles · Upgraded ${data.addedCount ?? 0} matches.`
+            : `Scanned ${data.scanned ?? 0} live Career Page, Direct-ATS & remote roles · Added ${data.addedCount ?? 0} real matches.`,
+        telemetryLine,
         committedJobs: committed,
       });
       if ((data.addedCount ?? 0) > 0 && minScore > 75) {
@@ -114,6 +160,7 @@ export default function DigestPage() {
       setActionError((e as Error).message || 'Network error while running live Career & ATS scout.');
     } finally {
       setScoutingLive(false);
+      setRetryingLlm(false);
     }
   };
 
@@ -126,7 +173,12 @@ export default function DigestPage() {
       const res = await fetch('/api/sheet-sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: targetJob?.id, rowId, status: newStatus }),
+        body: JSON.stringify({
+          id: targetJob?.id,
+          canonicalKey: targetJob?.canonicalKey,
+          rowId,
+          status: newStatus,
+        }),
       });
       if (res.status === 401) {
         window.location.href = '/login';
@@ -162,7 +214,17 @@ export default function DigestPage() {
   }, [jobs, minScore, daysWindow, sourceFilter]);
 
   const groupedJobs = useMemo(() => {
-    const groups: Record<string, (JobData & { id: string; source: string })[]> = {};
+    const groups: Record<
+      string,
+      (JobData & {
+        id: string;
+        source: string;
+        canonicalKey?: string;
+        location?: string;
+        needsLlmRetry?: boolean;
+        sourcesSeen?: Array<{ source: string; url: string }>;
+      })[]
+    > = {};
     filteredJobs.forEach((job) => {
       if (!groups[job.Date]) groups[job.Date] = [];
       groups[job.Date].push(job);
@@ -223,10 +285,25 @@ export default function DigestPage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {pendingRetryCount > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => executeCareerScout('retry_pending')}
+                disabled={retryingLlm || scoutingLive}
+                size="sm"
+                className="bg-amber-50 dark:bg-amber-950/40 border-amber-300 dark:border-amber-700/70 hover:bg-amber-100 dark:hover:bg-amber-900/50 text-amber-800 dark:text-amber-300 text-xs h-8 whitespace-nowrap shrink-0"
+              >
+                <Sparkles className={`h-3.5 w-3.5 mr-1.5 ${retryingLlm ? 'animate-spin' : ''}`} />
+                {retryingLlm
+                  ? 'Retrying LLM Evaluations...'
+                  : `Retry Pending LLM (${pendingRetryCount})`}
+              </Button>
+            )}
             <Button
               type="button"
-              onClick={runLiveCareerScout}
-              disabled={scoutingLive}
+              onClick={() => executeCareerScout('live_sweep')}
+              disabled={scoutingLive || retryingLlm}
               size="sm"
               className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs h-8 whitespace-nowrap shrink-0"
             >
@@ -352,8 +429,15 @@ export default function DigestPage() {
 
         {sweepNotice && (
           <div className="bg-emerald-50 dark:bg-emerald-950/35 border border-emerald-200 dark:border-emerald-800/70 text-emerald-900 dark:text-emerald-200 px-4 py-3 rounded-md text-xs space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <span className="font-mono">{sweepNotice.summary}</span>
+            <div className="flex items-center justify-between gap-3 font-mono">
+              <div className="space-y-0.5">
+                <div>{sweepNotice.summary}</div>
+                {sweepNotice.telemetryLine && (
+                  <div className="text-[11px] text-emerald-700/90 dark:text-emerald-400/90">
+                    {sweepNotice.telemetryLine}
+                  </div>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={() => setSweepNotice(null)}
@@ -441,7 +525,7 @@ export default function DigestPage() {
               type="button"
               size="sm"
               disabled={scoutingLive}
-              onClick={runLiveCareerScout}
+              onClick={() => executeCareerScout('live_sweep')}
               className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs"
             >
               <Radar className={`h-3.5 w-3.5 mr-1.5 ${scoutingLive ? 'animate-spin' : ''}`} />
@@ -489,6 +573,7 @@ export default function DigestPage() {
                   {dateJobs.map((job) => {
                     const directUrl = safeExternalUrl(job.URL);
                     const applyHost = extractExternalHost(job.URL);
+                    const seenCount = Array.isArray(job.sourcesSeen) ? job.sourcesSeen.length : 1;
                     return (
                       <div key={job.rowId || `${job.Company}-${job.Title}`} className="space-y-1.5">
                         <div className="flex flex-wrap items-center justify-between gap-2 px-1">
@@ -497,9 +582,14 @@ export default function DigestPage() {
                               Source:{' '}
                               <strong className="text-slate-800 dark:text-slate-200">
                                 {job.source}
-                              </strong>{' '}
-                              · ID: {job.id}
+                              </strong>
+                              {seenCount > 1 ? ` (+${seenCount - 1} merged)` : ''} · ID: {job.id}
                             </span>
+                            {job.needsLlmRetry && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-50 text-amber-800 border border-amber-300 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-800/60">
+                                Deterministic · Queued for LLM Retry
+                              </span>
+                            )}
                             <span aria-hidden="true">·</span>
                             {directUrl !== '#' ? (
                               <a
@@ -523,6 +613,8 @@ export default function DigestPage() {
                               setAuditJob({
                                 rowId: job.rowId,
                                 id: job.id,
+                                canonicalKey: job.canonicalKey,
+                                location: job.location,
                                 date: job.Date,
                                 title: job.Title,
                                 company: job.Company,
@@ -534,11 +626,13 @@ export default function DigestPage() {
                                 resumeAngle: job.ResumeAngle,
                                 status: job.Status || 'NEW',
                                 source: job.source,
+                                needsLlmRetry: job.needsLlmRetry,
+                                sourcesSeen: job.sourcesSeen,
                               })
                             }
                             className="text-[11px] font-mono text-emerald-600 dark:text-emerald-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
                           >
-                            <Layers className="h-3 w-3" /> Inspect 4-Pillar Subscores →
+                            <Layers className="h-3 w-3" /> Inspect 4-Pillar &amp; Outreach →
                           </button>
                         </div>
                         <JobCard job={job} onStatusChange={handleStatusChange} />

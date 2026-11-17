@@ -11,6 +11,11 @@ const STATUS_CONFIG: Record<string, { classes: string; label: string }> = {
       'text-cyan-800 bg-cyan-50 border-cyan-300 dark:text-cyan-300 dark:bg-cyan-950/60 dark:border-cyan-800/60',
     label: 'Shortlisted',
   },
+  outreach_drafted: {
+    classes:
+      'text-indigo-800 bg-indigo-50 border-indigo-300 dark:text-indigo-300 dark:bg-indigo-950/60 dark:border-indigo-800/60',
+    label: 'Outreach Drafted',
+  },
   applied: {
     classes:
       'text-blue-800 bg-blue-50 border-blue-300 dark:text-blue-300 dark:bg-blue-950/60 dark:border-blue-800/60',
@@ -51,11 +56,17 @@ const STATUS_CONFIG: Record<string, { classes: string; label: string }> = {
       'text-slate-500 bg-slate-50 border-slate-200 dark:text-slate-500 dark:bg-slate-900/50 dark:border-slate-800/50',
     label: 'Ignored',
   },
+  archived: {
+    classes:
+      'text-slate-500 bg-slate-100 border-slate-300 dark:text-slate-400 dark:bg-slate-900/60 dark:border-slate-800/70',
+    label: 'Archived',
+  },
 };
 
 export const ALL_STATUSES = [
   'NEW',
   'SHORTLISTED',
+  'OUTREACH_DRAFTED',
   'APPLIED',
   'REPLIED',
   'INTERVIEW',
@@ -64,6 +75,7 @@ export const ALL_STATUSES = [
   'WITHDRAWN',
   'GHOSTED',
   'IGNORED',
+  'ARCHIVED',
 ];
 
 export default function StatusBadge({ status }: { status: string }) {

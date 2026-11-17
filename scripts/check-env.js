@@ -3,6 +3,11 @@ dotenv.config();
 
 const subsystems = [
   {
+    name: 'DATABASE_URL',
+    subsystem: 'Neon Serverless Postgres Primary Store (Canonical Dedup & Retry Queue)',
+    required: false,
+  },
+  {
     name: 'GEMINI_API_KEY',
     subsystem: 'AI Chain Tier 1 (Gemini 4 Hydrogen)',
     required: false,
@@ -30,12 +35,12 @@ const subsystems = [
   {
     name: 'GOOGLE_SHEET_ID',
     subsystem: 'Google Sheets v4 Ledger',
-    required: true,
+    required: false,
   },
   {
     name: 'GOOGLE_SERVICE_KEY_BASE64',
     subsystem: 'Google Cloud Service Account (Sheets + Gmail)',
-    required: true,
+    required: false,
   },
   {
     name: 'GMAIL_USER_EMAIL',

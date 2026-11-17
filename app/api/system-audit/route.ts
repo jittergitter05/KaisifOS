@@ -1,7 +1,12 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { isAuthorizedRequest, isCustomAuthConfigured } from '@/lib/auth';
-import { isCloudSheetsConfigured, getPublicStats, getStorageHealthInfo } from '@/lib/sheets';
+import {
+  isCloudSheetsConfigured,
+  isNeonPostgresConfigured,
+  getPublicStats,
+  getStorageHealthInfo,
+} from '@/lib/sheets';
 import { getCandidateProfileAsync } from '@/lib/profile';
 
 export const dynamic = 'force-dynamic';
@@ -24,8 +29,18 @@ export async function GET() {
   const groqConfigured = Boolean(groqKey && !groqHasDeprecatedXai);
   const openRouterConfigured = Boolean(process.env.OPENROUTER_API_KEY);
   const freehireBridgeConfigured = Boolean(process.env.FREEHIRE_API_URL);
+  const neonConfigured = isNeonPostgresConfigured();
 
   const envChecks = [
+    {
+      name: 'DATABASE_URL',
+      category: 'Primary Persistence (Neon Postgres)',
+      description:
+        'Shared Neon Serverless Postgres connection string for canonical cross-source deduplication, retry-safe LLM evaluation states, and multi-source lineage',
+      required: false,
+      configured: neonConfigured,
+      fallback: 'Google Sheets v4 Sync -> Atomic Local JSON Store (data/jobs-store.json)',
+    },
     {
       name: 'GEMINI_API_KEY',
       category: 'Free AI Chain (Tier 1)',
@@ -58,27 +73,29 @@ export async function GET() {
       name: 'FREEHIRE_API_URL',
       category: 'Optional External Bridge',
       description:
-        'Optional SSRF-validated strelov1/freehire HTTP API bridge (built-in Greenhouse/Lever/Ashby connectors run regardless)',
+        'Optional SSRF-validated strelov1/freehire HTTP API bridge (built-in 6-ATS + Career Page connectors run regardless)',
       required: false,
       configured: freehireBridgeConfigured,
-      fallback: 'Built-in Native Direct-ATS Connectors (Greenhouse · Lever · Ashby)',
+      fallback: 'Built-in 6-ATS Connectors (Greenhouse · Lever · Ashby · Workable · SmartRecruiters · Recruitee)',
     },
     {
       name: 'RAPIDAPI_KEY',
       category: 'Optional Job Feed',
-      description: 'Optional RapidAPI JSearch aggregator key used in CLI job-scout workflow',
+      description: 'Optional RapidAPI JSearch aggregator key (strictly constrained to Hyderabad, India when relocation is false)',
       required: false,
       configured: Boolean(process.env.RAPIDAPI_KEY),
-      fallback: '8 Zero-Key Direct-ATS & Remote Feeds',
+      fallback: '13 Zero-Key Company Career Page & Direct-ATS Feeds',
     },
     {
       name: 'GOOGLE_SHEET_ID',
       category: 'Google Sheets Ledger & Profile Sync',
       description:
-        'Primary Google Spreadsheet ID (auto-provisions Sheet1 + SeenJobs + Profile tabs on first write)',
-      required: true,
+        'Secondary Google Spreadsheet ID (auto-provisions Sheet1 + SeenJobs + Profile tabs on first write)',
+      required: false,
       configured: Boolean(process.env.GOOGLE_SHEET_ID),
-      fallback: storageHealth.ephemeralFallback
+      fallback: neonConfigured
+        ? 'Neon Serverless Postgres Primary Store (DATABASE_URL)'
+        : storageHealth.ephemeralFallback
         ? 'Ephemeral /tmp Runtime Store (resets on container cold restart)'
         : 'Atomic Local JSON Store (data/jobs-store.json + data/profile.json)',
     },
@@ -87,9 +104,11 @@ export async function GET() {
       category: 'Google Cloud Service Auth',
       description:
         'Base64 (or raw JSON) Google Cloud Service Account for Sheets v4 Ledger, Profile Sync & Gmail API',
-      required: true,
+      required: false,
       configured: Boolean(process.env.GOOGLE_SERVICE_KEY_BASE64),
-      fallback: storageHealth.ephemeralFallback
+      fallback: neonConfigured
+        ? 'Neon Serverless Postgres Primary Store (DATABASE_URL)'
+        : storageHealth.ephemeralFallback
         ? 'Ephemeral /tmp Runtime Store (resets on container cold restart)'
         : 'Atomic Local JSON Store (data/jobs-store.json)',
     },
@@ -160,7 +179,7 @@ export async function GET() {
           label: 'Tier 3 · OpenRouter 3-Model (:free)',
           status: openRouterConfigured ? 'Ready' : 'Skipped (No Key)',
         },
-        { label: 'Tier 4 · Deterministic Rubric v3.2', status: 'Always-On Guarantee' },
+        { label: 'Tier 4 · Deterministic Rubric v3.2 (Retry-Safe Queue)', status: 'Always-On Guarantee' },
       ],
     },
     {
@@ -182,12 +201,18 @@ export async function GET() {
     {
       name: 'Persistence & Direct-ATS Ingestion',
       activeTier:
-        storageHealth.storageMode === 'cloud-sheets'
+        storageHealth.storageMode === 'neon-postgres'
+          ? 'Neon Serverless Postgres (Canonical Dedup + Retry Queue)'
+          : storageHealth.storageMode === 'cloud-sheets'
           ? 'Google Sheets v4 (Auto-Provisioned + Profile Sync)'
           : storageHealth.storageMode === 'ephemeral-tmp'
           ? 'Ephemeral /tmp Runtime Fallback (Read-Only Host)'
           : 'Atomic Local Disk (data/)',
       tiers: [
+        {
+          label: 'Neon Serverless Postgres (DATABASE_URL)',
+          status: neonConfigured ? 'Connected (Primary)' : 'Optional / Unconfigured',
+        },
         {
           label: 'Google Sheets v4 (Sheet1 + SeenJobs + Profile)',
           status: isCloudSheetsConfigured()
@@ -198,22 +223,26 @@ export async function GET() {
             ? '/tmp Ephemeral Fallback'
             : 'Local Fallback',
         },
-        { label: 'Native Direct-ATS (Greenhouse · Lever · Ashby)', status: 'Always-On (12 Boards)' },
-        {
-          label: 'External strelov1/freehire Bridge (FREEHIRE_API_URL)',
-          status: freehireBridgeConfigured ? 'Connected' : 'Optional / Unconfigured',
-        },
+        { label: 'Company Career Pages + 6 Direct-ATS Feeds', status: 'Always-On (25+ Boards)' },
       ],
     },
   ];
 
   const auditFindings = [
     {
+      id: 'ARCH-04',
+      layer: 'Canonical Cross-Source Deduplication, Positive Geo Allowlist & Retry-Safe LLM Queue',
+      before: 'Cross-source duplicates (JSearch vs ATS) re-evaluated every run; LLM 503 fallback locked roles in SeenJobs forever; US/DE roles leaked through.',
+      after:
+        'Canonical company-title-geo key merges multi-source sightings (`sourcesSeen[]`), positive allowlist blocks non-Hyderabad/foreign roles when relocation is false, and deterministic fallback marks `needs_llm_retry = true`.',
+      status: 'VERIFIED',
+    },
+    {
       id: 'ARCH-01',
-      layer: 'Read-Only Container & Ephemeral /tmp + Cloud Profile Sync',
+      layer: 'Neon Postgres + Read-Only Container & Cloud Profile Sync',
       before: 'Serverless/Cloud Run hosts mounting data/ as read-only threw 503 EROFS on profile/job saves.',
       after:
-        '3-tier persistence: Google Sheets Profile!A1 & Sheet1 (auto-provisioned tabs) -> writable data/ or custom KAISIFOS_DATA_DIR -> automatic /tmp runtime overlay with honest UI telemetry.',
+        '4-tier persistence: Neon Serverless Postgres (`DATABASE_URL`) -> Google Sheets Profile!A1 & Sheet1 -> writable data/ -> automatic /tmp runtime overlay.',
       status: 'VERIFIED',
     },
     {
@@ -226,10 +255,10 @@ export async function GET() {
     },
     {
       id: 'ARCH-03',
-      layer: 'Iframe Cookie Compatibility & Strict Cloud Sheet ID Lookup',
-      before: 'Hardcoded HTTPS cookie lockouts on local `next start` and rowId fallback overwriting shifted rows.',
+      layer: 'Iframe Cookie Compatibility & Pre-Slice Direct-ATS Prioritization',
+      before: 'ATS connectors sliced the first 5 roles alphabetically (often US-only), dropping Hyderabad/Remote roles lower on the board.',
       after:
-        'Dynamic X-Forwarded-Proto + Sec-Fetch-Dest iframe cookie attributes, strict Col-B ID resolution, 42s scout sweep deadline fallback, and VC funding false-positive salary guards.',
+        'All 6 Direct-ATS connectors pre-sort postings by Hyderabad/India/Remote + target role keywords before per-board slicing.',
       status: 'VERIFIED',
     },
   ];
@@ -237,8 +266,13 @@ export async function GET() {
   return NextResponse.json({
     timestamp: new Date().toISOString(),
     authConfigured: isCustomAuthConfigured(),
+    neonConfigured,
     freehireBridgeConfigured,
-    storageMode: isCloudSheetsConfigured() && !stats.cloud_error ? 'cloud-sheets' : 'local-store',
+    storageMode: neonConfigured
+      ? 'neon-postgres'
+      : isCloudSheetsConfigured() && !stats.cloud_error
+      ? 'cloud-sheets'
+      : 'local-store',
     persistenceMode: storageHealth.storageMode,
     ephemeralFallback: storageHealth.ephemeralFallback,
     resolvedDataDir: storageHealth.resolvedDataDir,

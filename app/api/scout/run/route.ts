@@ -50,6 +50,7 @@ export async function POST(req: NextRequest) {
       minScoreToCommit,
       maxToEvaluate,
       customBoards: body.customBoards,
+      mode: body.mode === 'retry_pending' ? 'retry_pending' : 'live_sweep',
     });
 
     return NextResponse.json(summary);

@@ -29,6 +29,9 @@ import {
   ArrowUpRight,
   Layers,
   Radar,
+  Columns3,
+  Table2,
+  Sparkles,
 } from 'lucide-react';
 import {
   Table,
@@ -47,17 +50,33 @@ interface JobRow {
   rowId: number;
   date: string;
   id: string;
+  canonicalKey?: string;
   title: string;
   company: string;
+  location?: string;
+  salary?: string;
   score: number;
   reasons: string;
   gap: string;
   url: string;
   dm: string;
+  emailDraft?: string;
   resumeAngle: string;
   status: string;
   source: string;
+  evaluationStatus?: 'LLM_SCORED' | 'DETERMINISTIC_ONLY' | 'REJECTED_GATE';
+  needsLlmRetry?: boolean;
+  sourcesSeen?: Array<{ source: string; url: string; id?: string; seenAt?: string }>;
 }
+
+const KANBAN_STAGES = [
+  { key: 'NEW', label: 'New Triage' },
+  { key: 'SHORTLISTED', label: 'Shortlisted' },
+  { key: 'OUTREACH_DRAFTED', label: 'Outreach Drafted' },
+  { key: 'APPLIED', label: 'Applied' },
+  { key: 'INTERVIEW', label: 'Interview' },
+  { key: 'OFFER', label: 'Offer' },
+];
 
 function predictReplyLikelihood(job: JobRow): number {
   if (job.status !== 'APPLIED') return -1;
@@ -89,12 +108,14 @@ function exportToCSV(jobs: JobRow[]) {
     'Source',
     'Title',
     'Company',
+    'Location',
     'Score',
     'RolePillar(/40)',
     'SkillPillar(/30)',
     'SeniorityPillar(/15)',
     'CompPillar(/15)',
     'Status',
+    'EvaluationMode',
     'URL',
     'Reasons',
     'Gap',
@@ -109,12 +130,14 @@ function exportToCSV(jobs: JobRow[]) {
       j.source,
       j.title,
       j.company,
+      j.location || '',
       j.score,
       p.role.earned,
       p.skill.earned,
       p.seniority.earned,
       p.compGeo.earned,
       j.status,
+      j.needsLlmRetry ? 'DETERMINISTIC_ONLY' : 'LLM_SCORED',
       j.url,
       j.reasons,
       j.gap,
@@ -139,8 +162,11 @@ export default function TrackerPage() {
   const [storageMode, setStorageMode] = useState<string>('local-store');
   const [loading, setLoading] = useState(true);
   const [scoutingLive, setScoutingLive] = useState(false);
+  const [retryingLlm, setRetryingLlm] = useState(false);
+  const [viewMode, setViewMode] = useState<'table' | 'kanban' | 'retry'>('table');
   const [scoutBanner, setScoutBanner] = useState<{
     message: string;
+    telemetryLine?: string;
     committedJobs?: Array<{
       title: string;
       company: string;
@@ -192,22 +218,46 @@ export default function TrackerPage() {
           if (data.persistenceMode || data.mode) {
             setStorageMode(data.persistenceMode || data.mode);
           }
+          const richById = new Map<string, Record<string, any>>();
+          if (Array.isArray(data.richRecords)) {
+            for (const rec of data.richRecords) {
+              if (rec && typeof rec.id === 'string') {
+                richById.set(rec.id, rec);
+              }
+            }
+          }
           const parsedJobs = data.rows
-            .map((r: string[], i: number) => ({
-              rowId: i + 1,
-              date: r[0] || '',
-              id: r[1] || '',
-              title: r[2] || '',
-              company: r[3] || '',
-              score: parseInt(r[4] || '0', 10),
-              reasons: r[5] || '',
-              gap: r[6] || '',
-              url: r[7] || '',
-              dm: r[8] || '',
-              resumeAngle: r[9] || '',
-              status: r[10] || 'NEW',
-              source: detectSource(r[1] || ''),
-            }))
+            .map((r: string[], i: number) => {
+              const id = r[1] || '';
+              const reasons = r[5] || '';
+              const rich = richById.get(id);
+              const inferredDet = /Deterministic 4-Pillar Rubric/i.test(reasons);
+              const needsLlmRetry =
+                typeof rich?.needsLlmRetry === 'boolean' ? rich.needsLlmRetry : inferredDet;
+              return {
+                rowId: i + 1,
+                date: r[0] || '',
+                id,
+                canonicalKey: rich?.canonicalKey,
+                title: r[2] || '',
+                company: r[3] || '',
+                location: rich?.location || '',
+                salary: rich?.salary || '',
+                score: parseInt(r[4] || '0', 10),
+                reasons,
+                gap: r[6] || '',
+                url: r[7] || '',
+                dm: r[8] || '',
+                emailDraft: rich?.emailDraft || '',
+                resumeAngle: r[9] || '',
+                status: r[10] || 'NEW',
+                source: detectSource(id),
+                evaluationStatus:
+                  rich?.evaluationStatus || (needsLlmRetry ? 'DETERMINISTIC_ONLY' : 'LLM_SCORED'),
+                needsLlmRetry,
+                sourcesSeen: Array.isArray(rich?.sourcesSeen) ? rich.sourcesSeen : undefined,
+              } as JobRow;
+            })
             .filter((j: JobRow) => j.title !== 'Title' && j.id);
           setJobs(parsedJobs);
         }
@@ -224,12 +274,17 @@ export default function TrackerPage() {
     fetchJobs();
   }, [fetchJobs]);
 
-  const runLiveAtsSweep = async () => {
-    setScoutingLive(true);
+  const executeSweepMode = async (mode: 'live_sweep' | 'retry_pending') => {
+    if (mode === 'retry_pending') setRetryingLlm(true);
+    else setScoutingLive(true);
     setScoutBanner(null);
     setActionError(null);
     try {
-      const res = await fetch('/api/scout/live', { method: 'POST' });
+      const res = await fetch('/api/scout/live', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
       if (res.status === 401) {
         window.location.href = '/login';
         return;
@@ -254,8 +309,13 @@ export default function TrackerPage() {
         Array.isArray(data.warnings) && data.warnings.length > 0
           ? ` — Notice: ${data.warnings.join(' | ')}`
           : '';
+      const telemetryLine = `Canonical Duplicates Merged: ${data.canonicalDedupSaved ?? 0} · Hard-Gate Rejections: ${data.hardGateRejected ?? 0} · Queued for LLM Retry: ${data.queuedForRetryCount ?? 0}`;
       setScoutBanner({
-        message: `Scanned ${data.scanned} live Career Page, Direct-ATS & remote postings · Added ${data.addedCount} top-scoring matches${healthSummary}.${warningText}`,
+        message:
+          mode === 'retry_pending'
+            ? `Re-evaluated ${data.evaluatedCount ?? 0} pending deterministic roles · Upgraded ${data.addedCount ?? 0} matches.${warningText}`
+            : `Scanned ${data.scanned} live Career Page, Direct-ATS & remote postings · Added ${data.addedCount} top-scoring matches${healthSummary}.${warningText}`,
+        telemetryLine,
         committedJobs: Array.isArray(data.committedJobs) ? data.committedJobs : [],
       });
       fetchJobs();
@@ -263,6 +323,7 @@ export default function TrackerPage() {
       setActionError('Network error while running live Direct-ATS sweep.');
     } finally {
       setScoutingLive(false);
+      setRetryingLlm(false);
     }
   };
 
@@ -276,7 +337,12 @@ export default function TrackerPage() {
       const res = await fetch('/api/sheet-sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: targetId, rowId, status: newStatus }),
+        body: JSON.stringify({
+          id: targetId,
+          canonicalKey: targetJob?.canonicalKey,
+          rowId,
+          status: newStatus,
+        }),
       });
       if (res.status === 401) {
         window.location.href = '/login';
@@ -302,7 +368,12 @@ export default function TrackerPage() {
       const res = await fetch('/api/sheet-sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: targetJob?.id, rowId, dm: draftDmText }),
+        body: JSON.stringify({
+          id: targetJob?.id,
+          canonicalKey: targetJob?.canonicalKey,
+          rowId,
+          dm: draftDmText,
+        }),
       });
       if (res.status === 401) {
         window.location.href = '/login';
@@ -326,8 +397,16 @@ export default function TrackerPage() {
     }
   };
 
+  const pendingRetryCount = useMemo(
+    () => jobs.filter((j) => j.needsLlmRetry).length,
+    [jobs]
+  );
+
   const filteredJobs = useMemo(() => {
     let result = filter === 'ALL' ? jobs : jobs.filter((j) => j.status === filter);
+    if (viewMode === 'retry') {
+      result = result.filter((j) => j.needsLlmRetry);
+    }
     if (sourceFilter !== 'ALL') {
       result = result.filter((j) => j.source === sourceFilter);
     }
@@ -344,7 +423,8 @@ export default function TrackerPage() {
           j.title.toLowerCase().includes(q) ||
           j.company.toLowerCase().includes(q) ||
           j.reasons.toLowerCase().includes(q) ||
-          j.source.toLowerCase().includes(q)
+          j.source.toLowerCase().includes(q) ||
+          (j.location || '').toLowerCase().includes(q)
       );
     }
     return [...result].sort((a, b) => {
@@ -363,6 +443,7 @@ export default function TrackerPage() {
   }, [
     jobs,
     filter,
+    viewMode,
     sourceFilter,
     minScoreFilter,
     staleOnly,
@@ -470,7 +551,9 @@ export default function TrackerPage() {
 
     const total = jobs.length;
     const shortlistedOrBeyond = jobs.filter((j) =>
-      ['SHORTLISTED', 'APPLIED', 'REPLIED', 'INTERVIEW', 'OFFER'].includes(j.status)
+      ['SHORTLISTED', 'OUTREACH_DRAFTED', 'APPLIED', 'REPLIED', 'INTERVIEW', 'OFFER'].includes(
+        j.status
+      )
     ).length;
     const appliedOrBeyond = jobs.filter((j) =>
       ['APPLIED', 'REPLIED', 'INTERVIEW', 'OFFER'].includes(j.status)
@@ -633,7 +716,9 @@ export default function TrackerPage() {
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
               Storage:{' '}
               <span className="font-mono text-slate-700 dark:text-slate-300">
-                {storageMode === 'cloud-sheets'
+                {storageMode === 'neon-postgres'
+                  ? 'Neon Serverless Postgres (Canonical Dedup)'
+                  : storageMode === 'cloud-sheets'
                   ? 'Google Sheets v4 Sync'
                   : storageMode === 'ephemeral-tmp'
                   ? 'Ephemeral /tmp Store (Read-Only Host)'
@@ -642,16 +727,32 @@ export default function TrackerPage() {
                   : 'Hybrid Local Store'}
               </span>{' '}
               · Click <span className="font-mono text-emerald-600 dark:text-emerald-400">Audit</span>{' '}
-              on any row to inspect exact subscores
+              on any role to inspect subscores &amp; outreach composer
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {pendingRetryCount > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => executeSweepMode('retry_pending')}
+                disabled={retryingLlm || scoutingLive}
+                className="bg-amber-50 dark:bg-amber-950/40 border-amber-300 dark:border-amber-700/70 hover:bg-amber-100 dark:hover:bg-amber-900/50 text-amber-800 dark:text-amber-300 text-xs px-3 py-2 whitespace-nowrap shrink-0"
+              >
+                <Sparkles
+                  className={`h-3.5 w-3.5 mr-1.5 ${retryingLlm ? 'animate-spin' : ''}`}
+                />
+                {retryingLlm
+                  ? 'Retrying LLM Scoring...'
+                  : `Retry Pending LLM (${pendingRetryCount})`}
+              </Button>
+            )}
             <Button
               type="button"
               variant="outline"
-              onClick={runLiveAtsSweep}
-              disabled={scoutingLive}
+              onClick={() => executeSweepMode('live_sweep')}
+              disabled={scoutingLive || retryingLlm}
               className="bg-white dark:bg-[#111827] border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 text-xs px-3 py-2 whitespace-nowrap shrink-0"
             >
               <Radar
@@ -692,7 +793,14 @@ export default function TrackerPage() {
         {scoutBanner && (
           <div className="bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-700/60 text-emerald-800 dark:text-emerald-300 px-4 py-3 rounded-md text-xs space-y-2">
             <div className="flex items-center justify-between gap-3 font-mono">
-              <span>{scoutBanner.message}</span>
+              <div className="space-y-0.5">
+                <div>{scoutBanner.message}</div>
+                {scoutBanner.telemetryLine && (
+                  <div className="text-[11px] text-emerald-700/90 dark:text-emerald-400/90">
+                    {scoutBanner.telemetryLine}
+                  </div>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={() => setScoutBanner(null)}
@@ -893,7 +1001,15 @@ export default function TrackerPage() {
                   Stage Distribution Filter
                 </div>
                 <div className="space-y-2">
-                  {['NEW', 'SHORTLISTED', 'APPLIED', 'REPLIED', 'INTERVIEW', 'OFFER'].map((s) => {
+                  {[
+                    'NEW',
+                    'SHORTLISTED',
+                    'OUTREACH_DRAFTED',
+                    'APPLIED',
+                    'REPLIED',
+                    'INTERVIEW',
+                    'OFFER',
+                  ].map((s) => {
                     const count = analytics.pipeline[s] || 0;
                     const maxCount = Math.max(...Object.values(analytics.pipeline), 1);
                     const pct = Math.round((count / maxCount) * 100);
@@ -904,7 +1020,7 @@ export default function TrackerPage() {
                         onClick={() => setFilter(filter === s ? 'ALL' : s)}
                         className="w-full flex items-center gap-2.5 group text-left cursor-pointer"
                       >
-                        <span className="text-[11px] text-slate-500 dark:text-slate-400 group-hover:text-slate-900 dark:group-hover:text-white w-24 font-mono truncate">
+                        <span className="text-[11px] text-slate-500 dark:text-slate-400 group-hover:text-slate-900 dark:group-hover:text-white w-28 font-mono truncate">
                           {s}
                         </span>
                         <div className="flex-1 bg-slate-200 dark:bg-slate-800/80 h-1.5 rounded-xs overflow-hidden">
@@ -968,6 +1084,48 @@ export default function TrackerPage() {
             } flex flex-col bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden`}
           >
             <div className="p-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-col gap-3 bg-slate-50 dark:bg-[#0D131F]">
+              {/* Workspace View Switcher */}
+              <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-200/80 dark:border-slate-800/80">
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('table')}
+                    className={`px-3 py-1.5 rounded text-xs font-medium inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      viewMode === 'table'
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-white dark:bg-[#0B0F17] text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    <Table2 className="h-3.5 w-3.5" /> Triage Table ({filteredJobs.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('kanban')}
+                    className={`px-3 py-1.5 rounded text-xs font-medium inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      viewMode === 'kanban'
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-white dark:bg-[#0B0F17] text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    <Columns3 className="h-3.5 w-3.5" /> Stage Kanban Board
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('retry')}
+                    className={`px-3 py-1.5 rounded text-xs font-medium inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      viewMode === 'retry'
+                        ? 'bg-amber-600 text-white'
+                        : 'bg-white dark:bg-[#0B0F17] text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    <Sparkles className="h-3.5 w-3.5" /> Pending LLM Retry ({pendingRetryCount})
+                  </button>
+                </div>
+                <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
+                  Canonical company-title-geo deduplication active
+                </span>
+              </div>
+
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-1 overflow-x-auto hide-scrollbar pb-1 sm:pb-0">
                   {['ALL', ...ALL_STATUSES.slice(0, 7)].map((f) => (
@@ -984,7 +1142,11 @@ export default function TrackerPage() {
                           : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800/50'
                       }`}
                     >
-                      {f === 'ALL' ? 'All Roles' : f.charAt(0) + f.slice(1).toLowerCase()}
+                      {f === 'ALL'
+                        ? 'All Roles'
+                        : f === 'OUTREACH_DRAFTED'
+                        ? 'Outreach Drafted'
+                        : f.charAt(0) + f.slice(1).toLowerCase()}
                     </button>
                   ))}
                 </div>
@@ -1048,7 +1210,7 @@ export default function TrackerPage() {
                   <div className="relative flex-1 sm:w-52">
                     <input
                       type="text"
-                      placeholder="Filter role, company, ATS..."
+                      placeholder="Filter role, company, city..."
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       className="w-full bg-white dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md px-3 py-1.5 text-xs text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500 transition-colors"
@@ -1097,20 +1259,26 @@ export default function TrackerPage() {
                     {selectedJobIds.size} selected
                   </span>
                   <div className="flex gap-1.5 flex-wrap">
-                    {['SHORTLISTED', 'APPLIED', 'REPLIED', 'INTERVIEW', 'REJECTED', 'IGNORED'].map(
-                      (s) => (
-                        <Button
-                          key={s}
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() => bulkUpdateStatus(s)}
-                          className="text-xs h-7 px-2.5 bg-white dark:bg-[#0B0F17] border-slate-300 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 whitespace-nowrap shrink-0"
-                        >
-                          Mark {s.charAt(0) + s.slice(1).toLowerCase()}
-                        </Button>
-                      )
-                    )}
+                    {[
+                      'SHORTLISTED',
+                      'OUTREACH_DRAFTED',
+                      'APPLIED',
+                      'REPLIED',
+                      'INTERVIEW',
+                      'REJECTED',
+                      'ARCHIVED',
+                    ].map((s) => (
+                      <Button
+                        key={s}
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => bulkUpdateStatus(s)}
+                        className="text-xs h-7 px-2.5 bg-white dark:bg-[#0B0F17] border-slate-300 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 whitespace-nowrap shrink-0"
+                      >
+                        Mark {s === 'OUTREACH_DRAFTED' ? 'Outreach Drafted' : s.charAt(0) + s.slice(1).toLowerCase()}
+                      </Button>
+                    ))}
                   </div>
                   <Button
                     type="button"
@@ -1125,434 +1293,581 @@ export default function TrackerPage() {
               )}
             </AnimatePresence>
 
-            <div className="overflow-x-auto flex-1">
-              <Table>
-                <TableHeader className="bg-slate-50 dark:bg-[#0D131F] sticky top-0 z-10 border-b border-slate-200 dark:border-slate-800">
-                  <TableRow>
-                    <TableHead className="w-10">
-                      <input
-                        type="checkbox"
-                        aria-label="Select all rows"
-                        checked={allFilteredSelected}
-                        onChange={selectAll}
-                        className="accent-emerald-500 rounded"
-                      />
-                    </TableHead>
-                    <TableHead
-                      className="w-[100px] cursor-pointer group hover:text-slate-900 dark:hover:text-slate-200 transition-colors text-xs whitespace-nowrap"
-                      onClick={() => toggleSort('date')}
-                    >
-                      Date <SortIcon field="date" />
-                    </TableHead>
-                    <TableHead
-                      className="cursor-pointer group hover:text-slate-900 dark:hover:text-slate-200 transition-colors text-xs"
-                      onClick={() => toggleSort('company')}
-                    >
-                      Company &amp; Role <SortIcon field="company" />
-                    </TableHead>
-                    <TableHead className="text-xs w-[115px] whitespace-nowrap">
-                      Source / ATS
-                    </TableHead>
-                    <TableHead
-                      className="cursor-pointer group hover:text-slate-900 dark:hover:text-slate-200 transition-colors text-xs w-[125px] whitespace-nowrap"
-                      onClick={() => toggleSort('score')}
-                    >
-                      Fit Score <SortIcon field="score" />
-                    </TableHead>
-                    <TableHead className="text-right text-xs w-[80px] whitespace-nowrap">
-                      Reply Est.
-                    </TableHead>
-                    <TableHead className="text-center text-xs w-[115px] whitespace-nowrap">
-                      Stage
-                    </TableHead>
-                    <TableHead className="text-right text-xs w-[140px] whitespace-nowrap">
-                      Actions
-                    </TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {loading ? (
-                    Array.from({ length: 5 }).map((_, skIdx) => (
-                      <TableRow key={skIdx}>
-                        <TableCell colSpan={8} className="py-3.5 px-4">
-                          <div className="h-5 bg-slate-200/70 dark:bg-slate-800/50 rounded animate-pulse w-full" />
-                        </TableCell>
-                      </TableRow>
-                    ))
-                  ) : error ? (
-                    <TableRow>
-                      <TableCell
-                        colSpan={8}
-                        className="h-28 text-center text-xs font-mono text-rose-600 dark:text-rose-400"
-                      >
-                        {error}
-                      </TableCell>
-                    </TableRow>
-                  ) : filteredJobs.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={8} className="py-12 text-center">
-                        <div className="text-sm font-medium text-slate-900 dark:text-slate-200 mb-1">
-                          No matching pipeline records
-                        </div>
-                        <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
-                          Reset your active filters or run a live Direct-ATS sweep.
-                        </p>
-                        <Button
-                          type="button"
-                          size="sm"
-                          onClick={() => {
-                            setFilter('ALL');
-                            setSourceFilter('ALL');
-                            setMinScoreFilter(0);
-                            setStaleOnly(false);
-                            setSearchQuery('');
-                          }}
-                          className="bg-slate-800 hover:bg-slate-700 text-xs text-white"
-                        >
-                          Reset Filters
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    filteredJobs.map((job, idx) => {
-                      const prediction = predictReplyLikelihood(job);
-                      const stale = isStale(job, slaThresholdDays);
-                      const isSelected = selectedJobIds.has(job.id);
-                      const isFocused = focusedRow === idx;
-                      const isExpanded = expandedRow === idx;
+            {viewMode === 'kanban' ? (
+              <div className="p-4 overflow-x-auto flex-1 bg-slate-50/60 dark:bg-[#0B0F17]/60">
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-3 min-w-[980px]">
+                  {KANBAN_STAGES.map((stageCol, stageIdx) => {
+                    const colJobs = filteredJobs.filter((j) => j.status === stageCol.key);
+                    const prevStage = stageIdx > 0 ? KANBAN_STAGES[stageIdx - 1].key : null;
+                    const nextStage =
+                      stageIdx < KANBAN_STAGES.length - 1 ? KANBAN_STAGES[stageIdx + 1].key : null;
 
-                      return (
-                        <React.Fragment key={job.id || job.rowId}>
-                          <TableRow
-                            className={`cursor-pointer transition-colors border-b border-slate-200/70 dark:border-slate-800/70 ${
-                              isFocused ? 'bg-slate-100 dark:bg-slate-800/60' : ''
-                            } ${
-                              isSelected ? 'bg-emerald-50 dark:bg-emerald-950/20' : ''
-                            } hover:bg-slate-50 dark:hover:bg-slate-800/40`}
-                            onClick={() => setExpandedRow(isExpanded ? null : idx)}
-                          >
-                            <TableCell onClick={(e) => e.stopPropagation()} className="py-2.5">
-                              <input
-                                type="checkbox"
-                                aria-label={`Select ${job.title} at ${job.company}`}
-                                checked={isSelected}
-                                onChange={() => {
-                                  setSelectedJobIds((prev) => {
-                                    const next = new Set(prev);
-                                    if (next.has(job.id)) next.delete(job.id);
-                                    else next.add(job.id);
-                                    return next;
-                                  });
-                                }}
-                                className="accent-emerald-500 rounded"
-                              />
-                            </TableCell>
-                            <TableCell className="font-mono tabular-nums text-xs text-slate-500 dark:text-slate-400 py-2.5 whitespace-nowrap">
-                              {job.date}
-                            </TableCell>
-                            <TableCell className="py-2.5">
-                              <div className="flex items-center gap-2">
-                                {isExpanded ? (
-                                  <ChevronDown className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                                ) : (
-                                  <ChevronRight className="h-3.5 w-3.5 text-slate-400 dark:text-slate-500 shrink-0" />
-                                )}
-                                <div className="min-w-0">
-                                  <div className="font-medium text-slate-900 dark:text-white text-xs sm:text-sm truncate">
-                                    {job.company}{' '}
-                                    <span className="text-slate-400 dark:text-slate-500 font-normal">
-                                      ·
-                                    </span>{' '}
-                                    <span className="text-slate-600 dark:text-slate-300 font-normal">
-                                      {job.title}
+                    return (
+                      <div
+                        key={stageCol.key}
+                        className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-3 flex flex-col gap-2.5 min-h-[420px]"
+                      >
+                        <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-2">
+                          <span className="text-xs font-semibold text-slate-900 dark:text-white">
+                            {stageCol.label}
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded text-[11px] font-mono tabular-nums bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                            {colJobs.length}
+                          </span>
+                        </div>
+
+                        {colJobs.length === 0 ? (
+                          <div className="flex-1 flex items-center justify-center text-[11px] font-mono text-slate-400 dark:text-slate-600 py-8 text-center">
+                            No roles in {stageCol.label}
+                          </div>
+                        ) : (
+                          <div className="space-y-2.5">
+                            {colJobs.map((job) => {
+                              const applyHref = safeExternalUrl(job.url);
+                              const extraSources =
+                                Array.isArray(job.sourcesSeen) && job.sourcesSeen.length > 1
+                                  ? job.sourcesSeen.length - 1
+                                  : 0;
+                              return (
+                                <div
+                                  key={job.id || job.rowId}
+                                  className="bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md p-2.5 space-y-2 hover:border-emerald-500/60 transition-colors"
+                                >
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                                        {job.company}
+                                      </div>
+                                      <div className="text-[11px] text-slate-600 dark:text-slate-300 line-clamp-2">
+                                        {job.title}
+                                      </div>
+                                    </div>
+                                    <span className="px-1.5 py-0.5 rounded text-[11px] font-mono font-bold tabular-nums bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800/60 shrink-0">
+                                      {job.score}
                                     </span>
                                   </div>
-                                  {stale && (
-                                    <div
-                                      className="text-[11px] text-amber-600 dark:text-amber-400 flex items-center gap-2 mt-0.5"
-                                      onClick={(e) => e.stopPropagation()}
-                                    >
-                                      <span className="inline-flex items-center gap-1">
-                                        <AlertTriangle className="h-3 w-3" /> SLA Alert:{' '}
-                                        {slaThresholdDays}+ days since applied
+
+                                  <div className="flex flex-wrap items-center gap-1 text-[10px] font-mono text-slate-500 dark:text-slate-400">
+                                    <span>{job.source}</span>
+                                    {extraSources > 0 && (
+                                      <span className="text-emerald-600 dark:text-emerald-400">
+                                        +{extraSources} src
                                       </span>
+                                    )}
+                                    {job.location && <span>· {job.location}</span>}
+                                  </div>
+
+                                  <div className="flex items-center justify-between gap-1 pt-1.5 border-t border-slate-200/70 dark:border-slate-800/70">
+                                    <div className="flex items-center gap-1">
+                                      {prevStage && (
+                                        <button
+                                          type="button"
+                                          onClick={() => updateStatus(job.rowId, prevStage)}
+                                          title={`Move back to ${prevStage}`}
+                                          className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-200/70 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700 cursor-pointer"
+                                        >
+                                          ←
+                                        </button>
+                                      )}
+                                      {nextStage && (
+                                        <button
+                                          type="button"
+                                          onClick={() => updateStatus(job.rowId, nextStage)}
+                                          title={`Advance to ${nextStage}`}
+                                          className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-600/15 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-600/25 cursor-pointer"
+                                        >
+                                          Stage →
+                                        </button>
+                                      )}
+                                    </div>
+                                    <div className="flex items-center gap-1.5">
                                       <button
                                         type="button"
-                                        onClick={() =>
-                                          copyText(
-                                            `Hi ${job.company} team — circling back politely on my ${job.title} application. Highlighting: ${job.resumeAngle || 'relevant domain execution proof'}. Happy to share any extra context.`,
-                                            `nudge_${job.rowId}`
-                                          )
-                                        }
-                                        className="font-mono underline hover:text-amber-700 dark:hover:text-amber-300 cursor-pointer"
+                                        onClick={() => setAuditDrawerJob(job)}
+                                        className="text-[10px] font-mono text-slate-700 dark:text-slate-300 hover:text-emerald-600 dark:hover:text-emerald-400 underline cursor-pointer"
                                       >
-                                        {copiedId === `nudge_${job.rowId}`
-                                          ? 'Nudge Copied'
-                                          : 'Copy Nudge'}
+                                        Outreach &amp; Audit
                                       </button>
+                                      {applyHref !== '#' && (
+                                        <a
+                                          href={applyHref}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          className="text-[10px] font-mono text-emerald-600 dark:text-emerald-400 hover:underline inline-flex items-center"
+                                        >
+                                          Apply <ArrowUpRight className="h-2.5 w-2.5" />
+                                        </a>
+                                      )}
                                     </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div className="overflow-x-auto flex-1">
+                <Table>
+                  <TableHeader className="bg-slate-50 dark:bg-[#0D131F] sticky top-0 z-10 border-b border-slate-200 dark:border-slate-800">
+                    <TableRow>
+                      <TableHead className="w-10">
+                        <input
+                          type="checkbox"
+                          aria-label="Select all rows"
+                          checked={allFilteredSelected}
+                          onChange={selectAll}
+                          className="accent-emerald-500 rounded"
+                        />
+                      </TableHead>
+                      <TableHead
+                        className="w-[100px] cursor-pointer group hover:text-slate-900 dark:hover:text-slate-200 transition-colors text-xs whitespace-nowrap"
+                        onClick={() => toggleSort('date')}
+                      >
+                        Date <SortIcon field="date" />
+                      </TableHead>
+                      <TableHead
+                        className="cursor-pointer group hover:text-slate-900 dark:hover:text-slate-200 transition-colors text-xs"
+                        onClick={() => toggleSort('company')}
+                      >
+                        Company &amp; Role <SortIcon field="company" />
+                      </TableHead>
+                      <TableHead className="text-xs w-[140px] whitespace-nowrap">
+                        Source Lineage
+                      </TableHead>
+                      <TableHead
+                        className="cursor-pointer group hover:text-slate-900 dark:hover:text-slate-200 transition-colors text-xs w-[125px] whitespace-nowrap"
+                        onClick={() => toggleSort('score')}
+                      >
+                        Fit Score <SortIcon field="score" />
+                      </TableHead>
+                      <TableHead className="text-right text-xs w-[80px] whitespace-nowrap">
+                        Reply Est.
+                      </TableHead>
+                      <TableHead className="text-center text-xs w-[125px] whitespace-nowrap">
+                        Stage
+                      </TableHead>
+                      <TableHead className="text-right text-xs w-[140px] whitespace-nowrap">
+                        Actions
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {loading ? (
+                      Array.from({ length: 5 }).map((_, skIdx) => (
+                        <TableRow key={skIdx}>
+                          <TableCell colSpan={8} className="py-3.5 px-4">
+                            <div className="h-5 bg-slate-200/70 dark:bg-slate-800/50 rounded animate-pulse w-full" />
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    ) : error ? (
+                      <TableRow>
+                        <TableCell
+                          colSpan={8}
+                          className="h-28 text-center text-xs font-mono text-rose-600 dark:text-rose-400"
+                        >
+                          {error}
+                        </TableCell>
+                      </TableRow>
+                    ) : filteredJobs.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={8} className="py-12 text-center">
+                          <div className="text-sm font-medium text-slate-900 dark:text-slate-200 mb-1">
+                            {viewMode === 'retry'
+                              ? 'No deterministic fallback roles pending LLM retry'
+                              : 'No matching pipeline records'}
+                          </div>
+                          <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
+                            {viewMode === 'retry'
+                              ? 'All persisted roles have completed full LLM evaluation.'
+                              : 'Reset your active filters or run a live Direct-ATS sweep.'}
+                          </p>
+                          <Button
+                            type="button"
+                            size="sm"
+                            onClick={() => {
+                              setViewMode('table');
+                              setFilter('ALL');
+                              setSourceFilter('ALL');
+                              setMinScoreFilter(0);
+                              setStaleOnly(false);
+                              setSearchQuery('');
+                            }}
+                            className="bg-slate-800 hover:bg-slate-700 text-xs text-white"
+                          >
+                            Reset Filters
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      filteredJobs.map((job, idx) => {
+                        const prediction = predictReplyLikelihood(job);
+                        const stale = isStale(job, slaThresholdDays);
+                        const isSelected = selectedJobIds.has(job.id);
+                        const isFocused = focusedRow === idx;
+                        const isExpanded = expandedRow === idx;
+                        const seenSourcesCount = Array.isArray(job.sourcesSeen)
+                          ? job.sourcesSeen.length
+                          : 1;
+
+                        return (
+                          <React.Fragment key={job.id || job.rowId}>
+                            <TableRow
+                              className={`cursor-pointer transition-colors border-b border-slate-200/70 dark:border-slate-800/70 ${
+                                isFocused ? 'bg-slate-100 dark:bg-slate-800/60' : ''
+                              } ${
+                                isSelected ? 'bg-emerald-50 dark:bg-emerald-950/20' : ''
+                              } hover:bg-slate-50 dark:hover:bg-slate-800/40`}
+                              onClick={() => setExpandedRow(isExpanded ? null : idx)}
+                            >
+                              <TableCell onClick={(e) => e.stopPropagation()} className="py-2.5">
+                                <input
+                                  type="checkbox"
+                                  aria-label={`Select ${job.title} at ${job.company}`}
+                                  checked={isSelected}
+                                  onChange={() => {
+                                    setSelectedJobIds((prev) => {
+                                      const next = new Set(prev);
+                                      if (next.has(job.id)) next.delete(job.id);
+                                      else next.add(job.id);
+                                      return next;
+                                    });
+                                  }}
+                                  className="accent-emerald-500 rounded"
+                                />
+                              </TableCell>
+                              <TableCell className="font-mono tabular-nums text-xs text-slate-500 dark:text-slate-400 py-2.5 whitespace-nowrap">
+                                {job.date}
+                              </TableCell>
+                              <TableCell className="py-2.5">
+                                <div className="flex items-center gap-2">
+                                  {isExpanded ? (
+                                    <ChevronDown className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                  ) : (
+                                    <ChevronRight className="h-3.5 w-3.5 text-slate-400 dark:text-slate-500 shrink-0" />
+                                  )}
+                                  <div className="min-w-0">
+                                    <div className="font-medium text-slate-900 dark:text-white text-xs sm:text-sm truncate flex items-center gap-1.5">
+                                      <span>{job.company}</span>
+                                      <span className="text-slate-400 dark:text-slate-500 font-normal">
+                                        ·
+                                      </span>
+                                      <span className="text-slate-600 dark:text-slate-300 font-normal truncate">
+                                        {job.title}
+                                      </span>
+                                      {job.location && (
+                                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 shrink-0">
+                                          {job.location}
+                                        </span>
+                                      )}
+                                      {job.needsLlmRetry && (
+                                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-50 text-amber-800 border border-amber-300 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-800/60 shrink-0">
+                                          Retry Queue
+                                        </span>
+                                      )}
+                                    </div>
+                                    {stale && (
+                                      <div
+                                        className="text-[11px] text-amber-600 dark:text-amber-400 flex items-center gap-2 mt-0.5"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        <span className="inline-flex items-center gap-1">
+                                          <AlertTriangle className="h-3 w-3" /> SLA Alert:{' '}
+                                          {slaThresholdDays}+ days since applied
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            copyText(
+                                              `Hi ${job.company} team — circling back politely on my ${job.title} application. Highlighting: ${job.resumeAngle || 'relevant domain execution proof'}. Happy to share any extra context.`,
+                                              `nudge_${job.rowId}`
+                                            )
+                                          }
+                                          className="font-mono underline hover:text-amber-700 dark:hover:text-amber-300 cursor-pointer"
+                                        >
+                                          {copiedId === `nudge_${job.rowId}`
+                                            ? 'Nudge Copied'
+                                            : 'Copy Nudge'}
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-xs font-mono text-slate-500 dark:text-slate-400 py-2.5 whitespace-nowrap">
+                                <div className="flex items-center gap-1.5">
+                                  <span>{job.source}</span>
+                                  {seenSourcesCount > 1 && (
+                                    <span
+                                      className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800/60"
+                                      title={job.sourcesSeen?.map((s) => s.source).join(' · ')}
+                                    >
+                                      +{seenSourcesCount - 1} merged
+                                    </span>
                                   )}
                                 </div>
-                              </div>
-                            </TableCell>
-                            <TableCell className="text-xs font-mono text-slate-500 dark:text-slate-400 py-2.5 whitespace-nowrap">
-                              {job.source}
-                            </TableCell>
-                            <TableCell className="py-2.5">
-                              <MetricBar score={job.score} />
-                            </TableCell>
-                            <TableCell className="text-right font-mono tabular-nums py-2.5 whitespace-nowrap">
-                              {prediction >= 0 ? (
-                                <span
-                                  className={`text-xs font-semibold ${
-                                    prediction >= 65
-                                      ? 'text-emerald-600 dark:text-emerald-400'
-                                      : prediction >= 40
-                                      ? 'text-blue-600 dark:text-blue-400'
-                                      : 'text-slate-500 dark:text-slate-400'
-                                  }`}
-                                >
-                                  {prediction}%
-                                </span>
-                              ) : (
-                                <span className="text-xs text-slate-400 dark:text-slate-500">
-                                  —
-                                </span>
-                              )}
-                            </TableCell>
-                            <TableCell
-                              className="text-center py-2.5"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <div className="relative inline-flex items-center justify-center rounded focus-within:ring-2 focus-within:ring-emerald-500/60">
-                                <select
-                                  aria-label="Change job status"
-                                  value={job.status}
-                                  onChange={(e) => updateStatus(job.rowId, e.target.value)}
-                                  className="bg-transparent text-xs uppercase focus:ring-0 cursor-pointer p-1 rounded opacity-0 absolute inset-0 z-20 w-full"
-                                >
-                                  {ALL_STATUSES.map((s) => (
-                                    <option
-                                      className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-200"
-                                      key={s}
-                                      value={s}
-                                    >
-                                      {s}
-                                    </option>
-                                  ))}
-                                </select>
-                                <div className="relative z-10 inline-flex items-center justify-center">
-                                  <StatusBadge status={job.status} />
-                                </div>
-                              </div>
-                            </TableCell>
-                            <TableCell
-                              className="text-right py-2.5"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <div className="inline-flex items-center justify-end gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => setAuditDrawerJob(job)}
-                                  className="px-2 py-1 rounded text-[11px] font-mono bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
-                                  title="Open 4-Pillar Rubric Audit Drawer"
-                                >
-                                  <Layers className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />{' '}
-                                  Audit
-                                </button>
-                                <a
-                                  href={safeExternalUrl(job.url)}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="inline-flex items-center gap-1 text-xs font-medium text-emerald-600 dark:text-emerald-400 hover:text-emerald-700 dark:hover:text-emerald-300 whitespace-nowrap"
-                                >
-                                  Apply <ArrowUpRight className="h-3 w-3" />
-                                </a>
-                              </div>
-                            </TableCell>
-                          </TableRow>
-
-                          <AnimatePresence>
-                            {isExpanded && (
-                              <TableRow>
-                                <TableCell colSpan={8} className="p-0 border-0">
-                                  <motion.div
-                                    initial={{ height: 0, opacity: 0 }}
-                                    animate={{ height: 'auto', opacity: 1 }}
-                                    exit={{ height: 0, opacity: 0 }}
-                                    transition={{ duration: 0.18 }}
-                                    className="overflow-hidden"
+                              </TableCell>
+                              <TableCell className="py-2.5">
+                                <MetricBar score={job.score} />
+                              </TableCell>
+                              <TableCell className="text-right font-mono tabular-nums py-2.5 whitespace-nowrap">
+                                {prediction >= 0 ? (
+                                  <span
+                                    className={`text-xs font-semibold ${
+                                      prediction >= 65
+                                        ? 'text-emerald-600 dark:text-emerald-400'
+                                        : prediction >= 40
+                                        ? 'text-blue-600 dark:text-blue-400'
+                                        : 'text-slate-500 dark:text-slate-400'
+                                    }`}
                                   >
-                                    <div className="p-5 pl-11 bg-slate-50 dark:bg-[#0B0F17] border-b border-slate-200 dark:border-slate-800 grid grid-cols-1 lg:grid-cols-12 gap-6">
-                                      <div className="lg:col-span-6 space-y-4">
-                                        <div>
-                                          <div className="flex items-center justify-between mb-1.5">
-                                            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
-                                              Rubric Alignment Breakdown
-                                            </span>
-                                            <button
-                                              type="button"
-                                              onClick={() => setAuditDrawerJob(job)}
-                                              className="text-[11px] font-mono text-emerald-600 dark:text-emerald-400 hover:underline cursor-pointer"
-                                            >
-                                              Open Full 4-Pillar Inspector →
-                                            </button>
-                                          </div>
-                                          <p className="text-xs text-slate-800 dark:text-slate-200 leading-relaxed">
-                                            {job.reasons || 'N/A'}
-                                          </p>
-                                        </div>
+                                    {prediction}%
+                                  </span>
+                                ) : (
+                                  <span className="text-xs text-slate-400 dark:text-slate-500">
+                                    —
+                                  </span>
+                                )}
+                              </TableCell>
+                              <TableCell
+                                className="text-center py-2.5"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div className="relative inline-flex items-center justify-center rounded focus-within:ring-2 focus-within:ring-emerald-500/60">
+                                  <select
+                                    aria-label="Change job status"
+                                    value={job.status}
+                                    onChange={(e) => updateStatus(job.rowId, e.target.value)}
+                                    className="bg-transparent text-xs uppercase focus:ring-0 cursor-pointer p-1 rounded opacity-0 absolute inset-0 z-20 w-full"
+                                  >
+                                    {ALL_STATUSES.map((s) => (
+                                      <option
+                                        className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-200"
+                                        key={s}
+                                        value={s}
+                                      >
+                                        {s}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <div className="relative z-10 inline-flex items-center justify-center">
+                                    <StatusBadge status={job.status} />
+                                  </div>
+                                </div>
+                              </TableCell>
+                              <TableCell
+                                className="text-right py-2.5"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div className="inline-flex items-center justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setAuditDrawerJob(job)}
+                                    className="px-2 py-1 rounded text-[11px] font-mono bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                                    title="Open 4-Pillar Rubric & Outreach Composer"
+                                  >
+                                    <Layers className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />{' '}
+                                    Audit
+                                  </button>
+                                  <a
+                                    href={safeExternalUrl(job.url)}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="inline-flex items-center gap-1 text-xs font-medium text-emerald-600 dark:text-emerald-400 hover:text-emerald-700 dark:hover:text-emerald-300 whitespace-nowrap"
+                                  >
+                                    Apply <ArrowUpRight className="h-3 w-3" />
+                                  </a>
+                                </div>
+                              </TableCell>
+                            </TableRow>
 
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-3 border-t border-slate-200 dark:border-slate-800/80">
+                            <AnimatePresence>
+                              {isExpanded && (
+                                <TableRow>
+                                  <TableCell colSpan={8} className="p-0 border-0">
+                                    <motion.div
+                                      initial={{ height: 0, opacity: 0 }}
+                                      animate={{ height: 'auto', opacity: 1 }}
+                                      exit={{ height: 0, opacity: 0 }}
+                                      transition={{ duration: 0.18 }}
+                                      className="overflow-hidden"
+                                    >
+                                      <div className="p-5 pl-11 bg-slate-50 dark:bg-[#0B0F17] border-b border-slate-200 dark:border-slate-800 grid grid-cols-1 lg:grid-cols-12 gap-6">
+                                        <div className="lg:col-span-6 space-y-4">
                                           <div>
-                                            <div className="text-xs font-medium text-amber-600 dark:text-amber-400 mb-1">
-                                              Risk / Gap Mitigation
-                                            </div>
-                                            <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
-                                              {job.gap || 'N/A'}
-                                            </p>
-                                          </div>
-                                          <div>
-                                            <div className="flex items-center justify-between mb-1">
-                                              <span className="text-xs font-medium text-blue-600 dark:text-blue-400">
-                                                Resume Lead Angle
+                                            <div className="flex items-center justify-between mb-1.5">
+                                              <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                                                Rubric Alignment Breakdown
                                               </span>
-                                              {job.resumeAngle && (
-                                                <button
-                                                  type="button"
-                                                  onClick={() =>
-                                                    copyText(
-                                                      job.resumeAngle,
-                                                      `angle_${job.rowId}`
-                                                    )
-                                                  }
-                                                  className="text-[11px] text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 cursor-pointer"
-                                                >
-                                                  {copiedId === `angle_${job.rowId}` ? (
-                                                    <>
-                                                      <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />{' '}
-                                                      Copied
-                                                    </>
-                                                  ) : (
-                                                    <>
-                                                      <Copy className="h-3 w-3" /> Copy
-                                                    </>
-                                                  )}
-                                                </button>
-                                              )}
+                                              <button
+                                                type="button"
+                                                onClick={() => setAuditDrawerJob(job)}
+                                                className="text-[11px] font-mono text-emerald-600 dark:text-emerald-400 hover:underline cursor-pointer"
+                                              >
+                                                Open Full 4-Pillar &amp; Outreach Composer →
+                                              </button>
                                             </div>
-                                            <p className="text-xs text-slate-700 dark:text-slate-300 font-mono leading-relaxed">
-                                              {job.resumeAngle || 'N/A'}
+                                            <p className="text-xs text-slate-800 dark:text-slate-200 leading-relaxed">
+                                              {job.reasons || 'N/A'}
                                             </p>
                                           </div>
-                                        </div>
-                                      </div>
 
-                                      <div className="lg:col-span-6 lg:border-l border-t lg:border-t-0 border-slate-200 dark:border-slate-800 pt-4 lg:pt-0 lg:pl-6 flex flex-col justify-between">
-                                        <div>
-                                          <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
-                                            <span className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                                              Outreach DM Draft (LinkedIn / Cold Note)
-                                            </span>
-                                            <div className="flex items-center gap-2">
-                                              {editingDmRowId === job.rowId ? (
-                                                <Button
-                                                  type="button"
-                                                  size="sm"
-                                                  onClick={() => saveInlineDm(job.rowId)}
-                                                  className="h-7 px-2.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white"
-                                                >
-                                                  Save Draft
-                                                </Button>
-                                              ) : (
-                                                <button
-                                                  type="button"
-                                                  onClick={() => {
-                                                    setEditingDmRowId(job.rowId);
-                                                    setDraftDmText(job.dm);
-                                                  }}
-                                                  className="text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white cursor-pointer"
-                                                >
-                                                  Edit
-                                                </button>
-                                              )}
-                                              {job.dm && (
-                                                <>
-                                                  <button
-                                                    type="button"
-                                                    onClick={() =>
-                                                      copyText(job.dm, `dm_${job.rowId}`)
-                                                    }
-                                                    className="px-2.5 py-1 rounded text-xs bg-slate-200/80 dark:bg-slate-800 hover:bg-slate-300/80 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 inline-flex items-center gap-1 cursor-pointer"
-                                                  >
-                                                    {copiedId === `dm_${job.rowId}` ? (
-                                                      <>
-                                                        <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />{' '}
-                                                        Copied
-                                                      </>
-                                                    ) : (
-                                                      <>
-                                                        <Copy className="h-3 w-3" /> Copy DM
-                                                      </>
-                                                    )}
-                                                  </button>
+                                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-3 border-t border-slate-200 dark:border-slate-800/80">
+                                            <div>
+                                              <div className="text-xs font-medium text-amber-600 dark:text-amber-400 mb-1">
+                                                Risk / Gap Mitigation
+                                              </div>
+                                              <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
+                                                {job.gap || 'N/A'}
+                                              </p>
+                                            </div>
+                                            <div>
+                                              <div className="flex items-center justify-between mb-1">
+                                                <span className="text-xs font-medium text-blue-600 dark:text-blue-400">
+                                                  Resume Lead Angle
+                                                </span>
+                                                {job.resumeAngle && (
                                                   <button
                                                     type="button"
                                                     onClick={() =>
                                                       copyText(
-                                                        `Subject: ${job.title} @ ${job.company} — Application & Impact Summary\n\nHi ${job.company} team,\n\n${job.dm}${
-                                                          job.resumeAngle
-                                                            ? `\n\nKey angle: ${job.resumeAngle}`
-                                                            : ''
-                                                        }\n`,
-                                                        `email_${job.rowId}`
+                                                        job.resumeAngle,
+                                                        `angle_${job.rowId}`
                                                       )
                                                     }
-                                                    className="px-2.5 py-1 rounded text-xs bg-slate-200/80 dark:bg-slate-800 hover:bg-slate-300/80 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 inline-flex items-center gap-1 cursor-pointer"
+                                                    className="text-[11px] text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 cursor-pointer"
                                                   >
-                                                    {copiedId === `email_${job.rowId}` ? (
+                                                    {copiedId === `angle_${job.rowId}` ? (
                                                       <>
                                                         <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />{' '}
                                                         Copied
                                                       </>
                                                     ) : (
                                                       <>
-                                                        <Copy className="h-3 w-3" /> Copy Cold Email
+                                                        <Copy className="h-3 w-3" /> Copy
                                                       </>
                                                     )}
                                                   </button>
-                                                </>
-                                              )}
+                                                )}
+                                              </div>
+                                              <p className="text-xs text-slate-700 dark:text-slate-300 font-mono leading-relaxed">
+                                                {job.resumeAngle || 'N/A'}
+                                              </p>
                                             </div>
                                           </div>
+                                        </div>
 
-                                          {editingDmRowId === job.rowId ? (
-                                            <textarea
-                                              rows={3}
-                                              value={draftDmText}
-                                              onChange={(e) => setDraftDmText(e.target.value)}
-                                              className="w-full bg-white dark:bg-[#111827] border border-slate-300 dark:border-slate-700 rounded p-2.5 text-xs text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
-                                            />
-                                          ) : (
-                                            <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
-                                              {job.dm || 'No DM draft generated.'}
-                                            </p>
-                                          )}
+                                        <div className="lg:col-span-6 lg:border-l border-t lg:border-t-0 border-slate-200 dark:border-slate-800 pt-4 lg:pt-0 lg:pl-6 flex flex-col justify-between">
+                                          <div>
+                                            <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+                                              <span className="text-xs font-medium text-slate-700 dark:text-slate-300">
+                                                Outreach DM Draft (LinkedIn / Cold Note)
+                                              </span>
+                                              <div className="flex items-center gap-2">
+                                                {editingDmRowId === job.rowId ? (
+                                                  <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    onClick={() => saveInlineDm(job.rowId)}
+                                                    className="h-7 px-2.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white"
+                                                  >
+                                                    Save Draft
+                                                  </Button>
+                                                ) : (
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                      setEditingDmRowId(job.rowId);
+                                                      setDraftDmText(job.dm);
+                                                    }}
+                                                    className="text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white cursor-pointer"
+                                                  >
+                                                    Edit
+                                                  </button>
+                                                )}
+                                                {job.dm && (
+                                                  <>
+                                                    <button
+                                                      type="button"
+                                                      onClick={() =>
+                                                        copyText(job.dm, `dm_${job.rowId}`)
+                                                      }
+                                                      className="px-2.5 py-1 rounded text-xs bg-slate-200/80 dark:bg-slate-800 hover:bg-slate-300/80 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 inline-flex items-center gap-1 cursor-pointer"
+                                                    >
+                                                      {copiedId === `dm_${job.rowId}` ? (
+                                                        <>
+                                                          <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />{' '}
+                                                          Copied
+                                                        </>
+                                                      ) : (
+                                                        <>
+                                                          <Copy className="h-3 w-3" /> Copy DM
+                                                        </>
+                                                      )}
+                                                    </button>
+                                                    <button
+                                                      type="button"
+                                                      onClick={() =>
+                                                        copyText(
+                                                          `Subject: ${job.title} @ ${job.company} — Application & Impact Summary\n\nHi ${job.company} team,\n\n${job.dm}${
+                                                            job.resumeAngle
+                                                              ? `\n\nKey angle: ${job.resumeAngle}`
+                                                              : ''
+                                                          }\n`,
+                                                          `email_${job.rowId}`
+                                                        )
+                                                      }
+                                                      className="px-2.5 py-1 rounded text-xs bg-slate-200/80 dark:bg-slate-800 hover:bg-slate-300/80 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 inline-flex items-center gap-1 cursor-pointer"
+                                                    >
+                                                      {copiedId === `email_${job.rowId}` ? (
+                                                        <>
+                                                          <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />{' '}
+                                                          Copied
+                                                        </>
+                                                      ) : (
+                                                        <>
+                                                          <Copy className="h-3 w-3" /> Copy Cold Email
+                                                        </>
+                                                      )}
+                                                    </button>
+                                                  </>
+                                                )}
+                                              </div>
+                                            </div>
+
+                                            {editingDmRowId === job.rowId ? (
+                                              <textarea
+                                                rows={3}
+                                                value={draftDmText}
+                                                onChange={(e) => setDraftDmText(e.target.value)}
+                                                className="w-full bg-white dark:bg-[#111827] border border-slate-300 dark:border-slate-700 rounded p-2.5 text-xs text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
+                                              />
+                                            ) : (
+                                              <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
+                                                {job.dm || 'No DM draft generated.'}
+                                              </p>
+                                            )}
+                                          </div>
                                         </div>
                                       </div>
-                                    </div>
-                                  </motion.div>
-                                </TableCell>
-                              </TableRow>
-                            )}
-                          </AnimatePresence>
-                        </React.Fragment>
-                      );
-                    })
-                  )}
-                </TableBody>
-              </Table>
-            </div>
+                                    </motion.div>
+                                  </TableCell>
+                                </TableRow>
+                              )}
+                            </AnimatePresence>
+                          </React.Fragment>
+                        );
+                      })
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
           </div>
         </div>
       </div>
