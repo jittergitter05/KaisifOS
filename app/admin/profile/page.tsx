@@ -16,10 +16,11 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { ParsedResumeParameters, ResumeParseDiagnostics } from '@/lib/resume-parser';
-import { deriveDynamicSearchParams } from '@/lib/utils';
+import { deriveDynamicSearchParams, copyToClipboardSafe } from '@/lib/utils';
 import {
   PROFILE_PRESET_METADATA,
   DEFAULT_ATS_COMPANIES,
+  DEFAULT_CAREER_URLS,
   detectMatchingPresetKey,
   type CandidateProfile,
 } from '@/lib/profile-presets';
@@ -118,6 +119,8 @@ export default function ProfilePage() {
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<'idle' | 'saved' | 'error'>('idle');
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveWarning, setSaveWarning] = useState<string | null>(null);
+  const [persistenceMode, setPersistenceMode] = useState<string | null>(null);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
 
   const [parserTab, setParserTab] = useState<'pdf_upload' | 'google_drive' | 'raw_text'>(
@@ -162,10 +165,13 @@ export default function ProfilePage() {
       });
   }, []);
 
-  const saveProfileData = async (targetProfile: Profile) => {
+  const saveProfileData = async (
+    targetProfile: Profile
+  ): Promise<{ ok: boolean; persistenceMode?: string; warning?: string }> => {
     setSaving(true);
     setStatus('idle');
     setSaveError(null);
+    setSaveWarning(null);
     try {
       const res = await fetch('/api/profile', {
         method: 'POST',
@@ -174,29 +180,40 @@ export default function ProfilePage() {
       });
       if (res.status === 401) {
         window.location.href = '/login';
-        return;
+        return { ok: false };
       }
       if (!res.ok) {
         const errData = await res.json().catch(() => null);
         throw new Error(errData?.error || `Save failed (HTTP ${res.status}).`);
       }
+      const data = await res.json().catch(() => ({}));
+      if (data?.persistenceMode) setPersistenceMode(data.persistenceMode);
+      if (data?.warning) setSaveWarning(data.warning);
       setStatus('saved');
       setTimeout(() => setStatus('idle'), 3000);
+      setSaving(false);
+      return {
+        ok: true,
+        persistenceMode: data?.persistenceMode,
+        warning: data?.warning,
+      };
     } catch (e) {
       setStatus('error');
       setSaveError((e as Error).message || 'Failed to save profile.');
+      setSaving(false);
+      return { ok: false };
     }
-    setSaving(false);
   };
 
   const save = () => {
-    if (profile) saveProfileData(profile);
+    if (profile) void saveProfileData(profile);
   };
 
   const applyPreset = async (presetKey: string) => {
     setSaving(true);
     setStatus('idle');
     setSaveError(null);
+    setSaveWarning(null);
     try {
       const res = await fetch('/api/profile', {
         method: 'POST',
@@ -213,6 +230,8 @@ export default function ProfilePage() {
       }
       const data = await res.json();
       if (data.profile) setProfile(data.profile);
+      if (data.persistenceMode) setPersistenceMode(data.persistenceMode);
+      if (data.warning) setSaveWarning(data.warning);
       setStatus('saved');
       setTimeout(() => setStatus('idle'), 3000);
     } catch (e) {
@@ -314,9 +333,11 @@ export default function ProfilePage() {
         : {}),
     };
 
-    setProfile(nextProfile);
-    await saveProfileData(nextProfile);
-    setParsedResult(null);
+    const outcome = await saveProfileData(nextProfile);
+    if (outcome.ok) {
+      setProfile(nextProfile);
+      setParsedResult(null);
+    }
   };
 
   const update = (patch: Partial<Profile>) =>
@@ -367,6 +388,7 @@ ${locRule}`;
     );
 
   const atsCompanies = profile.ats_companies || DEFAULT_ATS_COMPANIES;
+  const careerUrls = profile.career_urls || DEFAULT_CAREER_URLS;
   const activePresetKey = detectMatchingPresetKey(profile);
 
   return (
@@ -378,8 +400,15 @@ ${locRule}`;
               Owner &amp; Targeting Parameters
             </h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-              Parse a resume or edit parameters directly in{' '}
-              <span className="font-mono">data/profile.json</span>.
+              Parse a resume or edit parameters via{' '}
+              <span className="font-mono">
+                {persistenceMode === 'cloud-sheets'
+                  ? 'Google Sheets (Profile!A1)'
+                  : persistenceMode === 'ephemeral-tmp'
+                  ? 'Ephemeral /tmp Overlay'
+                  : 'Cloud Sheets / data/profile.json'}
+              </span>
+              .
             </p>
           </div>
           <Button
@@ -416,6 +445,23 @@ ${locRule}`;
               type="button"
               onClick={() => setSaveError(null)}
               aria-label="Dismiss error"
+              className="text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white shrink-0 cursor-pointer"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+
+        {saveWarning && (
+          <div className="bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-700/60 text-amber-800 dark:text-amber-200 px-4 py-2.5 rounded-md text-xs font-mono flex items-center justify-between gap-3">
+            <span className="flex items-center gap-2">
+              <AlertCircle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+              {saveWarning}
+            </span>
+            <button
+              type="button"
+              onClick={() => setSaveWarning(null)}
+              aria-label="Dismiss warning"
               className="text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white shrink-0 cursor-pointer"
             >
               <X className="h-3.5 w-3.5" />
@@ -511,8 +557,16 @@ ${locRule}`;
                     zlib stream decoding.
                   </p>
                   {pdfFile && (
-                    <div className="text-xs font-mono text-emerald-600 dark:text-emerald-400 pt-1">
-                      Selected: {pdfFile.name} ({Math.round(pdfFile.size / 1024)} KB)
+                    <div className="space-y-1 pt-1">
+                      <div className="text-xs font-mono text-emerald-600 dark:text-emerald-400">
+                        Selected: {pdfFile.name} ({Math.round(pdfFile.size / 1024)} KB)
+                      </div>
+                      {pdfFile.size > 4.5 * 1024 * 1024 && (
+                        <div className="text-[11px] text-amber-700 dark:text-amber-300 font-mono">
+                          Note: File exceeds 4.5 MB — some serverless hosts cap multipart uploads
+                          at 4.5 MB (HTTP 413). Compress PDF or use Google Drive Link / Paste Text.
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1000,12 +1054,24 @@ ${locRule}`;
             </div>
 
             <div className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-6 space-y-5">
-              <h2 className="text-sm font-display font-semibold text-slate-900 dark:text-white border-b border-slate-200 dark:border-slate-800 pb-3">
-                04. Direct-ATS Company Slugs (Greenhouse · Lever · Ashby)
-              </h2>
+              <div className="border-b border-slate-200 dark:border-slate-800 pb-3">
+                <h2 className="text-sm font-display font-semibold text-slate-900 dark:text-white">
+                  04. Direct Company Career Pages &amp; 6-ATS Endpoints
+                </h2>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                  Target official company career pages (Schema.org JobPosting JSON-LD &amp; embedded
+                  ATS detection) plus 6 public Direct-ATS JSON APIs with zero recruiter middlemen.
+                </p>
+              </div>
+              <ArrayEditor
+                label="Direct Company Career Page URLs (HTTPS)"
+                items={careerUrls}
+                onChange={(v) => update({ career_urls: v })}
+                placeholder="e.g. https://www.postman.com/company/careers/"
+              />
               <ArrayEditor
                 label="Greenhouse Boards"
-                items={atsCompanies.greenhouse}
+                items={atsCompanies.greenhouse || []}
                 onChange={(v) =>
                   update({ ats_companies: { ...atsCompanies, greenhouse: v } })
                 }
@@ -1013,15 +1079,35 @@ ${locRule}`;
               />
               <ArrayEditor
                 label="Lever Boards"
-                items={atsCompanies.lever}
+                items={atsCompanies.lever || []}
                 onChange={(v) => update({ ats_companies: { ...atsCompanies, lever: v } })}
                 placeholder="e.g. zepto, cred, mistral"
               />
               <ArrayEditor
                 label="Ashby Boards"
-                items={atsCompanies.ashby}
+                items={atsCompanies.ashby || []}
                 onChange={(v) => update({ ats_companies: { ...atsCompanies, ashby: v } })}
                 placeholder="e.g. linear, posthog, supabase"
+              />
+              <ArrayEditor
+                label="Workable Slugs"
+                items={atsCompanies.workable || []}
+                onChange={(v) => update({ ats_companies: { ...atsCompanies, workable: v } })}
+                placeholder="e.g. raycast, revenuecat"
+              />
+              <ArrayEditor
+                label="SmartRecruiters IDs"
+                items={atsCompanies.smartrecruiters || []}
+                onChange={(v) =>
+                  update({ ats_companies: { ...atsCompanies, smartrecruiters: v } })
+                }
+                placeholder="e.g. Visa, BoschGroup"
+              />
+              <ArrayEditor
+                label="Recruitee Subdomains"
+                items={atsCompanies.recruitee || []}
+                onChange={(v) => update({ ats_companies: { ...atsCompanies, recruitee: v } })}
+                placeholder="e.g. framer, bunq"
               />
             </div>
           </div>
@@ -1033,10 +1119,12 @@ ${locRule}`;
               </h3>
               <button
                 type="button"
-                onClick={() => {
-                  navigator.clipboard.writeText(compiledPromptPreview);
-                  setCopiedPrompt(true);
-                  setTimeout(() => setCopiedPrompt(false), 1800);
+                onClick={async () => {
+                  const ok = await copyToClipboardSafe(compiledPromptPreview);
+                  if (ok) {
+                    setCopiedPrompt(true);
+                    setTimeout(() => setCopiedPrompt(false), 1800);
+                  }
                 }}
                 className="px-2.5 py-1 rounded text-xs bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 inline-flex items-center gap-1.5 cursor-pointer"
               >

@@ -86,6 +86,21 @@
       "posthog",
       "supabase",
       "langchain"
+    ],
+    "workable": [
+      "raycast"
+    ],
+    "smartrecruiters": [
+      "Visa"
+    ],
+    "recruitee": [
+      "framer"
     ]
-  }
+  },
+  "career_urls": [
+    "https://www.postman.com/company/careers/",
+    "https://razorpay.com/jobs/",
+    "https://linear.app/careers",
+    "https://posthog.com/careers"
+  ]
 }

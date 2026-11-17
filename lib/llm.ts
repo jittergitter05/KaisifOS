@@ -71,13 +71,71 @@ export function getGeminiClient(): GoogleGenAI | null {
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
     promise,
     new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
     }),
-  ]).finally(() => clearTimeout(timer!));
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+type LlmProviderName = 'gemini' | 'groq' | 'openrouter';
+
+const LLM_COOLDOWN_MS = 90_000;
+const LLM_AUTH_COOLDOWN_MS = 600_000;
+const LLM_TRIP_THRESHOLD = 2;
+
+const llmProviderBreakers: Record<
+  LlmProviderName,
+  { failures: number; openUntil: number; lastReason: string }
+> = {
+  gemini: { failures: 0, openUntil: 0, lastReason: '' },
+  groq: { failures: 0, openUntil: 0, lastReason: '' },
+  openrouter: { failures: 0, openUntil: 0, lastReason: '' },
+};
+
+export function resetLlmCircuitBreakers(): void {
+  for (const key of Object.keys(llmProviderBreakers) as LlmProviderName[]) {
+    llmProviderBreakers[key] = { failures: 0, openUntil: 0, lastReason: '' };
+  }
+}
+
+function isLlmProviderOpen(name: LlmProviderName): { open: boolean; waitSec: number; reason: string } {
+  const b = llmProviderBreakers[name];
+  if (b.openUntil > 0) {
+    const remaining = b.openUntil - Date.now();
+    if (remaining > 0) {
+      return { open: true, waitSec: Math.ceil(remaining / 1000), reason: b.lastReason };
+    }
+    b.openUntil = 0;
+    b.failures = LLM_TRIP_THRESHOLD - 1;
+  }
+  return { open: false, waitSec: 0, reason: '' };
+}
+
+function markLlmProviderSuccess(name: LlmProviderName): void {
+  llmProviderBreakers[name] = { failures: 0, openUntil: 0, lastReason: '' };
+}
+
+function markLlmProviderFailure(name: LlmProviderName, err: unknown): void {
+  const msg = String((err as Error)?.message || err || '');
+  const status = (err as { status?: number })?.status;
+  const isAuthError = status === 401 || status === 403 || /\b(401|403|api key|unauthorized)\b/i.test(msg);
+  const b = llmProviderBreakers[name];
+  if (isAuthError) {
+    b.failures = LLM_TRIP_THRESHOLD;
+    b.openUntil = Date.now() + LLM_AUTH_COOLDOWN_MS;
+    b.lastReason = 'auth-error';
+    return;
+  }
+  b.failures += 1;
+  b.lastReason = msg.slice(0, 60);
+  if (b.failures >= LLM_TRIP_THRESHOLD) {
+    b.openUntil = Date.now() + LLM_COOLDOWN_MS;
+  }
 }
 
 function isTransientError(err: unknown): boolean {
@@ -217,26 +275,29 @@ export async function generateStructuredJSONWithLLM<T = Record<string, unknown>>
 
   // 1. Google Gemini Free Tier (gemini-4-hydrogen — strictly no temperature or thinkingBudget)
   const ai = getGeminiClient();
-  if (ai) {
+  const geminiModel = process.env.GEMINI_MODEL?.trim() || 'gemini-4-hydrogen';
+  const geminiBreaker = isLlmProviderOpen('gemini');
+  if (ai && !geminiBreaker.open) {
     try {
       const response = await withExponentialRetry(
         () =>
           withTimeout(
             ai.models.generateContent({
-              model: 'gemini-4-hydrogen',
+              model: geminiModel,
               contents: fullPrompt,
               config: {
                 responseMimeType: 'application/json',
                 thinkingConfig: { thinkingLevel },
               },
             }),
-            14000,
+            10000,
             'Gemini generateContent'
           ),
         2
       );
       const parsed = parseLooseJSON<T>(response.text || '{}');
       if (parsed) {
+        markLlmProviderSuccess('gemini');
         chainStatus.gemini = 'ok';
         return {
           data: parsed,
@@ -246,13 +307,17 @@ export async function generateStructuredJSONWithLLM<T = Record<string, unknown>>
       }
       chainStatus.gemini = 'invalid-json';
     } catch (err) {
+      markLlmProviderFailure('gemini', err);
       chainStatus.gemini = `failed: ${(err as Error).message.slice(0, 60)}`;
       console.warn('[LLM JSON Helper] Gemini fallback triggered:', (err as Error).message);
     }
+  } else if (ai && geminiBreaker.open) {
+    chainStatus.gemini = `cooldown-open (${geminiBreaker.waitSec}s)`;
   }
 
   // 2. Groq Cloud Free Tier
-  if (process.env.GROQ_API_KEY && !process.env.GROQ_API_KEY.startsWith('xai-')) {
+  const groqBreaker = isLlmProviderOpen('groq');
+  if (process.env.GROQ_API_KEY && !process.env.GROQ_API_KEY.startsWith('xai-') && !groqBreaker.open) {
     try {
       const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
       const completion = await withExponentialRetry(
@@ -267,13 +332,14 @@ export async function generateStructuredJSONWithLLM<T = Record<string, unknown>>
               response_format: { type: 'json_object' },
               temperature: 0.1,
             }),
-            12000,
+            10000,
             'Groq chat completion'
           ),
         2
       );
       const parsed = parseLooseJSON<T>(completion.choices[0]?.message?.content || '{}');
       if (parsed) {
+        markLlmProviderSuccess('groq');
         chainStatus.groq = 'ok';
         return {
           data: parsed,
@@ -283,18 +349,23 @@ export async function generateStructuredJSONWithLLM<T = Record<string, unknown>>
       }
       chainStatus.groq = 'invalid-json';
     } catch (err) {
+      markLlmProviderFailure('groq', err);
       chainStatus.groq = `failed: ${(err as Error).message.slice(0, 60)}`;
       console.warn('[LLM JSON Helper] Groq fallback triggered:', (err as Error).message);
     }
+  } else if (process.env.GROQ_API_KEY && !process.env.GROQ_API_KEY.startsWith('xai-') && groqBreaker.open) {
+    chainStatus.groq = `cooldown-open (${groqBreaker.waitSec}s)`;
   }
 
   // 3. OpenRouter Free Tier (Llama 3.3 70B -> Gemma 3 27B -> openrouter/free auto-router)
-  if (process.env.OPENROUTER_API_KEY) {
+  const orBreaker = isLlmProviderOpen('openrouter');
+  if (process.env.OPENROUTER_API_KEY && !orBreaker.open) {
     const models = [
       { id: 'meta-llama/llama-3.3-70b-instruct:free', label: 'OpenRouter Llama 3.3 70B (:free)' },
       { id: 'google/gemma-3-27b-it:free', label: 'OpenRouter Gemma 3 27B (:free)' },
       { id: 'openrouter/free', label: 'OpenRouter Free Auto-Router (:free)' },
     ];
+    let lastOrErr: unknown = null;
     for (const m of models) {
       try {
         const res = await withExponentialRetry(
@@ -302,6 +373,7 @@ export async function generateStructuredJSONWithLLM<T = Record<string, unknown>>
           2
         );
         if (res) {
+          markLlmProviderSuccess('openrouter');
           chainStatus.openrouter = `ok (${m.id})`;
           return {
             data: res,
@@ -310,13 +382,19 @@ export async function generateStructuredJSONWithLLM<T = Record<string, unknown>>
           };
         }
       } catch (err) {
+        lastOrErr = err;
         chainStatus.openrouter = `failed (${m.id}): ${(err as Error).message.slice(0, 48)}`;
         console.warn(`[LLM JSON Helper] OpenRouter (${m.id}) fallback triggered:`, (err as Error).message);
       }
     }
+    if (lastOrErr) {
+      markLlmProviderFailure('openrouter', lastOrErr);
+    }
     if (chainStatus.openrouter === 'pending') {
       chainStatus.openrouter = 'invalid-json';
     }
+  } else if (process.env.OPENROUTER_API_KEY && orBreaker.open) {
+    chainStatus.openrouter = `cooldown-open (${orBreaker.waitSec}s)`;
   }
 
   return null;
@@ -371,6 +449,17 @@ export function evaluateSalaryFloorSignal(
 
   if (!salarySource || !/\d/.test(salarySource)) return 0;
 
+  const nonCompContextRegex =
+    /\b(funding|raised|seed\s+round|series\s+[a-f]|valuation|revenue|arr|mrr|pricing|plan|subscription|tier|customers|users|downloads|volume|market\s+cap|backed\s+by)\b/i;
+
+  const hasNonCompContext = (matchIndex: number, matchLen: number) => {
+    if (hasExplicitSalary) return false;
+    const windowStart = Math.max(0, matchIndex - 42);
+    const windowEnd = Math.min(salarySource.length, matchIndex + matchLen + 42);
+    const snippet = salarySource.slice(windowStart, windowEnd);
+    return nonCompContextRegex.test(snippet);
+  };
+
   // 1. INR LPA (e.g., "4 LPA", "12-18 LPA", "₹14 LPA")
   const lpaMatch = salarySource.match(/(\d+(?:\.\d+)?)\s*(?:[-–to]+\s*(\d+(?:\.\d+)?))?\s*lpa\b/i);
   if (lpaMatch) {
@@ -381,13 +470,16 @@ export function evaluateSalaryFloorSignal(
   }
 
   // 2. INR Monthly or Full Annual (₹80,000/mo, ₹12,00,000, INR 9,00,000)
-  const inrMatch = salarySource.match(
-    /(?:₹|inr\s*|rs\.?\s*)(\d+(?:,\d{2,3})*(?:\.\d+)?)\s*(k|lakh|lakhs)?\s*(\/\s*(?:mo|month|mth)|per\s+month)?/i
-  );
-  if (inrMatch) {
+  for (const inrMatch of salarySource.matchAll(
+    /(?:₹|inr\s*|rs\.?\s*)(\d+(?:,\d{2,3})*(?:\.\d+)?)\s*(k|lakh|lakhs|cr|crore|m|million)?\s*(\/\s*(?:mo|month|mth)|per\s+month)?/gi
+  )) {
+    const unit = (inrMatch[2] || '').toLowerCase();
+    if (unit === 'cr' || unit === 'crore' || unit === 'm' || unit === 'million') continue;
+    if (hasNonCompContext(inrMatch.index ?? 0, inrMatch[0].length)) continue;
+
     let val = parseFloat(inrMatch[1].replace(/,/g, ''));
-    if (inrMatch[2]?.toLowerCase() === 'k') val *= 1000;
-    else if (inrMatch[2]?.toLowerCase().startsWith('lakh')) val *= 100000;
+    if (unit === 'k') val *= 1000;
+    else if (unit.startsWith('lakh')) val *= 100000;
     const isMonthly = Boolean(inrMatch[3]);
     const annualInr = isMonthly ? val * 12 : val;
     const lpaEquiv = annualInr >= 100000 ? annualInr / 100000 : isMonthly ? (val * 12) / 100000 : val;
@@ -397,15 +489,20 @@ export function evaluateSalaryFloorSignal(
   }
 
   // 3. USD / EUR / GBP Hourly ($35/hr), Monthly ($3,500/mo), or Annual ($52,000, $140k, €50,000, £45,000)
-  const fxMatch = salarySource.match(
-    /(?:(\$|usd\s*)|(€|eur\s*)|(£|gbp\s*))(\d+(?:,\d{3})*(?:\.\d+)?)\s*(k)?\s*(\/\s*(?:hr|hour|mo|month)|per\s+(?:hour|month))?/i
-  );
-  if (fxMatch) {
+  for (const fxMatch of salarySource.matchAll(
+    /(?:(\$|usd\s*)|(€|eur\s*)|(£|gbp\s*))(\d+(?:,\d{3})*(?:\.\d+)?)\s*(k|m|b|million|billion)?\s*(\/\s*(?:hr|hour|mo|month)|per\s+(?:hour|month))?/gi
+  )) {
+    const magnitude = (fxMatch[5] || '').toLowerCase();
+    if (magnitude === 'm' || magnitude === 'b' || magnitude === 'million' || magnitude === 'billion') {
+      continue;
+    }
+    if (hasNonCompContext(fxMatch.index ?? 0, fxMatch[0].length)) continue;
+
     const isEur = Boolean(fxMatch[2]);
     const isGbp = Boolean(fxMatch[3]);
     const fxMultiplier = isGbp ? 1.26 : isEur ? 1.08 : 1;
     const rawNum = parseFloat(fxMatch[4].replace(/,/g, ''));
-    const hasK = Boolean(fxMatch[5]);
+    const hasK = magnitude === 'k';
     const cadence = (fxMatch[6] || '').toLowerCase();
 
     let annualUsd: number;

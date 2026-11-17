@@ -100,7 +100,10 @@ if (!hasAnyLlm) {
 
 if (process.env.GOOGLE_SERVICE_KEY_BASE64) {
   try {
-    const jsonStr = Buffer.from(process.env.GOOGLE_SERVICE_KEY_BASE64, 'base64').toString('utf8');
+    const raw = process.env.GOOGLE_SERVICE_KEY_BASE64.trim();
+    const jsonStr = raw.startsWith('{')
+      ? raw
+      : Buffer.from(raw.replace(/\s+/g, ''), 'base64').toString('utf8');
     const creds = JSON.parse(jsonStr);
     if (!creds.client_email || !creds.private_key) {
       console.warn('[WARN] GOOGLE_SERVICE_KEY_BASE64 is valid JSON but missing client_email or private_key.');

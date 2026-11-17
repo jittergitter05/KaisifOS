@@ -5,8 +5,10 @@ interface KeyboardNavOptions {
   totalRows: number;
   focusedRow: number;
   setFocusedRow: (i: number) => void;
-  selectedRows: Set<number>;
-  setSelectedRows: (s: Set<number>) => void;
+  selectedRows?: Set<number>;
+  setSelectedRows?: (s: Set<number>) => void;
+  onToggleSelect?: (index: number) => void;
+  onClearSelection?: () => void;
   expandedRow: number | null;
   setExpandedRow: (i: number | null) => void;
   onCycleStatus?: (rowId: number) => void;
@@ -19,6 +21,8 @@ export function useKeyboardNav({
   setFocusedRow,
   selectedRows,
   setSelectedRows,
+  onToggleSelect,
+  onClearSelection,
   expandedRow,
   setExpandedRow,
   onCycleStatus,
@@ -43,10 +47,14 @@ export function useKeyboardNav({
           break;
         case 'x':
           e.preventDefault();
-          const next = new Set(selectedRows);
-          if (next.has(focusedRow)) next.delete(focusedRow);
-          else next.add(focusedRow);
-          setSelectedRows(next);
+          if (onToggleSelect) {
+            onToggleSelect(focusedRow);
+          } else if (selectedRows && setSelectedRows) {
+            const next = new Set(selectedRows);
+            if (next.has(focusedRow)) next.delete(focusedRow);
+            else next.add(focusedRow);
+            setSelectedRows(next);
+          }
           break;
         case 's':
           e.preventDefault();
@@ -58,12 +66,25 @@ export function useKeyboardNav({
           break;
         case 'Escape':
           e.preventDefault();
-          setSelectedRows(new Set());
+          if (onClearSelection) onClearSelection();
+          else if (setSelectedRows) setSelectedRows(new Set());
           setExpandedRow(null);
           break;
       }
     },
-    [enabled, totalRows, focusedRow, setFocusedRow, selectedRows, setSelectedRows, expandedRow, setExpandedRow, onCycleStatus],
+    [
+      enabled,
+      totalRows,
+      focusedRow,
+      setFocusedRow,
+      selectedRows,
+      setSelectedRows,
+      onToggleSelect,
+      onClearSelection,
+      expandedRow,
+      setExpandedRow,
+      onCycleStatus,
+    ]
   );
 
   useEffect(() => {

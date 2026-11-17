@@ -361,9 +361,13 @@ Skills: SQL, Python, GTM Strategy`;
       const { SOURCE_FILTER_OPTIONS, detectSource } = await import('../lib/utils');
 
       const sampleIds = [
+        'career_postman_1',
         'greenhouse_stripe_1',
         'lever_zepto_1',
         'ashby_linear_1',
+        'workable_raycast_1',
+        'smartrecruiters_visa_1',
+        'recruitee_framer_1',
         'freehire_123',
         'himalayas_99123',
         'internshala_55',
@@ -409,6 +413,328 @@ Skills: SQL, Python, GTM Strategy`;
         'openrouter/free',
       ]);
       expect(res.score).toBe(89);
+    });
+
+    it('blocks SSRF metadata/private IPs and unsafe schemes while allowing public HTTPS URLs', async () => {
+      const { validateSafePublicUrl } = await import('../lib/utils');
+
+      expect(validateSafePublicUrl('http://169.254.169.254/latest/meta-data').ok).toBe(false);
+      expect(validateSafePublicUrl('http://metadata.google.internal/computeMetadata/v1').ok).toBe(false);
+      expect(validateSafePublicUrl('http://10.0.0.5:8080/jobs').ok).toBe(false);
+      expect(validateSafePublicUrl('http://192.168.1.10/jobs').ok).toBe(false);
+      expect(validateSafePublicUrl('file:///etc/passwd').ok).toBe(false);
+      expect(validateSafePublicUrl('https://jobs.example.com/api/v1/jobs').ok).toBe(true);
+    });
+
+    it('neutralizes CSV formula injection prefixes cleanly', async () => {
+      const { sanitizeCsvCell } = await import('../lib/utils');
+
+      expect(sanitizeCsvCell('=CMD()')).toBe('"\'=CMD()"');
+      expect(sanitizeCsvCell('+1+1')).toBe('"\'+1+1"');
+      expect(sanitizeCsvCell('-2*3')).toBe('"\'-2*3"');
+      expect(sanitizeCsvCell('@SUM(A1)')).toBe('"\'@SUM(A1)"');
+      expect(sanitizeCsvCell('\tHYPERLINK("x")')).toBe('"\'\tHYPERLINK(""x"")"');
+      expect(sanitizeCsvCell('Acme "Growth" Corp')).toBe('"Acme ""Growth"" Corp"');
+    });
+
+    it('parses YYYY-MM-DD consistently at local noon to preserve calendar day ordering', async () => {
+      const { parseIsoDateTimestamp } = await import('../lib/utils');
+
+      const d1 = parseIsoDateTimestamp('2026-11-15');
+      const d2 = parseIsoDateTimestamp('2026-11-16');
+      expect(Number.isFinite(d1)).toBe(true);
+      expect(Number.isFinite(d2)).toBe(true);
+      expect(d2).toBeGreaterThan(d1);
+      expect(d2 - d1).toBe(24 * 60 * 60 * 1000);
+      expect(Number.isNaN(parseIsoDateTimestamp(''))).toBe(true);
+    });
+
+    it('ignores VC funding and SaaS pricing figures while catching real salary compensation in JDs', async () => {
+      const { evaluateSalaryFloorSignal } = await import('../lib/llm');
+
+      expect(
+        evaluateSalaryFloorSignal(
+          '',
+          'Recently raised $50M Series B funding backed by top investors. Seeking Associate Product Manager.',
+          8,
+          50000
+        )
+      ).toBe(0);
+
+      expect(
+        evaluateSalaryFloorSignal(
+          '',
+          'Serving 100,000+ users at $12M ARR with a Pro pricing plan at $20/mo subscription tier.',
+          8,
+          50000
+        )
+      ).toBe(0);
+
+      expect(
+        evaluateSalaryFloorSignal('', 'Total cash compensation: $140,000 USD base + equity.', 8, 50000)
+      ).toBe(2);
+    });
+
+    it('enforces bounded sliding/fixed-window rate limiting and computes positive Retry-After', async () => {
+      const { checkRateLimit } = await import('../lib/rate-limit');
+      const uniqueBucket = `test-bucket-${Date.now()}-${Math.random()}`;
+
+      const first = checkRateLimit(uniqueBucket, 2, 60000);
+      const second = checkRateLimit(uniqueBucket, 2, 60000);
+      const blocked = checkRateLimit(uniqueBucket, 2, 60000);
+
+      expect(first.allowed).toBe(true);
+      expect(first.remaining).toBe(1);
+      expect(second.allowed).toBe(true);
+      expect(second.remaining).toBe(0);
+      expect(blocked.allowed).toBe(false);
+      expect(blocked.remaining).toBe(0);
+      expect(blocked.retryAfterSeconds).toBeGreaterThan(0);
+    });
+
+    it('persists and reads runtime JSON overlay cleanly via KAISIFOS_DATA_DIR', async () => {
+      const fs = await import('fs');
+      const os = await import('os');
+      const path = await import('path');
+      const { writeRuntimeJsonFile, readRuntimeJsonFile } = await import('../lib/sheets');
+
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kaisifos-runtime-'));
+      const prevDir = process.env.KAISIFOS_DATA_DIR;
+      process.env.KAISIFOS_DATA_DIR = tmpDir;
+
+      try {
+        const writeRes = writeRuntimeJsonFile('test-overlay.json', { status: 'ok', count: 42 });
+        expect(writeRes.ok).toBe(true);
+        const readBack = readRuntimeJsonFile('test-overlay.json', null);
+        expect(readBack).toEqual({ status: 'ok', count: 42 });
+      } finally {
+        if (prevDir === undefined) delete process.env.KAISIFOS_DATA_DIR;
+        else process.env.KAISIFOS_DATA_DIR = prevDir;
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('trips Gemini circuit breaker after repeated 503s so subsequent jobs skip Gemini immediately', async () => {
+      const { scoreJob, resetProviderBreakers } = await import('../scripts/scout.js');
+      resetProviderBreakers();
+      const prevGem = process.env.GEMINI_API_KEY;
+      const prevOr = process.env.OPENROUTER_API_KEY;
+      process.env.GEMINI_API_KEY = 'dummy-gemini-key';
+      delete process.env.OPENROUTER_API_KEY;
+
+      let geminiCalls = 0;
+      const prevFetch = global.fetch;
+      global.fetch = vi.fn().mockImplementation(async (url) => {
+        if (String(url).includes('generativelanguage.googleapis.com')) {
+          geminiCalls += 1;
+          return {
+            ok: false,
+            status: 503,
+            text: async () => '{"error":{"code":503,"status":"UNAVAILABLE"}}',
+          };
+        }
+        return { ok: false, status: 500, text: async () => '' };
+      });
+
+      const mockGroq = {
+        chat: {
+          completions: {
+            create: vi.fn().mockResolvedValue({
+              choices: [{ message: { content: JSON.stringify({ score: 87, gap: 'None' }) } }],
+            }),
+          },
+        },
+      };
+
+      const sampleJob = {
+        id: 'test_cb_1',
+        title: 'Associate Product Manager',
+        company: { display_name: 'Linear' },
+        location: 'Remote',
+        description: 'Entry level APM with Python EDA and SEO skills.',
+      };
+
+      try {
+        // Call 1 (2 attempts -> fails 503, falls back to Groq -> 87)
+        const r1 = await scoreJob(sampleJob, validProfile, mockGroq);
+        // Call 2 (2 attempts -> fails 503, trips breaker, falls back to Groq -> 87)
+        const r2 = await scoreJob(sampleJob, validProfile, mockGroq);
+        const callsAfterTrip = geminiCalls;
+        // Call 3 must bypass Gemini in 0ms and go straight to Groq
+        const r3 = await scoreJob(sampleJob, validProfile, mockGroq);
+
+        expect(r1.score).toBe(87);
+        expect(r2.score).toBe(87);
+        expect(r3.score).toBe(87);
+        expect(callsAfterTrip).toBe(4);
+        expect(geminiCalls).toBe(4); // Zero extra calls on Call 3 because circuit is open
+      } finally {
+        resetProviderBreakers();
+        global.fetch = prevFetch;
+        if (prevGem === undefined) delete process.env.GEMINI_API_KEY;
+        else process.env.GEMINI_API_KEY = prevGem;
+        if (prevOr === undefined) delete process.env.OPENROUTER_API_KEY;
+        else process.env.OPENROUTER_API_KEY = prevOr;
+      }
+    }, 15000);
+
+    it('retries JSearch once on transient error and strips HTML from descriptions', async () => {
+      const { fetchJSearchJobs } = await import('../scripts/scout.js');
+      const prevRapid = process.env.RAPIDAPI_KEY;
+      process.env.RAPIDAPI_KEY = 'dummy-rapidapi-key';
+
+      let attempts = 0;
+      const prevFetch = global.fetch;
+      global.fetch = vi.fn().mockImplementation(async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error('The operation was aborted due to timeout');
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            data: [
+              {
+                job_id: 'js1',
+                job_title: 'Associate Product Manager',
+                employer_name: 'Acme AI',
+                job_description: '<p>Entry-level <b>APM</b> with visa sponsorship.</p>',
+                job_apply_link: 'https://example.com/apply',
+                job_city: 'Bengaluru',
+                job_country: 'IN',
+              },
+            ],
+          }),
+        };
+      });
+
+      try {
+        const jobs = await fetchJSearchJobs(validProfile);
+        expect(attempts).toBe(2);
+        expect(jobs).toHaveLength(1);
+        expect(jobs[0].description).toBe('Entry-level APM with visa sponsorship.');
+        expect(jobs[0].has_relocation).toBe(true);
+      } finally {
+        global.fetch = prevFetch;
+        if (prevRapid === undefined) delete process.env.RAPIDAPI_KEY;
+        else process.env.RAPIDAPI_KEY = prevRapid;
+      }
+    }, 10000);
+
+    it('lib/llm.ts tracks provider circuit breakers and skips cooled-down OpenRouter failures', async () => {
+      const { generateStructuredJSONWithLLM, resetLlmCircuitBreakers } = await import('../lib/llm');
+      resetLlmCircuitBreakers();
+
+      const prevGem = process.env.GEMINI_API_KEY;
+      const prevGroq = process.env.GROQ_API_KEY;
+      const prevOr = process.env.OPENROUTER_API_KEY;
+      delete process.env.GEMINI_API_KEY;
+      delete process.env.GROQ_API_KEY;
+      process.env.OPENROUTER_API_KEY = 'dummy-or-key';
+
+      let orCalls = 0;
+      const prevFetch = global.fetch;
+      global.fetch = vi.fn().mockImplementation(async () => {
+        orCalls += 1;
+        return { ok: false, status: 503 };
+      });
+
+      try {
+        await generateStructuredJSONWithLLM('prompt 1');
+        await generateStructuredJSONWithLLM('prompt 2');
+        const callsBeforeCooldown = orCalls;
+        await generateStructuredJSONWithLLM('prompt 3');
+        expect(callsBeforeCooldown).toBeGreaterThan(0);
+        expect(orCalls).toBe(callsBeforeCooldown);
+      } finally {
+        resetLlmCircuitBreakers();
+        global.fetch = prevFetch;
+        if (prevGem !== undefined) process.env.GEMINI_API_KEY = prevGem;
+        if (prevGroq !== undefined) process.env.GROQ_API_KEY = prevGroq;
+        if (prevOr === undefined) delete process.env.OPENROUTER_API_KEY;
+        else process.env.OPENROUTER_API_KEY = prevOr;
+      }
+    }, 15000);
+
+    it('extracts Schema.org JobPosting JSON-LD, embedded ATS boards, and career anchors while blocking SSRF URLs', async () => {
+      const {
+        extractJsonLdJobPostings,
+        detectEmbeddedAtsBoards,
+        extractCareerPageAnchors,
+        fetchCompanyCareerPages,
+      } = await import('../lib/career-scraper');
+
+      const ldHtml = `
+        <html><head>
+          <script type="application/ld+json">
+            {
+              "@context": "https://schema.org",
+              "@graph": [
+                {
+                  "@type": "JobPosting",
+                  "title": "Associate Product Manager",
+                  "hiringOrganization": { "name": "Postman" },
+                  "url": "/careers/openings/apm-101",
+                  "jobLocation": { "address": { "addressLocality": "Bengaluru", "addressCountry": "IN" } },
+                  "baseSalary": { "currency": "INR", "value": { "minValue": 1400000, "maxValue": 1800000 } },
+                  "description": "<p>Build API developer workflows with SQL and Python.</p>"
+                }
+              ]
+            }
+          </script>
+        </head></html>
+      `;
+
+      const ldJobs = extractJsonLdJobPostings(ldHtml, 'https://www.postman.com/company/careers/');
+      expect(ldJobs).toHaveLength(1);
+      expect(ldJobs[0].id.startsWith('career_')).toBe(true);
+      expect(ldJobs[0].company).toBe('Postman');
+      expect(ldJobs[0].url).toBe('https://www.postman.com/careers/openings/apm-101');
+      expect(ldJobs[0].location).toBe('Bengaluru, IN');
+      expect(ldJobs[0].salary).toBe('INR 1400000 - 1800000');
+
+      const embeddedHtml = `
+        <iframe src="https://boards.greenhouse.io/embed/job_board?for=acme"></iframe>
+        <a href="https://jobs.lever.co/zepto/123">Lever</a>
+        <a href="https://jobs.ashbyhq.com/linear/456">Ashby</a>
+        <a href="https://apply.workable.com/raycast/">Workable</a>
+        <a href="https://jobs.smartrecruiters.com/Visa/789">SR</a>
+        <a href="https://framer.recruitee.com/o/pm">Recruitee</a>
+      `;
+      const embedded = detectEmbeddedAtsBoards(embeddedHtml);
+      expect(embedded.lever).toContain('zepto');
+      expect(embedded.ashby).toContain('linear');
+      expect(embedded.workable).toContain('raycast');
+      expect(embedded.smartrecruiters).toContain('Visa');
+      expect(embedded.recruitee).toContain('framer');
+
+      const anchorHtml = `
+        <nav><a href="/about">About Us</a><a href="/privacy">Privacy</a></nav>
+        <a href="/careers/growth-product-manager">Growth Product Manager</a>
+        <a href="/jobs/ai-systems-engineer">AI Systems Engineer</a>
+      `;
+      const anchors = extractCareerPageAnchors(anchorHtml, 'https://linear.app/careers', 'Linear');
+      expect(anchors.map((a) => a.title)).toEqual([
+        'Growth Product Manager',
+        'AI Systems Engineer',
+      ]);
+      expect(anchors[0].url).toBe('https://linear.app/careers/growth-product-manager');
+
+      const prevFetch = global.fetch;
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        text: async () => ldHtml,
+      });
+      try {
+        const res = await fetchCompanyCareerPages([
+          'http://169.254.169.254/latest/meta-data',
+          'https://www.postman.com/company/careers/',
+        ]);
+        expect(res.jobs.length).toBe(1);
+        expect(res.failedBoards.some((f) => f.includes('169.254.169.254'))).toBe(true);
+      } finally {
+        global.fetch = prevFetch;
+      }
     });
   });
 });

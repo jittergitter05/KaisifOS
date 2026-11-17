@@ -4,14 +4,16 @@ import { isAuthorizedRequest } from '@/lib/auth';
 import {
   getAllSheetRows,
   getPublicStats,
+  getStorageHealthInfo,
   isCloudSheetsConfigured,
+  resolveRuntimeDataDir,
   updateLocalJobRow,
   batchUpdateLocalJobRows,
-  appendLocalJobRecord,
+  appendLocalJobRecordDetailed,
   appendCloudSheetRecord,
   updateCloudSheetRowFields,
   batchUpdateCloudSheetRows,
-  sanitizeSheetCell,
+  sanitizePlainField,
 } from '@/lib/sheets';
 
 const ALLOWED_STATUSES = new Set([
@@ -48,8 +50,14 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(stats);
     }
 
-    const { rows, mode } = await getAllSheetRows();
-    return NextResponse.json({ rows, mode });
+    const { rows, mode, cloudError } = await getAllSheetRows();
+    const storageHealth = getStorageHealthInfo(cloudError);
+    return NextResponse.json({
+      rows,
+      mode,
+      persistenceMode: storageHealth.storageMode,
+      cloudError,
+    });
   } catch (e) {
     console.error('[sheet-sync GET]', e);
     return NextResponse.json(
@@ -60,7 +68,7 @@ export async function GET(request: NextRequest) {
             applications_sent: 0,
             response_rate: '0%',
           }
-        : { rows: [], mode: 'local-store' }
+        : { rows: [], mode: 'local-store', persistenceMode: 'read-only' }
     );
   }
 }
@@ -77,6 +85,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
+    const dirInfo = resolveRuntimeDataDir();
 
     if (body.action === 'batch_update' && Array.isArray(body.targets)) {
       const normalized = String(body.status || '').toUpperCase().trim();
@@ -99,70 +108,112 @@ export async function POST(request: NextRequest) {
         .filter((t) => t.id || t.rowId);
 
       if (targets.length === 0) {
-        return NextResponse.json({ error: 'No valid targets provided for batch update.' }, { status: 400 });
+        return NextResponse.json(
+          { error: 'No valid targets provided for batch update.' },
+          { status: 400 }
+        );
       }
 
       let cloudCount = 0;
+      let cloudError: string | undefined;
       if (isCloudSheetsConfigured()) {
         try {
           cloudCount = await batchUpdateCloudSheetRows(targets, normalized);
         } catch (cloudErr) {
-          console.warn('[sheet-sync] Cloud batch update failed, updating local store:', cloudErr);
+          cloudError = (cloudErr as Error).message;
+          console.warn('[sheet-sync] Cloud batch update failed, trying runtime store:', cloudError);
         }
       }
 
       const localCount = batchUpdateLocalJobRows(targets, normalized);
       if (cloudCount === 0 && localCount === 0) {
+        if (!dirInfo.writable && (!isCloudSheetsConfigured() || cloudError)) {
+          return NextResponse.json(
+            {
+              error:
+                cloudError ||
+                'Storage is read-only and Google Sheets is not writable in this environment.',
+            },
+            { status: 503 }
+          );
+        }
         return NextResponse.json(
-          { error: 'No matching pipeline records found or storage is read-only.' },
+          { error: 'No matching pipeline records found for batch update.' },
           { status: 404 }
         );
       }
 
-      return NextResponse.json({ success: true, cloudCount, localCount });
+      return NextResponse.json({
+        success: true,
+        cloudCount,
+        localCount,
+        persistenceMode:
+          cloudCount > 0
+            ? 'cloud-sheets'
+            : dirInfo.mode === 'ephemeral-tmp'
+            ? 'ephemeral-tmp'
+            : 'local-disk',
+      });
     }
 
     if (body.action === 'append' && body.job) {
       const { job } = body;
-      const dateStr = sanitizeSheetCell(job.date || new Date().toISOString().split('T')[0], 20);
+      const dateStr = sanitizePlainField(job.date || new Date().toISOString().split('T')[0], 20);
       const rawStatus = String(job.status || 'NEW').toUpperCase();
       const safeStatus = ALLOWED_STATUSES.has(rawStatus) ? rawStatus : 'NEW';
 
       const record = {
         date: dateStr,
-        id: sanitizeSheetCell(job.id || `manual_${Date.now()}`, 120),
-        title: sanitizeSheetCell(job.title || 'Untitled Role', 200),
-        company: sanitizeSheetCell(job.company || 'Unknown Company', 160),
+        id: sanitizePlainField(job.id || `manual_${Date.now()}`, 120),
+        title: sanitizePlainField(job.title || 'Untitled Role', 200),
+        company: sanitizePlainField(job.company || 'Unknown Company', 160),
         score: Math.max(0, Math.min(100, Math.round(Number(job.score ?? 85)))),
-        reasons: sanitizeSheetCell(
+        reasons: sanitizePlainField(
           Array.isArray(job.reasons) ? job.reasons.join(' | ') : String(job.reasons || ''),
           1000
         ),
-        gap: sanitizeSheetCell(job.gap || '', 500),
-        url: sanitizeSheetCell(job.url || '', 500),
-        dm: sanitizeSheetCell(job.dm || '', 1500),
-        resumeAngle: sanitizeSheetCell(job.resumeAngle || '', 500),
+        gap: sanitizePlainField(job.gap || '', 500),
+        url: sanitizePlainField(job.url || '', 500),
+        dm: sanitizePlainField(job.dm || '', 1500),
+        resumeAngle: sanitizePlainField(job.resumeAngle || '', 500),
         status: safeStatus,
       };
 
       let cloudSaved = false;
+      let cloudError: string | undefined;
       if (isCloudSheetsConfigured()) {
         try {
           await appendCloudSheetRecord(record);
           cloudSaved = true;
         } catch (cloudErr) {
-          console.warn('[sheet-sync] Cloud append failed, saving to local store:', cloudErr);
+          cloudError = (cloudErr as Error).message;
+          console.warn('[sheet-sync] Cloud append failed, saving to runtime store:', cloudError);
         }
       }
 
-      const localSaved = appendLocalJobRecord(record);
-      if (!cloudSaved && !localSaved) {
+      const localWrite = appendLocalJobRecordDetailed(record);
+      if (!cloudSaved && !localWrite.ok) {
         return NextResponse.json(
-          { error: 'Unable to persist record (read-only filesystem without Cloud Sheets configured).' },
-          { status: 500 }
+          {
+            error:
+              cloudError ||
+              localWrite.error ||
+              'Unable to persist record (storage is read-only without writable Cloud Sheets).',
+          },
+          { status: 503 }
         );
       }
-      return NextResponse.json({ success: true, record, cloudSaved, localSaved });
+      return NextResponse.json({
+        success: true,
+        record,
+        cloudSaved,
+        localSaved: localWrite.ok,
+        persistenceMode: cloudSaved
+          ? 'cloud-sheets'
+          : localWrite.mode === 'ephemeral-tmp'
+          ? 'ephemeral-tmp'
+          : 'local-disk',
+      });
     }
 
     const { id, rowId, status, dm, resumeAngle, gap, score, reasons } = body;
@@ -187,20 +238,21 @@ export async function POST(request: NextRequest) {
 
     const patch = {
       status: safeStatus,
-      dm: dm !== undefined ? sanitizeSheetCell(dm, 1500) : undefined,
-      resumeAngle: resumeAngle !== undefined ? sanitizeSheetCell(resumeAngle, 500) : undefined,
-      gap: gap !== undefined ? sanitizeSheetCell(gap, 500) : undefined,
+      dm: dm !== undefined ? sanitizePlainField(dm, 1500) : undefined,
+      resumeAngle: resumeAngle !== undefined ? sanitizePlainField(resumeAngle, 500) : undefined,
+      gap: gap !== undefined ? sanitizePlainField(gap, 500) : undefined,
       score:
         score !== undefined && Number.isFinite(Number(score))
           ? Math.max(0, Math.min(100, Math.round(Number(score))))
           : undefined,
       reasons:
         reasons !== undefined
-          ? sanitizeSheetCell(Array.isArray(reasons) ? reasons.join(' | ') : reasons, 1000)
+          ? sanitizePlainField(Array.isArray(reasons) ? reasons.join(' | ') : reasons, 1000)
           : undefined,
     };
 
     let cloudUpdated = false;
+    let cloudError: string | undefined;
     if (isCloudSheetsConfigured()) {
       try {
         cloudUpdated = await updateCloudSheetRowFields(
@@ -208,19 +260,39 @@ export async function POST(request: NextRequest) {
           patch
         );
       } catch (cloudErr) {
-        console.warn('[sheet-sync] Cloud field update failed, updating local store:', cloudErr);
+        cloudError = (cloudErr as Error).message;
+        console.warn('[sheet-sync] Cloud field update failed, updating runtime store:', cloudError);
       }
     }
 
     const localUpdated = updateLocalJobRow({ id: targetId, rowId: numericRowId }, patch);
     if (!cloudUpdated && !localUpdated) {
+      if (!dirInfo.writable && (!isCloudSheetsConfigured() || cloudError)) {
+        return NextResponse.json(
+          {
+            error:
+              cloudError ||
+              'Storage is read-only and Google Sheets update failed in this environment.',
+          },
+          { status: 503 }
+        );
+      }
       return NextResponse.json(
-        { error: 'Matching pipeline record was not found or storage is read-only.' },
+        { error: 'Matching pipeline record was not found.' },
         { status: 404 }
       );
     }
 
-    return NextResponse.json({ success: true, cloudUpdated, localUpdated });
+    return NextResponse.json({
+      success: true,
+      cloudUpdated,
+      localUpdated,
+      persistenceMode: cloudUpdated
+        ? 'cloud-sheets'
+        : dirInfo.mode === 'ephemeral-tmp'
+        ? 'ephemeral-tmp'
+        : 'local-disk',
+    });
   } catch (e) {
     console.error('[sheet-sync POST]', e);
     return NextResponse.json({ error: 'Operation failed' }, { status: 500 });

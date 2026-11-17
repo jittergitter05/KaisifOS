@@ -2,14 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { isAuthorizedRequest } from '@/lib/auth';
 import {
-  getCandidateProfile,
   FORK_PROFILE_TEMPLATES,
   CandidateProfile,
   DEFAULT_ATS_COMPANIES,
+  DEFAULT_CAREER_URLS,
+  getCandidateProfileAsync,
+  saveCandidateProfileAsync,
 } from '@/lib/profile';
-import { atomicWriteJsonFile } from '@/lib/sheets';
+import { validateSafePublicUrl } from '@/lib/utils';
 import { siteConfig } from '@/config/site';
-import path from 'path';
 
 function sanitizeStringArray(val: unknown, fallback: string[] = []): string[] {
   if (!Array.isArray(val)) return fallback;
@@ -35,28 +36,11 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const profile = getCandidateProfile();
+    const profile = await getCandidateProfileAsync();
     return NextResponse.json(profile);
   } catch (e) {
     console.error('[Profile] Read error:', e);
     return NextResponse.json({ error: 'Failed to read profile' }, { status: 500 });
-  }
-}
-
-function tryWriteLocalProfile(profile: CandidateProfile): { ok: boolean; error?: string } {
-  try {
-    const profilePath = path.join(process.cwd(), 'data', 'profile.json');
-    atomicWriteJsonFile(profilePath, profile);
-    return { ok: true };
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException)?.code;
-    return {
-      ok: false,
-      error:
-        code === 'EROFS' || code === 'EACCES'
-          ? 'This deployment mounts data/profile.json as read-only. Update data/profile.json in your repository or redeploy with writable storage.'
-          : (err as Error).message,
-    };
   }
 }
 
@@ -75,14 +59,21 @@ export async function POST(request: NextRequest) {
 
     if (body.presetKey && typeof body.presetKey === 'string' && FORK_PROFILE_TEMPLATES[body.presetKey]) {
       const preset = FORK_PROFILE_TEMPLATES[body.presetKey];
-      const writeRes = tryWriteLocalProfile(preset);
-      if (!writeRes.ok) {
-        return NextResponse.json({ error: writeRes.error }, { status: 503 });
+      const saveRes = await saveCandidateProfileAsync(preset);
+      if (!saveRes.ok) {
+        return NextResponse.json({ error: saveRes.error }, { status: 503 });
       }
-      return NextResponse.json({ success: true, profile: preset });
+      return NextResponse.json({
+        success: true,
+        profile: saveRes.profile,
+        persistenceMode: saveRes.persistenceMode,
+        cloudSaved: saveRes.cloudSaved,
+        localSaved: saveRes.localSaved,
+        warning: saveRes.warning,
+      });
     }
 
-    if (!body.name || typeof body.name !== 'string') {
+    if (!body.name || typeof body.name !== 'string' || body.name.trim().length === 0) {
       return NextResponse.json({ error: 'Missing or invalid field: name' }, { status: 400 });
     }
     if (!Array.isArray(body.target_roles) || body.target_roles.length === 0) {
@@ -104,7 +95,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const current = getCandidateProfile();
+    const current = await getCandidateProfileAsync();
 
     // Explicitly whitelist and sanitize all CandidateProfile fields (prevents prototype pollution / arbitrary key injection)
     const updatedProfile: CandidateProfile = {
@@ -169,15 +160,40 @@ export async function POST(request: NextRequest) {
           body.ats_companies?.ashby,
           current.ats_companies?.ashby ?? DEFAULT_ATS_COMPANIES.ashby
         ),
+        workable: sanitizeStringArray(
+          body.ats_companies?.workable,
+          current.ats_companies?.workable ?? DEFAULT_ATS_COMPANIES.workable ?? []
+        ),
+        smartrecruiters: sanitizeStringArray(
+          body.ats_companies?.smartrecruiters,
+          current.ats_companies?.smartrecruiters ?? DEFAULT_ATS_COMPANIES.smartrecruiters ?? []
+        ),
+        recruitee: sanitizeStringArray(
+          body.ats_companies?.recruitee,
+          current.ats_companies?.recruitee ?? DEFAULT_ATS_COMPANIES.recruitee ?? []
+        ),
       },
+      career_urls: Array.isArray(body.career_urls)
+        ? body.career_urls
+            .map((u: unknown) => String(u ?? '').trim())
+            .filter((u: string) => validateSafePublicUrl(u, { allowLocalDev: false }).ok)
+            .slice(0, 20)
+        : current.career_urls ?? DEFAULT_CAREER_URLS,
     };
 
-    const writeRes = tryWriteLocalProfile(updatedProfile);
-    if (!writeRes.ok) {
-      return NextResponse.json({ error: writeRes.error }, { status: 503 });
+    const saveRes = await saveCandidateProfileAsync(updatedProfile);
+    if (!saveRes.ok) {
+      return NextResponse.json({ error: saveRes.error }, { status: 503 });
     }
 
-    return NextResponse.json({ success: true, profile: updatedProfile });
+    return NextResponse.json({
+      success: true,
+      profile: saveRes.profile,
+      persistenceMode: saveRes.persistenceMode,
+      cloudSaved: saveRes.cloudSaved,
+      localSaved: saveRes.localSaved,
+      warning: saveRes.warning,
+    });
   } catch (e) {
     console.error('[Profile] Write error:', e);
     return NextResponse.json({ error: 'Failed to update profile' }, { status: 500 });

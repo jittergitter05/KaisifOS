@@ -4,6 +4,7 @@ import { isAuthorizedRequest } from '@/lib/auth';
 import { executeLiveScoutRun } from '@/lib/scout-runner';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 export async function POST() {
   const cookieStore = cookies();
@@ -27,11 +28,19 @@ export async function POST() {
       addedRoles: summary.committed_jobs.map(
         (j) => `${j.title} @ ${j.company} (${j.score}/100)`
       ),
+      committedJobs: summary.committed_jobs,
       sourceCounts: summary.source_counts,
       sourceHealth: summary.source_health,
+      persistenceMode: summary.persistence_mode,
+      warnings: summary.warnings,
     });
   } catch (err) {
+    const message = (err as Error)?.message || 'Live scout run failed';
+    const isReadOnly = /read-only|GOOGLE_SHEET_ID|persisting/i.test(message);
     console.error('[Live Scout API] Error:', err);
-    return NextResponse.json({ error: 'Live scout run failed' }, { status: 500 });
+    return NextResponse.json(
+      { error: message },
+      { status: isReadOnly ? 503 : 500 }
+    );
   }
 }

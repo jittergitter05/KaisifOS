@@ -1,4 +1,4 @@
-import { CandidateProfile, getCandidateProfile } from './profile';
+import { CandidateProfile, getCandidateProfileAsync } from './profile';
 import { generateStructuredJSONWithLLM } from './llm';
 import { extractHighSignalJdContext } from './utils';
 
@@ -75,7 +75,7 @@ export async function generateRolePrepPack(
   },
   profileOverride?: CandidateProfile
 ): Promise<RolePrepPack> {
-  const profile = profileOverride || getCandidateProfile();
+  const profile = profileOverride || (await getCandidateProfileAsync());
   const deterministicPack = buildDeterministicRolePrepPack(job, profile);
   const jdExcerpt = job.description ? extractHighSignalJdContext(job.description, 1500) : '';
 

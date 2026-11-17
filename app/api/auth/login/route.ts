@@ -5,14 +5,16 @@ import {
   DEFAULT_OPERATOR_KEY,
   isCustomAuthConfigured,
   constantTimeEqual,
+  getCookieSecurityOptions,
 } from '@/lib/auth';
-import { getCandidateProfile } from '@/lib/profile';
+import { getCandidateProfileAsync } from '@/lib/profile';
+import { checkRateLimit, extractClientIp } from '@/lib/rate-limit';
 import { siteConfig } from '@/config/site';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET() {
-  const profile = getCandidateProfile();
+  const profile = await getCandidateProfileAsync();
   return NextResponse.json({
     customAuthConfigured: isCustomAuthConfigured(),
     brandName: profile.system_name || siteConfig.name,
@@ -21,6 +23,18 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
+    const ip = extractClientIp(req.headers);
+    const limitResult = checkRateLimit(`auth:login:${ip}`, 15, 5 * 60 * 1000);
+    if (!limitResult.allowed) {
+      return NextResponse.json(
+        { error: `Too many login attempts. Retry in ${limitResult.retryAfterSeconds}s.` },
+        {
+          status: 429,
+          headers: { 'Retry-After': String(limitResult.retryAfterSeconds) },
+        }
+      );
+    }
+
     const { username, password, quickAccess } = await req.json();
 
     const adminUser = process.env.ADMIN_USER || DEFAULT_OPERATOR_USER;
@@ -46,12 +60,10 @@ export async function POST(req: NextRequest) {
         { status: 200 }
       );
       const token = await signToken();
+      const cookieOpts = getCookieSecurityOptions(req.headers, req.url);
       response.cookies.set('kaisifos_auth', token, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
+        ...cookieOpts,
         maxAge: 60 * 60 * 24 * 7,
-        path: '/',
       });
       response.cookies.delete('kaisifos_locked');
       return response;

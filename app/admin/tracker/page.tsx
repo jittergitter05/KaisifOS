@@ -1,10 +1,18 @@
 'use client';
-import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import StatusBadge, { ALL_STATUSES } from '@/components/StatusBadge';
 import MetricBar from '@/components/MetricBar';
 import InteractiveEvaluator from '@/components/InteractiveEvaluator';
 import JobAuditDrawer, { deriveJobPillarBreakdown } from '@/components/JobAuditDrawer';
-import { SOURCE_FILTER_OPTIONS, detectSource, safeExternalUrl } from '@/lib/utils';
+import {
+  SOURCE_FILTER_OPTIONS,
+  detectSource,
+  safeExternalUrl,
+  extractExternalHost,
+  sanitizeCsvCell,
+  parseIsoDateTimestamp,
+  copyToClipboardSafe,
+} from '@/lib/utils';
 import dynamic from 'next/dynamic';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -53,7 +61,7 @@ interface JobRow {
 
 function predictReplyLikelihood(job: JobRow): number {
   if (job.status !== 'APPLIED') return -1;
-  const parsedTime = new Date(job.date).getTime();
+  const parsedTime = parseIsoDateTimestamp(job.date);
   const daysSinceApplied = Number.isNaN(parsedTime)
     ? 0
     : Math.max(0, Math.floor((Date.now() - parsedTime) / (1000 * 60 * 60 * 24)));
@@ -68,7 +76,7 @@ function predictReplyLikelihood(job: JobRow): number {
 
 function isStale(job: JobRow, thresholdDays = 7): boolean {
   if (job.status !== 'APPLIED') return false;
-  const parsed = new Date(job.date).getTime();
+  const parsed = parseIsoDateTimestamp(job.date);
   if (Number.isNaN(parsed)) return false;
   const days = Math.floor((Date.now() - parsed) / (1000 * 60 * 60 * 24));
   return days >= thresholdDays;
@@ -113,15 +121,17 @@ function exportToCSV(jobs: JobRow[]) {
       j.dm,
       j.resumeAngle,
     ]
-      .map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`)
+      .map((v) => sanitizeCsvCell(v))
       .join(',');
   });
   const csv = [headers.join(','), ...rows].join('\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const objectUrl = URL.createObjectURL(blob);
   const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
+  link.href = objectUrl;
   link.download = `kaisifos-tracker-${new Date().toISOString().split('T')[0]}.csv`;
   link.click();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
 }
 
 export default function TrackerPage() {
@@ -129,7 +139,16 @@ export default function TrackerPage() {
   const [storageMode, setStorageMode] = useState<string>('local-store');
   const [loading, setLoading] = useState(true);
   const [scoutingLive, setScoutingLive] = useState(false);
-  const [scoutBanner, setScoutBanner] = useState<string | null>(null);
+  const [scoutBanner, setScoutBanner] = useState<{
+    message: string;
+    committedJobs?: Array<{
+      title: string;
+      company: string;
+      score: number;
+      url?: string;
+      source?: string;
+    }>;
+  } | null>(null);
   const [filter, setFilter] = useState('ALL');
   const [sourceFilter, setSourceFilter] = useState('ALL');
   const [minScoreFilter, setMinScoreFilter] = useState<number>(0);
@@ -141,7 +160,7 @@ export default function TrackerPage() {
   const [error, setError] = useState<string | null>(null);
   const [expandedRow, setExpandedRow] = useState<number | null>(null);
   const [focusedRow, setFocusedRow] = useState(0);
-  const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
+  const [selectedJobIds, setSelectedJobIds] = useState<Set<string>>(new Set());
   const [showAnalytics, setShowAnalytics] = useState(true);
   const [showEvaluatorModal, setShowEvaluatorModal] = useState(false);
   const [auditDrawerJob, setAuditDrawerJob] = useState<JobRow | null>(null);
@@ -150,6 +169,11 @@ export default function TrackerPage() {
   const [draftDmText, setDraftDmText] = useState<string>('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const jobsRef = useRef<JobRow[]>([]);
+
+  useEffect(() => {
+    jobsRef.current = jobs;
+  }, [jobs]);
 
   const fetchJobs = useCallback(() => {
     setLoading(true);
@@ -165,7 +189,9 @@ export default function TrackerPage() {
       })
       .then((data) => {
         if (data && data.rows) {
-          if (data.mode) setStorageMode(data.mode);
+          if (data.persistenceMode || data.mode) {
+            setStorageMode(data.persistenceMode || data.mode);
+          }
           const parsedJobs = data.rows
             .map((r: string[], i: number) => ({
               rowId: i + 1,
@@ -214,6 +240,9 @@ export default function TrackerPage() {
         return;
       }
       const data = await res.json();
+      if (data.persistenceMode || data.mode) {
+        setStorageMode(data.persistenceMode || data.mode);
+      }
       const healthValues =
         data.sourceHealth && typeof data.sourceHealth === 'object'
           ? (Object.values(data.sourceHealth) as Array<{ status?: string }>)
@@ -221,9 +250,14 @@ export default function TrackerPage() {
       const healthSummary = healthValues.length
         ? ` (${healthValues.filter((s) => s?.status === 'ok').length}/${healthValues.length} feeds healthy)`
         : '';
-      setScoutBanner(
-        `Scanned ${data.scanned} live Direct-ATS & remote postings · Added ${data.addedCount} top-scoring matches${healthSummary}.`
-      );
+      const warningText =
+        Array.isArray(data.warnings) && data.warnings.length > 0
+          ? ` — Notice: ${data.warnings.join(' | ')}`
+          : '';
+      setScoutBanner({
+        message: `Scanned ${data.scanned} live Career Page, Direct-ATS & remote postings · Added ${data.addedCount} top-scoring matches${healthSummary}.${warningText}`,
+        committedJobs: Array.isArray(data.committedJobs) ? data.committedJobs : [],
+      });
       fetchJobs();
     } catch {
       setActionError('Network error while running live Direct-ATS sweep.');
@@ -234,13 +268,10 @@ export default function TrackerPage() {
 
   const updateStatus = useCallback(async (rowId: number, newStatus: string) => {
     setActionError(null);
-    let targetId: string | undefined;
-    let snapshot: JobRow[] = [];
-    setJobs((prev) => {
-      snapshot = prev;
-      targetId = prev.find((j) => j.rowId === rowId)?.id;
-      return prev.map((j) => (j.rowId === rowId ? { ...j, status: newStatus } : j));
-    });
+    const snapshot = jobsRef.current;
+    const targetJob = snapshot.find((j) => j.rowId === rowId);
+    const targetId = targetJob?.id;
+    setJobs((prev) => prev.map((j) => (j.rowId === rowId ? { ...j, status: newStatus } : j)));
     try {
       const res = await fetch('/api/sheet-sync', {
         method: 'POST',
@@ -287,10 +318,12 @@ export default function TrackerPage() {
     }
   };
 
-  const copyText = (text: string, key: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(key);
-    setTimeout(() => setCopiedId(null), 1800);
+  const copyText = async (text: string, key: string) => {
+    const ok = await copyToClipboardSafe(text);
+    if (ok) {
+      setCopiedId(key);
+      setTimeout(() => setCopiedId(null), 1800);
+    }
   };
 
   const filteredJobs = useMemo(() => {
@@ -316,10 +349,11 @@ export default function TrackerPage() {
     }
     return [...result].sort((a, b) => {
       if (sortField === 'score') return sortDir === 'asc' ? a.score - b.score : b.score - a.score;
-      if (sortField === 'date')
-        return sortDir === 'asc'
-          ? new Date(a.date).getTime() - new Date(b.date).getTime()
-          : new Date(b.date).getTime() - new Date(a.date).getTime();
+      if (sortField === 'date') {
+        const tsA = parseIsoDateTimestamp(a.date) || 0;
+        const tsB = parseIsoDateTimestamp(b.date) || 0;
+        return sortDir === 'asc' ? tsA - tsB : tsB - tsA;
+      }
       if (sortField === 'company')
         return sortDir === 'asc'
           ? a.company.localeCompare(b.company)
@@ -339,17 +373,16 @@ export default function TrackerPage() {
   ]);
 
   const bulkUpdateStatus = async (newStatus: string) => {
-    const ids = Array.from(selectedRows);
-    const targets = filteredJobs.filter((_, i) => ids.includes(i));
+    const targets = jobs.filter((j) => selectedJobIds.has(j.id));
     if (targets.length === 0) return;
 
     setActionError(null);
-    const targetRowIds = new Set(targets.map((t) => t.rowId));
+    const targetIds = new Set(targets.map((t) => t.id));
     const snapshot = [...jobs];
     setJobs((prev) =>
-      prev.map((j) => (targetRowIds.has(j.rowId) ? { ...j, status: newStatus } : j))
+      prev.map((j) => (targetIds.has(j.id) ? { ...j, status: newStatus } : j))
     );
-    setSelectedRows(new Set());
+    setSelectedJobIds(new Set());
 
     try {
       const res = await fetch('/api/sheet-sync', {
@@ -415,12 +448,14 @@ export default function TrackerPage() {
       pipeline[s] = jobs.filter((j) => j.status === s).length;
     });
 
-    const last30 = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const last30Ms = now.getTime() - 30 * 24 * 60 * 60 * 1000;
     const dailyScores: Record<string, { total: number; count: number }> = {};
     jobs.forEach((job) => {
-      const jobDate = new Date(job.date);
-      if (!Number.isNaN(jobDate.getTime()) && jobDate >= last30) {
-        const isoKey = jobDate.toISOString().split('T')[0];
+      const ts = parseIsoDateTimestamp(job.date);
+      if (Number.isFinite(ts) && ts >= last30Ms) {
+        const isoKey = /^\d{4}-\d{2}-\d{2}$/.test(job.date.trim())
+          ? job.date.trim()
+          : new Date(ts).toISOString().split('T')[0];
         if (!dailyScores[isoKey]) dailyScores[isoKey] = { total: 0, count: 0 };
         dailyScores[isoKey].total += job.score;
         dailyScores[isoKey].count += 1;
@@ -522,12 +557,32 @@ export default function TrackerPage() {
     };
   }, [jobs, slaThresholdDays]);
 
+  const toggleSelectByIndex = useCallback(
+    (index: number) => {
+      const target = filteredJobs[index];
+      if (!target) return;
+      setSelectedJobIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(target.id)) next.delete(target.id);
+        else next.add(target.id);
+        return next;
+      });
+    },
+    [filteredJobs]
+  );
+
+  useEffect(() => {
+    if (focusedRow >= filteredJobs.length && filteredJobs.length > 0) {
+      setFocusedRow(filteredJobs.length - 1);
+    }
+  }, [filteredJobs.length, focusedRow]);
+
   useKeyboardNav({
     totalRows: filteredJobs.length,
     focusedRow,
     setFocusedRow,
-    selectedRows,
-    setSelectedRows,
+    onToggleSelect: toggleSelectByIndex,
+    onClearSelection: () => setSelectedJobIds(new Set()),
     expandedRow,
     setExpandedRow,
     onCycleStatus: cycleStatus,
@@ -550,9 +605,15 @@ export default function TrackerPage() {
     );
   };
 
+  const allFilteredSelected =
+    filteredJobs.length > 0 && filteredJobs.every((j) => selectedJobIds.has(j.id));
+
   const selectAll = () => {
-    if (selectedRows.size === filteredJobs.length) setSelectedRows(new Set());
-    else setSelectedRows(new Set(filteredJobs.map((_, i) => i)));
+    if (allFilteredSelected) {
+      setSelectedJobIds(new Set());
+    } else {
+      setSelectedJobIds(new Set(filteredJobs.map((j) => j.id)));
+    }
   };
 
   return (
@@ -572,7 +633,13 @@ export default function TrackerPage() {
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
               Storage:{' '}
               <span className="font-mono text-slate-700 dark:text-slate-300">
-                {storageMode === 'cloud-sheets' ? 'Google Sheets v4 Sync' : 'Hybrid Local Store'}
+                {storageMode === 'cloud-sheets'
+                  ? 'Google Sheets v4 Sync'
+                  : storageMode === 'ephemeral-tmp'
+                  ? 'Ephemeral /tmp Store (Read-Only Host)'
+                  : storageMode === 'read-only'
+                  ? 'Read-Only Container'
+                  : 'Hybrid Local Store'}
               </span>{' '}
               · Click <span className="font-mono text-emerald-600 dark:text-emerald-400">Audit</span>{' '}
               on any row to inspect exact subscores
@@ -623,16 +690,49 @@ export default function TrackerPage() {
         </div>
 
         {scoutBanner && (
-          <div className="bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-700/60 text-emerald-800 dark:text-emerald-300 px-4 py-2.5 rounded-md text-xs font-mono flex items-center justify-between gap-3">
-            <span>{scoutBanner}</span>
-            <button
-              type="button"
-              onClick={() => setScoutBanner(null)}
-              aria-label="Dismiss notice"
-              className="text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white cursor-pointer"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
+          <div className="bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-700/60 text-emerald-800 dark:text-emerald-300 px-4 py-3 rounded-md text-xs space-y-2">
+            <div className="flex items-center justify-between gap-3 font-mono">
+              <span>{scoutBanner.message}</span>
+              <button
+                type="button"
+                onClick={() => setScoutBanner(null)}
+                aria-label="Dismiss notice"
+                className="text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white cursor-pointer shrink-0"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            {scoutBanner.committedJobs && scoutBanner.committedJobs.length > 0 && (
+              <div className="flex flex-wrap gap-2 pt-1.5 border-t border-emerald-200/70 dark:border-emerald-800/50">
+                {scoutBanner.committedJobs.map((cj, idx) => {
+                  const href = safeExternalUrl(cj.url);
+                  const host = extractExternalHost(cj.url);
+                  return (
+                    <div
+                      key={`${cj.company}-${cj.title}-${idx}`}
+                      className="inline-flex items-center gap-2 bg-white dark:bg-[#0B0F17] border border-emerald-200 dark:border-emerald-800/60 rounded px-2.5 py-1 text-[11px]"
+                    >
+                      <span className="font-medium text-slate-900 dark:text-white">
+                        {cj.title} @ {cj.company}
+                      </span>
+                      <span className="font-mono text-emerald-600 dark:text-emerald-400 tabular-nums">
+                        {cj.score}/100
+                      </span>
+                      {href !== '#' && (
+                        <a
+                          href={href}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="font-mono text-blue-600 dark:text-blue-400 hover:underline inline-flex items-center gap-0.5"
+                        >
+                          Apply ({host || 'Direct'}) <ArrowUpRight className="h-3 w-3" />
+                        </a>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
@@ -986,7 +1086,7 @@ export default function TrackerPage() {
             </div>
 
             <AnimatePresence>
-              {selectedRows.size > 0 && (
+              {selectedJobIds.size > 0 && (
                 <motion.div
                   initial={{ height: 0, opacity: 0 }}
                   animate={{ height: 'auto', opacity: 1 }}
@@ -994,7 +1094,7 @@ export default function TrackerPage() {
                   className="border-b border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-900 px-4 py-2.5 flex items-center gap-3 overflow-hidden"
                 >
                   <span className="text-xs text-emerald-600 dark:text-emerald-400 font-mono tabular-nums">
-                    {selectedRows.size} selected
+                    {selectedJobIds.size} selected
                   </span>
                   <div className="flex gap-1.5 flex-wrap">
                     {['SHORTLISTED', 'APPLIED', 'REPLIED', 'INTERVIEW', 'REJECTED', 'IGNORED'].map(
@@ -1016,7 +1116,7 @@ export default function TrackerPage() {
                     type="button"
                     variant="ghost"
                     size="sm"
-                    onClick={() => setSelectedRows(new Set())}
+                    onClick={() => setSelectedJobIds(new Set())}
                     className="text-xs text-slate-500 dark:text-slate-400 ml-auto h-7"
                   >
                     Clear Selection
@@ -1033,9 +1133,7 @@ export default function TrackerPage() {
                       <input
                         type="checkbox"
                         aria-label="Select all rows"
-                        checked={
-                          selectedRows.size === filteredJobs.length && filteredJobs.length > 0
-                        }
+                        checked={allFilteredSelected}
                         onChange={selectAll}
                         className="accent-emerald-500 rounded"
                       />
@@ -1119,12 +1217,12 @@ export default function TrackerPage() {
                     filteredJobs.map((job, idx) => {
                       const prediction = predictReplyLikelihood(job);
                       const stale = isStale(job, slaThresholdDays);
-                      const isSelected = selectedRows.has(idx);
+                      const isSelected = selectedJobIds.has(job.id);
                       const isFocused = focusedRow === idx;
                       const isExpanded = expandedRow === idx;
 
                       return (
-                        <React.Fragment key={job.rowId}>
+                        <React.Fragment key={job.id || job.rowId}>
                           <TableRow
                             className={`cursor-pointer transition-colors border-b border-slate-200/70 dark:border-slate-800/70 ${
                               isFocused ? 'bg-slate-100 dark:bg-slate-800/60' : ''
@@ -1139,10 +1237,12 @@ export default function TrackerPage() {
                                 aria-label={`Select ${job.title} at ${job.company}`}
                                 checked={isSelected}
                                 onChange={() => {
-                                  const next = new Set(selectedRows);
-                                  if (next.has(idx)) next.delete(idx);
-                                  else next.add(idx);
-                                  setSelectedRows(next);
+                                  setSelectedJobIds((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(job.id)) next.delete(job.id);
+                                    else next.add(job.id);
+                                    return next;
+                                  });
                                 }}
                                 className="accent-emerald-500 rounded"
                               />

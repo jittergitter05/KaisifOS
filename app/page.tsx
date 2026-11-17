@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import FadeIn from '@/components/FadeIn';
 import { getPublicStats } from '@/lib/sheets';
-import { getCandidateProfile, DEFAULT_ATS_COMPANIES } from '@/lib/profile';
+import { getCandidateProfileAsync, DEFAULT_ATS_COMPANIES } from '@/lib/profile';
 import { siteConfig } from '@/config/site';
 import InteractiveEvaluator from '@/components/InteractiveEvaluator';
 import InstanceSwitcher from '@/components/InstanceSwitcher';
@@ -15,11 +15,18 @@ export const revalidate = 0;
 export default async function Home() {
   const [stats, profile] = await Promise.all([
     getPublicStats(),
-    Promise.resolve(getCandidateProfile()),
+    getCandidateProfileAsync(),
   ]);
 
   const brandName = profile.system_name || siteConfig.name;
   const atsCompanies = profile.ats_companies || DEFAULT_ATS_COMPANIES;
+  const careerHosts = (profile.career_urls || []).map((u) => {
+    try {
+      return new URL(u).hostname.replace(/^www\./, '');
+    } catch {
+      return u;
+    }
+  });
 
   return (
     <div className="flex flex-col flex-1 w-full bg-slate-50 dark:bg-[#0B0F17] text-slate-900 dark:text-[#F8FAFC] font-sans">
@@ -150,7 +157,13 @@ export default async function Home() {
 
                 <div className="pt-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400 font-mono">
                   <span>
-                    {stats.storage_mode === 'cloud-sheets' ? 'Google Sheets v4' : 'Local Ledger'}
+                    {stats.persistence_mode === 'cloud-sheets'
+                      ? 'Google Sheets v4'
+                      : stats.persistence_mode === 'ephemeral-tmp'
+                      ? 'Ephemeral /tmp Store'
+                      : stats.persistence_mode === 'read-only'
+                      ? 'Read-Only Container'
+                      : 'Local Ledger'}
                   </span>
                   <span>4-Tier Free LLM Chain</span>
                 </div>
@@ -229,7 +242,7 @@ export default async function Home() {
         <section id="coverage" className="space-y-4 scroll-mt-24">
           <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-2 border-b border-slate-200 dark:border-slate-800 pb-3">
             <h2 className="text-lg font-display font-semibold text-slate-900 dark:text-white">
-              03. Proof Ledger &amp; Direct-ATS Sources
+              03. Proof Ledger &amp; Direct Career Sources
             </h2>
             <Link
               href="/admin/profile"
@@ -276,26 +289,40 @@ export default async function Home() {
                     Active Ingestion Channels
                   </span>
                   <span className="font-mono text-emerald-600 dark:text-emerald-400">
-                    Direct-ATS JSON
+                    Career Pages · 6 ATS
                   </span>
                 </div>
                 <div className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
                   <div className="px-5 py-3 flex items-baseline justify-between gap-4">
-                    <span className="text-slate-500 dark:text-slate-400 shrink-0">Greenhouse</span>
+                    <span className="text-slate-500 dark:text-slate-400 shrink-0">
+                      Career Pages
+                    </span>
                     <span className="text-slate-800 dark:text-slate-200 font-mono text-right truncate">
-                      {(atsCompanies.greenhouse || []).join(' · ')}
+                      {careerHosts.length > 0 ? careerHosts.join(' · ') : 'Configure in Profile'}
                     </span>
                   </div>
                   <div className="px-5 py-3 flex items-baseline justify-between gap-4">
-                    <span className="text-slate-500 dark:text-slate-400 shrink-0">Lever</span>
+                    <span className="text-slate-500 dark:text-slate-400 shrink-0">
+                      GH · Lever · Ashby
+                    </span>
                     <span className="text-slate-800 dark:text-slate-200 font-mono text-right truncate">
-                      {(atsCompanies.lever || []).join(' · ')}
+                      {[
+                        ...(atsCompanies.greenhouse || []),
+                        ...(atsCompanies.lever || []),
+                        ...(atsCompanies.ashby || []),
+                      ].join(' · ')}
                     </span>
                   </div>
                   <div className="px-5 py-3 flex items-baseline justify-between gap-4">
-                    <span className="text-slate-500 dark:text-slate-400 shrink-0">Ashby</span>
+                    <span className="text-slate-500 dark:text-slate-400 shrink-0">
+                      Workable · SR · Recruitee
+                    </span>
                     <span className="text-slate-800 dark:text-slate-200 font-mono text-right truncate">
-                      {(atsCompanies.ashby || []).join(' · ')}
+                      {[
+                        ...(atsCompanies.workable || []),
+                        ...(atsCompanies.smartrecruiters || []),
+                        ...(atsCompanies.recruitee || []),
+                      ].join(' · ') || 'Configure in Profile'}
                     </span>
                   </div>
                   <div className="px-5 py-3 flex items-baseline justify-between gap-4">

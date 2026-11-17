@@ -3,10 +3,10 @@ const nextConfig = {
   distDir: process.env.NEXT_DIST_DIR || '.next',
   reactStrictMode: true,
   eslint: {
-    ignoreDuringBuilds: true,
+    ignoreDuringBuilds: false,
   },
   typescript: {
-    ignoreBuildErrors: true,
+    ignoreBuildErrors: false,
   },
   experimental: {
     serverComponentsExternalPackages: ['googleapis', '@google/genai', 'groq-sdk'],

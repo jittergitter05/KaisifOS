@@ -32,6 +32,10 @@ interface SystemAuditResponse {
   authConfigured?: boolean;
   freehireBridgeConfigured?: boolean;
   storageMode: 'cloud-sheets' | 'local-store';
+  persistenceMode?: 'cloud-sheets' | 'local-disk' | 'ephemeral-tmp' | 'read-only';
+  ephemeralFallback?: boolean;
+  resolvedDataDir?: string;
+  cloudError?: string;
   aiEngine: string;
   envChecks: EnvCheck[];
   failoverChains?: FailoverChain[];
@@ -74,7 +78,7 @@ export default function SettingsPage() {
             </h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
               Server-side check for all 12 environment variables, 4-tier failover chains,
-              Direct-ATS feeds, and optional FreeHire bridge.
+              Direct-ATS feeds, and runtime storage health.
             </p>
           </div>
           <div className="flex items-center gap-2.5 shrink-0">
@@ -124,15 +128,51 @@ export default function SettingsPage() {
           </div>
         )}
 
+        {audit &&
+          (audit.ephemeralFallback ||
+            audit.persistenceMode === 'ephemeral-tmp' ||
+            audit.persistenceMode === 'read-only' ||
+            audit.cloudError) && (
+            <div className="bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-700/60 text-amber-800 dark:text-amber-200 px-4 py-3 rounded-lg text-xs space-y-1">
+              <div className="font-semibold text-amber-900 dark:text-amber-300 flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                <span>
+                  {audit.persistenceMode === 'read-only'
+                    ? 'Read-Only Container Filesystem Detected'
+                    : audit.ephemeralFallback
+                    ? 'Ephemeral /tmp Runtime Storage Active'
+                    : 'Google Sheets Sync Fallback Warning'}
+                </span>
+              </div>
+              <p className="leading-relaxed">
+                {audit.cloudError
+                  ? `Cloud Sheets error: ${audit.cloudError}. `
+                  : ''}
+                {audit.ephemeralFallback
+                  ? `Container data/ is read-only; writes are automatically routed to ${audit.resolvedDataDir || '/tmp/kaisifos-data'} (session-scoped, resets on container cold restart). Configure GOOGLE_SHEET_ID and GOOGLE_SERVICE_KEY_BASE64 for permanent cloud persistence across deployments.`
+                  : 'Configure GOOGLE_SHEET_ID and GOOGLE_SERVICE_KEY_BASE64 for permanent cloud persistence.'}
+              </p>
+            </div>
+          )}
+
         {audit && (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-5">
               <div className="text-xs text-slate-500 dark:text-slate-400">Persistence Layer</div>
               <div className="text-sm font-display font-semibold text-slate-900 dark:text-white mt-1">
-                {audit.storageMode === 'cloud-sheets'
+                {audit.persistenceMode === 'cloud-sheets' || audit.storageMode === 'cloud-sheets'
                   ? 'Google Sheets v4 Sync'
+                  : audit.persistenceMode === 'ephemeral-tmp'
+                  ? 'Ephemeral /tmp Store (Read-Only Host)'
+                  : audit.persistenceMode === 'read-only'
+                  ? 'Read-Only Filesystem'
                   : 'Local Store (jobs-store.json)'}
               </div>
+              {audit.resolvedDataDir && (
+                <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400 mt-1 truncate">
+                  Dir: {audit.resolvedDataDir}
+                </div>
+              )}
             </div>
 
             <div className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-5">

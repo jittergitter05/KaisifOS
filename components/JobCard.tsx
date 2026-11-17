@@ -3,8 +3,13 @@ import React, { useState } from 'react';
 import MetricBar from './MetricBar';
 import StatusBadge, { ALL_STATUSES } from './StatusBadge';
 import { Button } from './ui/button';
-import { Copy, Check, ArrowUpRight, BookOpen, RefreshCw } from 'lucide-react';
-import { deriveJobPillarBreakdown, safeExternalUrl } from '@/lib/utils';
+import { Copy, Check, ArrowUpRight, BookOpen, RefreshCw, Link2 } from 'lucide-react';
+import {
+  deriveJobPillarBreakdown,
+  safeExternalUrl,
+  extractExternalHost,
+  copyToClipboardSafe,
+} from '@/lib/utils';
 
 export interface JobData {
   rowId?: number;
@@ -35,17 +40,19 @@ export default function JobCard({
   job: JobData;
   onStatusChange?: (rowId: number, newStatus: string) => void;
 }) {
-  const [copiedField, setCopiedField] = useState<'dm' | 'angle' | null>(null);
+  const [copiedField, setCopiedField] = useState<'dm' | 'angle' | 'url' | null>(null);
   const [showPrep, setShowPrep] = useState(false);
   const [loadingPrep, setLoadingPrep] = useState(false);
   const [prepData, setPrepData] = useState<PrepData | null>(null);
   const [prepError, setPrepError] = useState<string | null>(null);
 
-  const copyText = (text: string, field: 'dm' | 'angle') => {
+  const copyText = async (text: string, field: 'dm' | 'angle' | 'url') => {
     if (!text) return;
-    navigator.clipboard.writeText(text);
-    setCopiedField(field);
-    setTimeout(() => setCopiedField(null), 1800);
+    const ok = await copyToClipboardSafe(text);
+    if (ok) {
+      setCopiedField(field);
+      setTimeout(() => setCopiedField(null), 1800);
+    }
   };
 
   const handleLoadPrep = async () => {
@@ -86,6 +93,8 @@ export default function JobCard({
     .filter(Boolean);
 
   const pillars = deriveJobPillarBreakdown({ score: job.Score, reasons: job.Reasons });
+  const externalUrl = safeExternalUrl(job.URL);
+  const applyHost = extractExternalHost(job.URL);
 
   return (
     <div className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800/90 rounded-xl p-6 transition-colors hover:border-slate-300 dark:hover:border-slate-700">
@@ -281,16 +290,47 @@ export default function JobCard({
             {showPrep ? 'Hide Interview & Resume Prep' : 'Interview & STAR Bullet Prep'}
           </button>
         </div>
-        <Button
-          asChild
-          variant="outline"
-          size="sm"
-          className="text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-500 border-0 whitespace-nowrap shrink-0"
-        >
-          <a href={safeExternalUrl(job.URL)} target="_blank" rel="noreferrer">
-            Open Application <ArrowUpRight className="ml-1.5 h-3.5 w-3.5" />
-          </a>
-        </Button>
+        <div className="flex items-center gap-2">
+          {externalUrl !== '#' && (
+            <button
+              type="button"
+              onClick={() => copyText(externalUrl, 'url')}
+              className="px-2.5 py-1.5 rounded text-xs font-medium bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {copiedField === 'url' ? (
+                <>
+                  <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" /> Copied URL
+                </>
+              ) : (
+                <>
+                  <Link2 className="h-3.5 w-3.5" /> Copy Link
+                </>
+              )}
+            </button>
+          )}
+          {externalUrl !== '#' ? (
+            <Button
+              asChild
+              variant="outline"
+              size="sm"
+              className="text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-500 border-0 whitespace-nowrap shrink-0"
+            >
+              <a href={externalUrl} target="_blank" rel="noreferrer">
+                Apply on {applyHost || 'Company Site'} <ArrowUpRight className="ml-1.5 h-3.5 w-3.5" />
+              </a>
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              disabled
+              variant="outline"
+              size="sm"
+              className="text-xs font-medium opacity-60 cursor-not-allowed whitespace-nowrap shrink-0"
+            >
+              No Valid Apply URL
+            </Button>
+          )}
+        </div>
       </div>
     </div>
   );

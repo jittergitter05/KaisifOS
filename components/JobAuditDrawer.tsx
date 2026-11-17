@@ -15,7 +15,12 @@ import {
 import { Button } from './ui/button';
 import StatusBadge from './StatusBadge';
 
-import { deriveJobPillarBreakdown, safeExternalUrl } from '@/lib/utils';
+import {
+  deriveJobPillarBreakdown,
+  safeExternalUrl,
+  extractExternalHost,
+  copyToClipboardSafe,
+} from '@/lib/utils';
 export { deriveJobPillarBreakdown };
 
 export interface AuditableJob {
@@ -83,6 +88,8 @@ export default function JobAuditDrawer({
   if (!localJob) return null;
 
   const pillars = deriveJobPillarBreakdown(localJob);
+  const externalUrl = safeExternalUrl(localJob.url);
+  const applyHost = extractExternalHost(localJob.url);
   const reasonItems = (localJob.reasons || '')
     .split('|')
     .map((r) => r.trim())
@@ -90,10 +97,12 @@ export default function JobAuditDrawer({
 
   const synthesizedEmail = `Subject: ${localJob.title} @ ${localJob.company} — Application & Impact Summary\n\nHi ${localJob.company} Hiring Team,\n\n${localJob.dm}\n\nPositioning focus for this role: ${localJob.resumeAngle || 'Direct domain & metric alignment'}\n\nApplication reference: ${localJob.url}`;
 
-  const copyText = (text: string, key: 'dm' | 'angle' | 'email' | 'nudge') => {
-    navigator.clipboard.writeText(text);
-    setCopiedField(key);
-    setTimeout(() => setCopiedField(null), 1800);
+  const copyText = async (text: string, key: 'dm' | 'angle' | 'email' | 'nudge') => {
+    const ok = await copyToClipboardSafe(text);
+    if (ok) {
+      setCopiedField(key);
+      setTimeout(() => setCopiedField(null), 1800);
+    }
   };
 
   const handleLiveRescore = async () => {
@@ -223,6 +232,16 @@ export default function JobAuditDrawer({
               <div className="text-sm text-slate-600 dark:text-slate-300 mt-0.5">
                 {localJob.company}
               </div>
+              {externalUrl !== '#' && (
+                <a
+                  href={externalUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-xs font-mono text-emerald-600 dark:text-emerald-400 hover:underline mt-1 break-all"
+                >
+                  {externalUrl} <ArrowUpRight className="h-3 w-3 shrink-0" />
+                </a>
+              )}
             </div>
             <button
               type="button"
@@ -263,15 +282,27 @@ export default function JobAuditDrawer({
               </div>
               <div className="flex items-center gap-2.5 flex-wrap justify-end">
                 <StatusBadge status={localJob.status} />
-                <Button
-                  asChild
-                  size="sm"
-                  className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs h-8 px-3 whitespace-nowrap shrink-0"
-                >
-                  <a href={safeExternalUrl(localJob.url)} target="_blank" rel="noreferrer">
-                    Apply <ArrowUpRight className="h-3.5 w-3.5 ml-1" />
-                  </a>
-                </Button>
+                {externalUrl !== '#' ? (
+                  <Button
+                    asChild
+                    size="sm"
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs h-8 px-3 whitespace-nowrap shrink-0"
+                  >
+                    <a href={externalUrl} target="_blank" rel="noreferrer">
+                      Apply ({applyHost || 'Direct'}) <ArrowUpRight className="h-3.5 w-3.5 ml-1" />
+                    </a>
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    disabled
+                    size="sm"
+                    variant="outline"
+                    className="text-xs h-8 px-3 opacity-60 cursor-not-allowed whitespace-nowrap shrink-0"
+                  >
+                    No Apply URL
+                  </Button>
+                )}
               </div>
             </div>
 

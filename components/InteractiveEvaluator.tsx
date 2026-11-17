@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { Play, Copy, Check, Plus, RefreshCw, BookOpen, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { copyToClipboardSafe } from '@/lib/utils';
 
 interface EvaluationResult {
   score: number;
@@ -371,10 +372,12 @@ export default function InteractiveEvaluator({
     }
   };
 
-  const handleCopy = (text: string, type: 'dm' | 'email' | 'prep') => {
-    navigator.clipboard.writeText(text);
-    setCopiedTab(type);
-    setTimeout(() => setCopiedTab(null), 1800);
+  const handleCopy = async (text: string, type: 'dm' | 'email' | 'prep') => {
+    const ok = await copyToClipboardSafe(text);
+    if (ok) {
+      setCopiedTab(type);
+      setTimeout(() => setCopiedTab(null), 1800);
+    }
   };
 
   return (

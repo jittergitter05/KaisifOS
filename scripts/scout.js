@@ -300,6 +300,9 @@ export function scoreJobDeterministic(job, profile) {
     /\b(remote|worldwide|bengaluru|bangalore|hyderabad|dubai|singapore|london|global)\b/i.test(locLower);
   const forbidsVisa = /no visa|no sponsorship|without sponsorship|us citizens only/i.test(fullText);
 
+  const nonCompContextRegex =
+    /\b(funding|raised|seed\s+round|series\s+[a-f]|valuation|revenue|arr|mrr|pricing|plan|subscription|tier|customers|users|downloads|volume|market\s+cap|backed\s+by)\b/i;
+
   let compGeoScore = forbidsVisa && !isTargetLoc ? 5 : isTargetLoc ? 14 : profile.open_to_relocation ? 12 : 7;
   if (job.salary_min && Number(job.salary_min) > 0) {
     const minUsd = profile.min_salary_usd_annual || 30000;
@@ -307,32 +310,57 @@ export function scoreJobDeterministic(job, profile) {
     compGeoScore = Math.min(15, Math.max(2, annual >= minUsd ? compGeoScore + 1 : compGeoScore - 4));
   } else {
     const lpaDesc = fullText.match(/(\d+(?:\.\d+)?)\s*(?:[-–to]+\s*(\d+(?:\.\d+)?))?\s*lpa\b/i);
-    const inrDesc = fullText.match(/(?:₹|inr\s*|rs\.?\s*)(\d+(?:,\d{2,3})*(?:\.\d+)?)\s*(k|lakh|lakhs)?\s*(\/\s*(?:mo|month|mth)|per\s+month)?/i);
-    const fxDesc = fullText.match(/(?:(\$|usd\s*)|(€|eur\s*)|(£|gbp\s*))(\d+(?:,\d{3})*(?:\.\d+)?)\s*(k)?\s*(\/\s*(?:hr|hour|mo|month)|per\s+(?:hour|month))?/i);
     if (lpaDesc) {
       const low = parseFloat(lpaDesc[1]);
       const high = lpaDesc[2] ? parseFloat(lpaDesc[2]) : low;
       const lpa = (low + high) / 2;
       compGeoScore = Math.min(15, Math.max(2, lpa >= (profile.min_salary_lpa || 8) ? compGeoScore + 1 : compGeoScore - 4));
-    } else if (inrDesc) {
-      let val = parseFloat(inrDesc[1].replace(/,/g, ''));
-      if (inrDesc[2]?.toLowerCase() === 'k') val *= 1000;
-      else if (inrDesc[2]?.toLowerCase().startsWith('lakh')) val *= 100000;
-      const annualInr = inrDesc[3] ? val * 12 : val;
-      const lpa = annualInr >= 100000 ? annualInr / 100000 : inrDesc[3] ? (val * 12) / 100000 : val;
-      if (lpa >= 1 && lpa <= 200) {
-        compGeoScore = Math.min(15, Math.max(2, lpa >= (profile.min_salary_lpa || 8) ? compGeoScore + 1 : compGeoScore - 4));
+    } else {
+      let appliedSalarySignal = false;
+      for (const inrDesc of fullText.matchAll(
+        /(?:₹|inr\s*|rs\.?\s*)(\d+(?:,\d{2,3})*(?:\.\d+)?)\s*(k|lakh|lakhs|cr|crore|m|million)?\s*(\/\s*(?:mo|month|mth)|per\s+month)?/gi
+      )) {
+        const unit = (inrDesc[2] || '').toLowerCase();
+        if (unit === 'cr' || unit === 'crore' || unit === 'm' || unit === 'million') continue;
+        const idx = inrDesc.index ?? 0;
+        const snippet = fullText.slice(Math.max(0, idx - 42), Math.min(fullText.length, idx + inrDesc[0].length + 42));
+        if (nonCompContextRegex.test(snippet)) continue;
+
+        let val = parseFloat(inrDesc[1].replace(/,/g, ''));
+        if (unit === 'k') val *= 1000;
+        else if (unit.startsWith('lakh')) val *= 100000;
+        const annualInr = inrDesc[3] ? val * 12 : val;
+        const lpa = annualInr >= 100000 ? annualInr / 100000 : inrDesc[3] ? (val * 12) / 100000 : val;
+        if (lpa >= 1 && lpa <= 200) {
+          compGeoScore = Math.min(15, Math.max(2, lpa >= (profile.min_salary_lpa || 8) ? compGeoScore + 1 : compGeoScore - 4));
+          appliedSalarySignal = true;
+          break;
+        }
       }
-    } else if (fxDesc) {
-      const fx = fxDesc[3] ? 1.26 : fxDesc[2] ? 1.08 : 1;
-      const n = parseFloat(fxDesc[4].replace(/,/g, ''));
-      const cadence = (fxDesc[6] || '').toLowerCase();
-      const annualUsd = /hr|hour/.test(cadence)
-        ? n * (fxDesc[5] ? 1000 : 1) * 2080 * fx
-        : /mo|month/.test(cadence)
-        ? (fxDesc[5] || n < 100 ? n * 1000 : n) * 12 * fx
-        : (fxDesc[5] || n < 500 ? n * 1000 : n) * fx;
-      compGeoScore = Math.min(15, Math.max(2, annualUsd >= (profile.min_salary_usd_annual || 30000) ? compGeoScore + 1 : compGeoScore - 4));
+
+      if (!appliedSalarySignal) {
+        for (const fxDesc of fullText.matchAll(
+          /(?:(\$|usd\s*)|(€|eur\s*)|(£|gbp\s*))(\d+(?:,\d{3})*(?:\.\d+)?)\s*(k|m|b|million|billion)?\s*(\/\s*(?:hr|hour|mo|month)|per\s+(?:hour|month))?/gi
+        )) {
+          const mag = (fxDesc[5] || '').toLowerCase();
+          if (mag === 'm' || mag === 'b' || mag === 'million' || mag === 'billion') continue;
+          const idx = fxDesc.index ?? 0;
+          const snippet = fullText.slice(Math.max(0, idx - 42), Math.min(fullText.length, idx + fxDesc[0].length + 42));
+          if (nonCompContextRegex.test(snippet)) continue;
+
+          const fx = fxDesc[3] ? 1.26 : fxDesc[2] ? 1.08 : 1;
+          const n = parseFloat(fxDesc[4].replace(/,/g, ''));
+          const hasK = mag === 'k';
+          const cadence = (fxDesc[6] || '').toLowerCase();
+          const annualUsd = /hr|hour/.test(cadence)
+            ? n * (hasK ? 1000 : 1) * 2080 * fx
+            : /mo|month/.test(cadence)
+            ? (hasK || n < 100 ? n * 1000 : n) * 12 * fx
+            : (hasK || n < 500 ? n * 1000 : n) * fx;
+          compGeoScore = Math.min(15, Math.max(2, annualUsd >= (profile.min_salary_usd_annual || 30000) ? compGeoScore + 1 : compGeoScore - 4));
+          break;
+        }
+      }
     }
   }
 
@@ -373,15 +401,83 @@ export function scoreJobDeterministic(job, profile) {
 
 // ─── AUTH & GOOGLE SHEETS OPS (100% PROTOCOL PRESERVED) ──────────────────────
 
+function decodeServiceAccountFromEnv() {
+  const raw = (process.env.GOOGLE_SERVICE_KEY_BASE64 || '').trim();
+  if (!raw) throw new Error('Missing GOOGLE_SERVICE_KEY_BASE64');
+  const jsonText = raw.startsWith('{')
+    ? raw
+    : Buffer.from(raw.replace(/\s+/g, ''), 'base64').toString('utf8').trim();
+  const credentials = JSON.parse(jsonText);
+  if (!credentials.client_email || !credentials.private_key) {
+    throw new Error('Google Service Account JSON is missing client_email or private_key.');
+  }
+  credentials.private_key = String(credentials.private_key).replace(/\\n/g, '\n');
+  return credentials;
+}
+
 async function getAuth() {
-  if (!process.env.GOOGLE_SERVICE_KEY_BASE64) throw new Error('Missing GOOGLE_SERVICE_KEY_BASE64');
-  const credentials = JSON.parse(
-    Buffer.from(process.env.GOOGLE_SERVICE_KEY_BASE64, 'base64').toString('utf8')
-  );
+  const credentials = decodeServiceAccountFromEnv();
   return new google.auth.GoogleAuth({
     credentials,
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   });
+}
+
+async function ensureSheetsReady(sheets, auth) {
+  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+  if (!spreadsheetId) return;
+  try {
+    const meta = await sheets.spreadsheets.get({
+      auth,
+      spreadsheetId,
+      fields: 'sheets.properties.title',
+    });
+    const existing = new Set((meta.data.sheets || []).map((s) => s.properties?.title).filter(Boolean));
+    const missing = ['Sheet1', 'SeenJobs', 'Profile'].filter((t) => !existing.has(t));
+    if (missing.length > 0) {
+      await sheets.spreadsheets.batchUpdate({
+        auth,
+        spreadsheetId,
+        requestBody: {
+          requests: missing.map((title) => ({ addSheet: { properties: { title } } })),
+        },
+      });
+    }
+    const hdr = await sheets.spreadsheets.values.get({ auth, spreadsheetId, range: 'Sheet1!A1:K1' });
+    if (!hdr.data.values?.[0]?.length) {
+      await sheets.spreadsheets.values.update({
+        auth,
+        spreadsheetId,
+        range: 'Sheet1!A1:K1',
+        valueInputOption: 'RAW',
+        requestBody: {
+          values: [['Date', 'ID', 'Title', 'Company', 'Score', 'Reasons', 'Gap', 'URL', 'DM', 'ResumeAngle', 'Status']],
+        },
+      });
+    }
+  } catch (err) {
+    console.warn('[Sheets] Structure bootstrap warning:', err.message);
+  }
+}
+
+async function loadProfileForCli(sheets, auth, fallbackPath) {
+  if (process.env.GOOGLE_SHEET_ID && auth) {
+    try {
+      const res = await sheets.spreadsheets.values.get({
+        auth,
+        spreadsheetId: process.env.GOOGLE_SHEET_ID,
+        range: 'Profile!A1',
+      });
+      const raw = res.data.values?.[0]?.[0];
+      if (typeof raw === 'string' && raw.trim().startsWith('{')) {
+        console.log('[Scout] Loaded active candidate profile from Google Sheets Profile!A1.');
+        return JSON.parse(raw);
+      }
+    } catch {
+      // Fall back safely to local data/profile.json
+    }
+  }
+  return JSON.parse(fs.readFileSync(fallbackPath, 'utf8'));
 }
 
 async function getExistingJobIds(sheets, auth) {
@@ -393,7 +489,7 @@ async function getExistingJobIds(sheets, auth) {
     });
     const rows = response.data.values;
     if (!rows || rows.length === 0) return new Set();
-    return new Set(rows.map((row) => String(row[0])));
+    return new Set(rows.map((row) => String(row[0]).trim()).filter(Boolean));
   } catch (error) {
     console.error('[Sheets] Error fetching existing IDs:', error.message);
     throw new Error(`Failed to fetch existing job IDs: ${error.message}`);
@@ -409,7 +505,7 @@ async function getSeenJobIds(sheets, auth) {
     });
     const rows = response.data.values;
     if (!rows || rows.length === 0) return new Set();
-    return new Set(rows.map((row) => String(row[0])));
+    return new Set(rows.map((row) => String(row[0]).trim()).filter(Boolean));
   } catch (error) {
     if (error?.code === 400 || error?.message?.includes('Unable to parse range')) {
       console.warn('[Sheets] SeenJobs tab not found — starting fresh.');
@@ -422,15 +518,19 @@ async function getSeenJobIds(sheets, auth) {
 
 async function appendSeenJobIds(sheets, auth, ids) {
   if (!ids || ids.length === 0) return;
-  const rows = ids.map((id) => [String(id)]);
+  const uniqueIds = Array.from(new Set(ids.map((id) => String(id).trim()).filter(Boolean)));
+  const CHUNK_SIZE = 250;
   try {
-    await sheets.spreadsheets.values.append({
-      auth,
-      spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: 'SeenJobs!A:A',
-      valueInputOption: 'USER_ENTERED',
-      requestBody: { values: rows },
-    });
+    for (let i = 0; i < uniqueIds.length; i += CHUNK_SIZE) {
+      const rows = uniqueIds.slice(i, i + CHUNK_SIZE).map((id) => [id]);
+      await sheets.spreadsheets.values.append({
+        auth,
+        spreadsheetId: process.env.GOOGLE_SHEET_ID,
+        range: 'SeenJobs!A:A',
+        valueInputOption: 'RAW',
+        requestBody: { values: rows },
+      });
+    }
   } catch (error) {
     console.error('[Sheets] Error appending seen IDs:', error.message);
     throw new Error(`Failed to append seen job IDs: ${error.message}`);
@@ -670,10 +770,24 @@ export async function fetchFreeHireAtsJobs(profile) {
     ashby: ['linear', 'posthog', 'supabase', 'langchain'],
   };
 
-  // 4A. Optional self-hosted strelov1/freehire endpoint
+  // 4A. Optional self-hosted strelov1/freehire endpoint (SSRF-guarded)
   if (process.env.FREEHIRE_API_URL) {
     try {
-      const res = await fetch(process.env.FREEHIRE_API_URL, {
+      const parsedBridge = new URL(process.env.FREEHIRE_API_URL.trim());
+      const host = parsedBridge.hostname.toLowerCase();
+      const isPrivateHost =
+        host === '169.254.169.254' ||
+        host === 'metadata.google.internal' ||
+        host.startsWith('10.') ||
+        host.startsWith('192.168.') ||
+        /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
+      if (parsedBridge.protocol !== 'https:' && host !== 'localhost' && host !== '127.0.0.1') {
+        throw new Error('FREEHIRE_API_URL must use HTTPS');
+      }
+      if (isPrivateHost) {
+        throw new Error(`Blocked private/metadata FREEHIRE_API_URL host: ${host}`);
+      }
+      const res = await fetch(parsedBridge.toString(), {
         headers: { Accept: 'application/json' },
         signal: AbortSignal.timeout(8000),
       });
@@ -701,8 +815,8 @@ export async function fetchFreeHireAtsJobs(profile) {
     }
   }
 
-  // 4B. Greenhouse Public Boards API
-  const ghBoards = (atsConfig.greenhouse || []).slice(0, 5);
+  // 4B. Greenhouse Public Boards API (up to 12 boards)
+  const ghBoards = (atsConfig.greenhouse || []).slice(0, 12);
   await Promise.allSettled(
     ghBoards.map(async (slug) => {
       try {
@@ -728,8 +842,8 @@ export async function fetchFreeHireAtsJobs(profile) {
     })
   );
 
-  // 4C. Lever Public Postings API
-  const leverBoards = (atsConfig.lever || []).slice(0, 4);
+  // 4C. Lever Public Postings API (up to 12 boards)
+  const leverBoards = (atsConfig.lever || []).slice(0, 12);
   await Promise.allSettled(
     leverBoards.map(async (slug) => {
       try {
@@ -756,8 +870,8 @@ export async function fetchFreeHireAtsJobs(profile) {
     })
   );
 
-  // 4D. Ashby Public Job Board API
-  const ashbyBoards = (atsConfig.ashby || []).slice(0, 4);
+  // 4D. Ashby Public Job Board API (up to 12 boards)
+  const ashbyBoards = (atsConfig.ashby || []).slice(0, 12);
   await Promise.allSettled(
     ashbyBoards.map(async (slug) => {
       try {
@@ -783,7 +897,229 @@ export async function fetchFreeHireAtsJobs(profile) {
     })
   );
 
-  // 4E. Arbeitnow Free Public Job Board API (Global & Visa-Sponsored Tech Roles)
+  // 4E. Workable Public Widget API
+  const workableBoards = (atsConfig.workable || []).slice(0, 12);
+  await Promise.allSettled(
+    workableBoards.map(async (slug) => {
+      try {
+        const res = await fetch(
+          `https://apply.workable.com/api/v1/widget/accounts/${encodeURIComponent(slug)}`,
+          { signal: AbortSignal.timeout(7000) }
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        const companyName = data.name || slug.charAt(0).toUpperCase() + slug.slice(1);
+        for (const item of (data.jobs || []).slice(0, 8)) {
+          const loc =
+            [item.city, item.country].filter(Boolean).join(', ') ||
+            (item.telecommuting ? 'Remote' : 'Flexible');
+          const applyUrl =
+            item.url ||
+            item.application_url ||
+            `https://apply.workable.com/${encodeURIComponent(slug)}/j/${item.shortcode || item.id}/`;
+          jobs.push({
+            id: `workable_${slug}_${item.shortcode || item.id}`,
+            title: item.title,
+            company: { display_name: companyName },
+            description: `${item.title} (${item.department || 'General'}) at ${companyName}. ${
+              item.telecommuting ? 'Remote eligible.' : ''
+            }`,
+            redirect_url: applyUrl,
+            location: loc,
+            has_relocation: /relocation|visa|remote/i.test(loc),
+          });
+        }
+      } catch (_) {}
+    })
+  );
+
+  // 4F. SmartRecruiters Public Postings API
+  const srBoards = (atsConfig.smartrecruiters || []).slice(0, 12);
+  await Promise.allSettled(
+    srBoards.map(async (slug) => {
+      try {
+        const res = await fetch(
+          `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(slug)}/postings?limit=10`,
+          { signal: AbortSignal.timeout(7000) }
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        for (const item of (data.content || []).slice(0, 8)) {
+          const companyName = item.company?.name || slug;
+          const loc =
+            [item.location?.city, item.location?.country].filter(Boolean).join(', ') ||
+            (item.location?.remote ? 'Remote' : 'Hybrid');
+          const applyUrl = `https://jobs.smartrecruiters.com/${encodeURIComponent(
+            item.company?.identifier || slug
+          )}/${item.id}`;
+          jobs.push({
+            id: `smartrecruiters_${slug}_${item.id}`,
+            title: item.name,
+            company: { display_name: companyName },
+            description: `${item.name} in ${item.department?.label || 'Product & Tech'} at ${companyName}. Location: ${loc}.`,
+            redirect_url: applyUrl,
+            location: loc,
+            has_relocation: Boolean(item.location?.remote),
+          });
+        }
+      } catch (_) {}
+    })
+  );
+
+  // 4G. Recruitee Public Offers API
+  const recruiteeBoards = (atsConfig.recruitee || []).slice(0, 12);
+  await Promise.allSettled(
+    recruiteeBoards.map(async (slug) => {
+      try {
+        const cleanSlug = String(slug).replace(/[^a-z0-9-]/gi, '').toLowerCase();
+        if (!cleanSlug) return;
+        const res = await fetch(`https://${cleanSlug}.recruitee.com/api/offers`, {
+          signal: AbortSignal.timeout(7000),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        for (const item of (data.offers || []).slice(0, 8)) {
+          const desc = stripHtmlTags(item.description || '').trim();
+          const applyUrl =
+            item.careers_url ||
+            item.careers_apply_url ||
+            `https://${cleanSlug}.recruitee.com/o/${item.slug || item.id}`;
+          jobs.push({
+            id: `recruitee_${cleanSlug}_${item.id}`,
+            title: item.title,
+            company: { display_name: item.company_name || cleanSlug },
+            description: desc.substring(0, 800) || `${item.title} at ${cleanSlug}`,
+            redirect_url: applyUrl,
+            location: item.location || (item.remote ? 'Remote' : 'Hybrid'),
+            has_relocation: /relocation|visa|sponsorship/i.test(desc),
+          });
+        }
+      } catch (_) {}
+    })
+  );
+
+  // 4H. Direct Company Career Pages (SSRF-guarded Schema.org JobPosting JSON-LD + Career Anchors)
+  const careerUrls = (
+    Array.isArray(profile?.career_urls) && profile.career_urls.length > 0
+      ? profile.career_urls
+      : [
+          'https://www.postman.com/company/careers/',
+          'https://razorpay.com/jobs/',
+          'https://linear.app/careers',
+          'https://posthog.com/careers',
+        ]
+  ).slice(0, 10);
+
+  await Promise.allSettled(
+    careerUrls.map(async (rawUrl) => {
+      try {
+        const parsed = new URL(String(rawUrl).trim());
+        const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+        const isPrivate =
+          host === 'localhost' ||
+          host === '127.0.0.1' ||
+          host === '::1' ||
+          host === '169.254.169.254' ||
+          host === 'metadata.google.internal' ||
+          host.startsWith('10.') ||
+          host.startsWith('192.168.') ||
+          /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
+        if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || isPrivate) return;
+
+        const res = await fetch(parsed.toString(), {
+          headers: {
+            'User-Agent': 'KaisifOS-CareerCrawler/1.0 (+https://github.com)',
+            Accept: 'text/html,application/xhtml+xml',
+          },
+          signal: AbortSignal.timeout(7000),
+        });
+        if (!res.ok) return;
+        const html = await res.text();
+        const fallbackCo = host.replace(/^www\./, '').split('.')[0] || 'Company';
+        const companyTitle = fallbackCo.charAt(0).toUpperCase() + fallbackCo.slice(1);
+
+        let foundLd = 0;
+        const ldRegex = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+        for (const m of html.matchAll(ldRegex)) {
+          try {
+            const parsedJson = JSON.parse((m[1] || '').trim());
+            const items = [];
+            const walk = (n) => {
+              if (!n || typeof n !== 'object') return;
+              if (Array.isArray(n)) return n.forEach(walk);
+              if (Array.isArray(n['@graph'])) n['@graph'].forEach(walk);
+              const t = n['@type'];
+              if (t === 'JobPosting' || (Array.isArray(t) && t.includes('JobPosting'))) {
+                items.push(n);
+              }
+            };
+            walk(parsedJson);
+            for (const item of items.slice(0, 12)) {
+              if (!item.title) continue;
+              let applyUrl = parsed.toString();
+              const candidateUrl = item.url || item.sameAs;
+              if (typeof candidateUrl === 'string' && candidateUrl.trim()) {
+                try {
+                  applyUrl = new URL(candidateUrl.trim(), parsed.toString()).toString();
+                } catch (_) {}
+              }
+              const desc = stripHtmlTags(item.description || `${item.title} at ${companyTitle}`).trim();
+              const slug = `${host}_${item.title}_${foundLd}`.replace(/[^a-z0-9]+/gi, '_').slice(0, 48);
+              foundLd++;
+              jobs.push({
+                id: `career_${slug}`,
+                title: String(item.title),
+                company: { display_name: item.hiringOrganization?.name || companyTitle },
+                description: desc.substring(0, 800),
+                redirect_url: applyUrl,
+                location: item.jobLocation?.address?.addressLocality || 'Direct Career Portal',
+                has_relocation: /relocation|visa|sponsorship|remote/i.test(desc),
+              });
+            }
+          } catch (_) {}
+        }
+
+        if (foundLd === 0) {
+          const seenHrefs = new Set();
+          let anchorCount = 0;
+          const anchorRegex = /<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+          for (const m of html.matchAll(anchorRegex)) {
+            const label = stripHtmlTags(m[2] || '').replace(/\s+/g, ' ').trim();
+            if (!label || label.length < 6 || label.length > 100) continue;
+            let absUrl = '';
+            try {
+              absUrl = new URL(m[1].trim(), parsed.toString()).toString();
+            } catch (_) {
+              continue;
+            }
+            if (
+              seenHrefs.has(absUrl) ||
+              !/^https?:\/\//i.test(absUrl) ||
+              !/\/(job|jobs|career|careers|opening|openings|position|positions|role|roles)\/[^/?#]+/i.test(absUrl) ||
+              !/\b(manager|engineer|developer|analyst|designer|associate|lead|intern|specialist|scientist|product|marketing|growth|founder)\b/i.test(label)
+            ) {
+              continue;
+            }
+            seenHrefs.add(absUrl);
+            const slug = `${host}_${label}_${anchorCount}`.replace(/[^a-z0-9]+/gi, '_').slice(0, 48);
+            anchorCount++;
+            jobs.push({
+              id: `career_${slug}`,
+              title: label,
+              company: { display_name: companyTitle },
+              description: `${label} listed on ${companyTitle} official careers portal (${absUrl}).`,
+              redirect_url: absUrl,
+              location: 'Direct Career Portal',
+              has_relocation: false,
+            });
+            if (anchorCount >= 8) break;
+          }
+        }
+      } catch (_) {}
+    })
+  );
+
+  // 4I. Arbeitnow Free Public Job Board API (Global & Visa-Sponsored Tech Roles)
   try {
     const res = await fetch('https://www.arbeitnow.com/api/job-board-api', {
       signal: AbortSignal.timeout(7000),
@@ -809,7 +1145,7 @@ export async function fetchFreeHireAtsJobs(profile) {
     }
   } catch (_) {}
 
-  console.log(`[FreeHire ATS + Arbeitnow] Total: ${jobs.length}`);
+  console.log(`[FreeHire ATS + Career Pages + Arbeitnow] Total: ${jobs.length}`);
   return jobs;
 }
 
@@ -854,65 +1190,156 @@ export async function fetchHimalayasJobs() {
 
 // ─── SOURCE 5: JSEARCH (OPTIONAL RAPIDAPI) ───────────────────────────────────
 
-async function fetchJSearchJobs(profile) {
+export async function fetchJSearchJobs(profile) {
   if (!process.env.RAPIDAPI_KEY) {
     return [];
   }
   const jobs = [];
-  try {
-    const query = `(${(profile.target_roles || []).slice(0, 3).map((r) => `"${r}"`).join(' OR ')}) (fresher OR "entry level" OR junior OR associate)`;
-    const url = new URL('https://jsearch.p.rapidapi.com/search');
-    url.searchParams.append('query', query);
-    url.searchParams.append('num_pages', '1');
-    url.searchParams.append('date_posted', 'week');
-    const res = await fetch(url.toString(), {
-      headers: {
-        'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
-        'X-RapidAPI-Host': 'jsearch.p.rapidapi.com',
-      },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    for (const item of data.data || []) {
-      const desc = (item.job_description || '').toLowerCase();
-      const hasRelocation = /relocation|accommodation|housing|visa\s*sponsor|relo/.test(desc);
-      jobs.push({
-        id: `jsearch_${item.job_id}`,
-        title: item.job_title,
-        company: { display_name: item.employer_name },
-        description: (item.job_description || '').substring(0, 800),
-        redirect_url: item.job_apply_link,
-        salary_min: item.job_min_salary,
-        location: `${item.job_city || ''}, ${item.job_country || ''}`.trim().replace(/^,\s*/, ''),
-        has_relocation: hasRelocation,
+  const roles = (profile?.target_roles || ['Associate Product Manager', 'Growth Analyst']).slice(0, 3);
+  const query = `(${roles.map((r) => `"${r}"`).join(' OR ')}) (fresher OR "entry level" OR junior OR associate)`;
+  const url = new URL('https://jsearch.p.rapidapi.com/search');
+  url.searchParams.append('query', query);
+  url.searchParams.append('num_pages', '1');
+  url.searchParams.append('date_posted', 'week');
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const res = await fetch(url.toString(), {
+        headers: {
+          'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
+          'X-RapidAPI-Host': 'jsearch.p.rapidapi.com',
+        },
+        signal: AbortSignal.timeout(15000),
       });
+      if (!res.ok) {
+        if ((res.status === 429 || res.status >= 500) && attempt < 2) {
+          await delay(900);
+          continue;
+        }
+        console.warn(`[JSearch] HTTP ${res.status}`);
+        break;
+      }
+      const data = await res.json();
+      for (const item of data.data || []) {
+        const cleanDesc = stripHtmlTags(item.job_description || '').trim();
+        const descLower = cleanDesc.toLowerCase();
+        const hasRelocation = /relocation|accommodation|housing|visa\s*sponsor|relo/.test(descLower);
+        jobs.push({
+          id: `jsearch_${item.job_id}`,
+          title: item.job_title,
+          company: { display_name: item.employer_name || 'Unknown' },
+          description: cleanDesc.substring(0, 800),
+          redirect_url: item.job_apply_link || '',
+          salary_min: item.job_min_salary || null,
+          salary_max: item.job_max_salary || null,
+          location: `${item.job_city || ''}, ${item.job_country || ''}`.trim().replace(/^,\s*/, '') || 'Remote / Global',
+          has_relocation: hasRelocation,
+        });
+      }
+      break;
+    } catch (err) {
+      if (attempt < 2) {
+        await delay(800);
+        continue;
+      }
+      console.warn('[JSearch] Error:', err.message);
     }
-  } catch (err) {
-    console.warn('[JSearch] Error:', err.message);
   }
+  console.log(`[JSearch] Total: ${jobs.length}`);
   return jobs;
 }
 
-// ─── MULTI-PROVIDER FREE LLM SCORING CHAIN ───────────────────────────────────
-// Replaces paid xAI Grok (api.x.ai) with:
+// ─── MULTI-PROVIDER FREE LLM SCORING CHAIN + CIRCUIT BREAKERS ────────────────
 // 1. Gemini 4 Hydrogen (Free Tier)
-// 2. Groq Llama 3.3 70B (Free Tier)
-// 3. OpenRouter Llama 3.3 70B (:free)
+// 2. Groq Cloud Free Tier (Llama 3.3 70B)
+// 3. OpenRouter Free Models (:free 3-model cascade)
 // 4. Deterministic 4-Pillar Rubric Fallback
+
+const CIRCUIT_COOLDOWN_MS = 180_000;
+const CIRCUIT_TRIP_THRESHOLD = 2;
+
+const providerBreakers = {
+  gemini: { failures: 0, openUntil: 0, permanentDown: false, trippedLogged: false },
+  groq: { failures: 0, openUntil: 0, permanentDown: false, trippedLogged: false },
+  openrouter: { failures: 0, openUntil: 0, permanentDown: false, trippedLogged: false },
+};
+
+export function resetProviderBreakers() {
+  for (const key of Object.keys(providerBreakers)) {
+    providerBreakers[key].failures = 0;
+    providerBreakers[key].openUntil = 0;
+    providerBreakers[key].permanentDown = false;
+    providerBreakers[key].trippedLogged = false;
+  }
+  global.groqFailed = false;
+}
+
+function recordProviderSuccess(name) {
+  const b = providerBreakers[name];
+  if (!b) return;
+  b.failures = 0;
+  b.openUntil = 0;
+  b.trippedLogged = false;
+}
+
+function recordProviderTransientFailure(name, reason) {
+  const b = providerBreakers[name];
+  if (!b) return;
+  b.failures += 1;
+  if (b.failures >= CIRCUIT_TRIP_THRESHOLD) {
+    b.openUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+    if (!b.trippedLogged) {
+      b.trippedLogged = true;
+      console.warn(
+        `[CircuitBreaker] ${name.toUpperCase()} paused for ${Math.round(CIRCUIT_COOLDOWN_MS / 1000)}s after ${b.failures} consecutive failures (${reason}) — fast-routing to next engine.`
+      );
+    }
+  }
+}
+
+function disableProviderPermanently(name, reason) {
+  const b = providerBreakers[name];
+  if (!b) return;
+  b.permanentDown = true;
+  if (!b.trippedLogged) {
+    b.trippedLogged = true;
+    console.warn(`[CircuitBreaker] ${name.toUpperCase()} disabled for remainder of run (${reason}).`);
+  }
+}
+
+function isProviderAvailable(name) {
+  const b = providerBreakers[name];
+  if (!b || b.permanentDown) return false;
+  if (b.openUntil > 0) {
+    if (Date.now() < b.openUntil) return false;
+    // Half-open recovery attempt after cooldown expires
+    b.openUntil = 0;
+    b.failures = CIRCUIT_TRIP_THRESHOLD - 1;
+    b.trippedLogged = false;
+  }
+  return true;
+}
+
+function isTransientStatusOrError(status, message = '') {
+  if (status && [429, 500, 502, 503, 504].includes(status)) return true;
+  return /429|503|502|504|timeout|timed out|aborted|overloaded|unavailable|econnreset|fetch failed/i.test(
+    String(message || '')
+  );
+}
 
 global.groqFailed = false;
 
-export async function scoreJobWithGemini(job, profile, apiKey) {
+export async function scoreJobWithGemini(job, profile, apiKey, hooks = {}) {
   const prompt = buildPrompt(job, profile);
+  const geminiModel = process.env.GEMINI_MODEL?.trim() || 'gemini-4-hydrogen';
 
-  let retries = 3;
-  let backoff = 4000;
+  let retries = 2;
+  let backoff = 1200;
 
   while (retries > 0) {
     try {
       const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-4-hydrogen:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModel)}:generateContent?key=${apiKey}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -923,12 +1350,21 @@ export async function scoreJobWithGemini(job, profile, apiKey) {
               thinkingConfig: { thinkingLevel: 'LOW' },
             },
           }),
-          signal: AbortSignal.timeout(12000),
+          signal: AbortSignal.timeout(9000),
         }
       );
 
       if (!res.ok) {
-        throw new Error(`Gemini HTTP error ${res.status}: ${await res.text()}`);
+        if ([400, 401, 403, 404].includes(res.status)) {
+          console.warn(`[Gemini] Non-transient HTTP ${res.status} for "${job.title}". Failing fast.`);
+          if (res.status === 401 || res.status === 403) {
+            hooks.onHardFailure?.(`HTTP ${res.status}`);
+          }
+          return { score: 0 };
+        }
+        throw Object.assign(new Error(`Gemini HTTP error ${res.status}: ${await res.text()}`), {
+          status: res.status,
+        });
       }
 
       const data = await res.json();
@@ -945,18 +1381,30 @@ export async function scoreJobWithGemini(job, profile, apiKey) {
         );
         return { score: 0 };
       }
+      hooks.onSuccess?.();
       return parsedData;
     } catch (error) {
+      // Do not waste backoff sleeps on malformed non-JSON responses
+      if (error instanceof SyntaxError) {
+        console.warn(`[Gemini] Malformed JSON output for "${job.title}". Failing fast.`);
+        return { score: 0 };
+      }
+
+      const transient = isTransientStatusOrError(error?.status, error?.message);
       console.warn(
         `[Gemini] Error for "${job.title}":`,
         error.message,
         `Retries left: ${retries - 1}`
       );
       retries--;
-      if (retries > 0) {
-        await delay(backoff);
+      if (transient && retries > 0) {
+        const jitter = Math.floor(Math.random() * 350);
+        await delay(backoff + jitter);
         backoff *= 2;
       } else {
+        if (transient) {
+          hooks.onTransientFailure?.(error.message?.slice(0, 80) || 'transient error');
+        }
         return { score: 0 };
       }
     }
@@ -964,21 +1412,26 @@ export async function scoreJobWithGemini(job, profile, apiKey) {
   return { score: 0 };
 }
 
-export async function scoreJobWithGroq(job, profile, groq) {
+export async function scoreJobWithGroq(job, profile, groq, hooks = {}) {
   const prompt = buildPrompt(job, profile);
 
-  let retries = 3;
-  let backoff = 4000;
+  let retries = 2;
+  let backoff = 1200;
 
   while (retries > 0) {
     try {
-      const response = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'user', content: prompt }],
-        response_format: { type: 'json_object' },
-        temperature: 0.1,
-        max_tokens: 600,
-      });
+      const response = await Promise.race([
+        groq.chat.completions.create({
+          model: 'llama-3.3-70b-versatile',
+          messages: [{ role: 'user', content: prompt }],
+          response_format: { type: 'json_object' },
+          temperature: 0.1,
+          max_tokens: 600,
+        }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Groq request timed out after 10000ms')), 10000)
+        ),
+      ]);
 
       const text = response.choices[0]?.message?.content || '{}';
       const data = JSON.parse(text);
@@ -987,28 +1440,30 @@ export async function scoreJobWithGroq(job, profile, groq) {
         console.warn(`[Groq] Bad score for "${job.title}": ${JSON.stringify(data.score)}`);
         return { score: 0 };
       }
+      hooks.onSuccess?.();
       return data;
     } catch (error) {
       if (
         error?.status === 401 ||
+        error?.status === 403 ||
         error?.message?.includes('401') ||
         error?.message?.includes('api_key') ||
         error?.message?.includes('API key')
       ) {
+        hooks.onHardFailure?.('Groq key unauthorized');
         throw error;
       }
-      const isRate =
-        error?.status === 429 ||
-        error?.message?.includes('429') ||
-        error?.message?.includes('rate_limit') ||
-        error?.message?.includes('Rate limit');
-      if (isRate && retries > 0) {
-        console.warn(`[Groq] Rate limit → retry in ${backoff}ms (${retries} left)`);
+      const isTransient = isTransientStatusOrError(error?.status, error?.message);
+      retries--;
+      if (isTransient && retries > 0) {
+        console.warn(`[Groq] Transient error (${error.message?.slice(0, 60)}) → retry in ${backoff}ms`);
         await delay(backoff);
         backoff *= 2;
-        retries--;
       } else {
         console.error(`[Groq] Error for "${job.title}":`, error.message?.substring(0, 100));
+        if (isTransient) {
+          hooks.onTransientFailure?.(error.message?.slice(0, 80) || 'Groq transient error');
+        }
         return { score: 0 };
       }
     }
@@ -1016,13 +1471,14 @@ export async function scoreJobWithGroq(job, profile, groq) {
   return { score: 0 };
 }
 
-export async function scoreJobWithOpenRouter(job, profile, apiKey) {
+export async function scoreJobWithOpenRouter(job, profile, apiKey, hooks = {}) {
   const prompt = buildPrompt(job, profile);
   const freeModels = [
     'meta-llama/llama-3.3-70b-instruct:free',
     'google/gemma-3-27b-it:free',
     'openrouter/free',
   ];
+  let hadUpstreamFailure = false;
 
   for (const model of freeModels) {
     try {
@@ -1040,9 +1496,16 @@ export async function scoreJobWithOpenRouter(job, profile, apiKey) {
           temperature: 0.1,
           response_format: { type: 'json_object' },
         }),
-        signal: AbortSignal.timeout(12000),
+        signal: AbortSignal.timeout(10000),
       });
-      if (!res.ok) continue;
+      if (!res.ok) {
+        if (res.status === 401 || res.status === 402 || res.status === 403) {
+          hooks.onHardFailure?.(`OpenRouter HTTP ${res.status}`);
+          return { score: 0 };
+        }
+        hadUpstreamFailure = true;
+        continue;
+      }
       const data = await res.json();
       const raw = (data.choices?.[0]?.message?.content || '{}')
         .replace(/^```json\s*/i, '')
@@ -1066,29 +1529,38 @@ export async function scoreJobWithOpenRouter(job, profile, apiKey) {
         parsed.score >= 0 &&
         parsed.score <= 100
       ) {
+        hooks.onSuccess?.();
         return parsed;
       }
     } catch (err) {
+      hadUpstreamFailure = true;
       console.warn(`[OpenRouter] Model ${model} error for "${job.title}":`, err.message);
     }
+  }
+  if (hadUpstreamFailure) {
+    hooks.onTransientFailure?.('all :free models failed');
   }
   return { score: 0 };
 }
 
-export async function scoreJob(job, profile, groq) {
-  const baseline = scoreJobDeterministic(job, profile);
-  const enforceGuardrail = (res) => {
+export async function scoreJob(job, profile, groq, baselineOverride = null) {
+  const baseline = baselineOverride || scoreJobDeterministic(job, profile);
+  const enforceGuardrail = (res, engineUsed) => {
     const clampedScore = Math.min(100, Math.max(0, Math.round(Number(res.score) || 0)));
     const safeScore =
       baseline.subscores?.seniority_match <= 5 ? Math.min(48, clampedScore) : clampedScore;
-    return { ...baseline, ...res, score: safeScore };
+    return { ...baseline, ...res, score: safeScore, engine_used: res.engine_used || engineUsed };
   };
 
   // 1. Provider 1: Google Gemini Free Tier
-  if (process.env.GEMINI_API_KEY) {
+  if (process.env.GEMINI_API_KEY && isProviderAvailable('gemini')) {
     try {
-      const res = await scoreJobWithGemini(job, profile, process.env.GEMINI_API_KEY);
-      if (res && res.score > 0) return enforceGuardrail(res);
+      const res = await scoreJobWithGemini(job, profile, process.env.GEMINI_API_KEY, {
+        onSuccess: () => recordProviderSuccess('gemini'),
+        onTransientFailure: (reason) => recordProviderTransientFailure('gemini', reason),
+        onHardFailure: (reason) => disableProviderPermanently('gemini', reason),
+      });
+      if (res && res.score > 0) return enforceGuardrail(res, 'Gemini 4 Hydrogen');
     } catch (err) {
       console.warn(`[Scout] Gemini fallback triggered for "${job.title}":`, err.message);
     }
@@ -1096,28 +1568,41 @@ export async function scoreJob(job, profile, groq) {
 
   // 2. Provider 2: Groq Cloud Free Tier (skip deprecated xai- Grok keys)
   const groqKey = process.env.GROQ_API_KEY || '';
-  if (groq && !groqKey.startsWith('xai-') && !global.groqFailed) {
+  if (groq && !groqKey.startsWith('xai-') && !global.groqFailed && isProviderAvailable('groq')) {
     try {
-      const res = await scoreJobWithGroq(job, profile, groq);
-      if (res && res.score > 0) return enforceGuardrail(res);
+      const res = await scoreJobWithGroq(job, profile, groq, {
+        onSuccess: () => recordProviderSuccess('groq'),
+        onTransientFailure: (reason) => recordProviderTransientFailure('groq', reason),
+        onHardFailure: (reason) => {
+          global.groqFailed = true;
+          disableProviderPermanently('groq', reason);
+        },
+      });
+      if (res && res.score > 0) return enforceGuardrail(res, 'Groq Llama 3.3 70B');
     } catch (err) {
       if (
         err?.status === 401 ||
+        err?.status === 403 ||
         err?.message?.includes('401') ||
         err?.message?.includes('api_key') ||
         err?.message?.includes('API key')
       ) {
         console.warn('[Scout] Groq key unauthorized. Switching to OpenRouter / Deterministic...');
         global.groqFailed = true;
+        disableProviderPermanently('groq', 'HTTP 401');
       }
     }
   }
 
   // 3. Provider 3: OpenRouter Free Models
-  if (process.env.OPENROUTER_API_KEY) {
+  if (process.env.OPENROUTER_API_KEY && isProviderAvailable('openrouter')) {
     try {
-      const res = await scoreJobWithOpenRouter(job, profile, process.env.OPENROUTER_API_KEY);
-      if (res && res.score > 0) return enforceGuardrail(res);
+      const res = await scoreJobWithOpenRouter(job, profile, process.env.OPENROUTER_API_KEY, {
+        onSuccess: () => recordProviderSuccess('openrouter'),
+        onTransientFailure: (reason) => recordProviderTransientFailure('openrouter', reason),
+        onHardFailure: (reason) => disableProviderPermanently('openrouter', reason),
+      });
+      if (res && res.score > 0) return enforceGuardrail(res, 'OpenRouter :free');
     } catch (err) {
       console.warn(`[Scout] OpenRouter fallback triggered:`, err.message);
     }
@@ -1181,7 +1666,10 @@ async function sendDiscordDigest(matches, portfolioUrl, totalScanned, weeklyStat
 
   const date = new Date().toISOString().split('T')[0];
   let content = `📋 **JOB SCOUT DIGEST (${profileName}) — ${date}**\n`;
-  content += `Scanned **${totalScanned}** roles across Direct-ATS + Global Feeds, **${matches.length}** matched ≥90\n`;
+  content += `Scanned **${totalScanned}** roles across Official Career Pages, 6 Direct-ATS & Remote Feeds · **${matches.length}** matched ≥90\n`;
+  if (process.env.APP_URL) {
+    content += `🖥️ Full Digest Ledger: ${process.env.APP_URL.replace(/\/$/, '')}/admin/digest\n`;
+  }
   content += `───────────────────────────────\n`;
 
   if (matches.length > 0) {
@@ -1194,14 +1682,17 @@ async function sendDiscordDigest(matches, portfolioUrl, totalScanned, weeklyStat
       const salary = m.job.salary_min
         ? ` | 💰 $${m.job.salary_min}${m.job.salary_max ? `-${m.job.salary_max}` : ''}`
         : '';
+      const applyLine = m.job.redirect_url
+        ? `🔗 Apply (${domain}): ${m.job.redirect_url}`
+        : '🔗 Apply URL not provided by upstream feed';
       content += `\n**${idx + 1}. ${m.job.title}** @ **${m.job.company?.display_name || 'Unknown'}**\n`;
       content += `🎯 ${m.scoreData.score}/100 | 📍 ${m.job.location || domain}${salary}\n`;
       content += `✅ ${reasons}\n`;
       content += `💡 ${m.scoreData.resume_angle || 'N/A'}\n`;
-      content += `🔗 <${m.job.redirect_url}>\n`;
+      content += `${applyLine}\n`;
     });
   } else {
-    content += `\n_No roles crossed 90 today._\nSources: Direct-ATS (Greenhouse/Lever/Ashby) + Internshala + RemoteOK + Remotive + Arbeitnow\n`;
+    content += `\n_No roles crossed 90 today._\nSources: Company Career Pages + Greenhouse/Lever/Ashby/Workable/SmartRecruiters/Recruitee + Internshala + RemoteOK + Remotive + Arbeitnow\n`;
   }
 
   if (weeklyStats) {
@@ -1213,6 +1704,7 @@ async function sendDiscordDigest(matches, portfolioUrl, totalScanned, weeklyStat
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: content.substring(0, 2000) }),
+      signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) console.error('[Discord] Send failed:', res.status);
     else console.log('[Discord] Digest sent.');
@@ -1224,20 +1716,29 @@ async function sendDiscordDigest(matches, portfolioUrl, totalScanned, weeklyStat
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 async function main() {
+  const runStartMs = Date.now();
+  const LLM_BUDGET_MS = 330_000; // 5.5 minute hard scoring cap inside 10m GitHub Actions timeout
+  resetProviderBreakers();
+
   try {
     const groqKey = process.env.GROQ_API_KEY || '';
     const groq = groqKey && !groqKey.startsWith('xai-') ? new Groq({ apiKey: groqKey }) : null;
     const profilePath = path.join(__dirname, '../data/profile.json');
-    const profile = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
 
     console.log(
-      '[Scout] Starting — sources: FreeHire Direct-ATS (Greenhouse/Lever/Ashby) + Internshala + RemoteOK + Remotive + Himalayas + Arbeitnow + JSearch'
+      '[Scout] Starting — sources: Company Career Pages + 6 Direct-ATS (Greenhouse/Lever/Ashby/Workable/SmartRecruiters/Recruitee) + Internshala + RemoteOK + Remotive + Himalayas + Arbeitnow + JSearch'
     );
 
     const auth = await getAuth();
     const sheets = google.sheets('v4');
-    const seenIds = await getSeenJobIds(sheets, auth);
-    console.log(`[Scout] ${seenIds.size} seen job IDs in SeenJobs tab.`);
+    await ensureSheetsReady(sheets, auth);
+
+    const profile = await loadProfileForCli(sheets, auth, profilePath);
+    const [seenIds, existingSheetIds] = await Promise.all([
+      getSeenJobIds(sheets, auth),
+      getExistingJobIds(sheets, auth).catch(() => new Set()),
+    ]);
+    console.log(`[Scout] ${seenIds.size} seen job IDs + ${existingSheetIds.size} ledger IDs.`);
 
     const [rawFreeHire, rawInternshala, rawRemoteOK, rawRemotive, rawHimalayas, rawJSearch] =
       await Promise.all([
@@ -1272,8 +1773,10 @@ async function main() {
       deduped.set(String(job.id), job);
     }
 
-    const newJobs = Array.from(deduped.values()).filter((j) => !seenIds.has(String(j.id)));
-    console.log(`[Scout] After fingerprint dedup + seen filter: ${newJobs.length} new jobs.`);
+    const newJobs = Array.from(deduped.values()).filter(
+      (j) => !seenIds.has(String(j.id)) && !existingSheetIds.has(String(j.id))
+    );
+    console.log(`[Scout] After fingerprint dedup + seen/ledger filter: ${newJobs.length} new jobs.`);
 
     const roleKeywords = (profile.target_roles || [])
       .map((r) => r.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/))
@@ -1281,53 +1784,111 @@ async function main() {
       .filter((w) => w.length > 3);
     roleKeywords.push('apm', 'pmm', 'growth', 'product', 'founder', 'analyst');
     const whitelistRegex = new RegExp(`\\b(${Array.from(new Set(roleKeywords)).join('|')})\\b`, 'i');
-    const targetMatchingJobs = newJobs.filter((j) => whitelistRegex.test(j.title || ''));
 
-    const blacklistRegex =
-      /\b(senior\s+(?:manager|director|engineer|developer|consultant)|director\s+of|vp\s+of|head\s+of|principal\s+\w+|staff\s+engineer|(?:[4-9]|1\d)\+?\s*years?|video\s+editor|graphic\s+designer|telecaller|inside\s+sales|telemarketing|customer\s+support|data\s+entry|tutor|teacher)\b/i;
-    const prunedJobs =
-      (profile.experience_years || 0) === 0
-        ? targetMatchingJobs.filter(
-            (j) => !blacklistRegex.test(`${j.title || ''} ${(j.description || '').slice(0, 400)}`)
-          )
-        : targetMatchingJobs;
+    const titleSeniorityRegex =
+      /\b(senior|sr\.?|director|vp|vice president|head of|chief|principal|staff)\b/i;
+    const fresherLeadRegex = /\b(lead)\b/i;
+    const descBlacklistRegex =
+      /\b((?:[4-9]|1\d)\+?\s*years?|video\s+editor|graphic\s+designer|telecaller|inside\s+sales|telemarketing|customer\s+support|data\s+entry|tutor|teacher)\b/i;
 
-    const domainTokens = Array.from(
-      new Set(
-        (profile.target_roles || [])
-          .join(' ')
-          .toLowerCase()
-          .split(/\W+/)
-          .filter((w) => w.length >= 3 && !SCOUT_ROLE_STOP_WORDS.has(w))
-      )
-    );
+    const expYears = profile.experience_years || 0;
+    const rejectedNonMatchIds = [];
+    const prunedJobs = [];
 
-    const priorityScore = (j) => {
-      const titleHits = domainTokens.filter((t) => hasWholeToken(j.title || '', t)).length * 3;
-      const geoHits =
-        (j.has_relocation ? 2 : 0) +
-        (/(hyderabad|bangalore|bengaluru|india|remote)/i.test(j.location || '') ? 1 : 0);
-      return titleHits + geoHits;
-    };
+    for (const job of newJobs) {
+      const title = job.title || '';
+      const descSnippet = (job.description || '').slice(0, 500);
+      const matchesRole = whitelistRegex.test(title);
+      const hitsSeniorTitle =
+        expYears <= 1 &&
+        (titleSeniorityRegex.test(title) || (expYears === 0 && fresherLeadRegex.test(title)));
+      const hitsBlacklist = expYears <= 1 && descBlacklistRegex.test(`${title} ${descSnippet}`);
 
-    prunedJobs.sort((a, b) => priorityScore(b) - priorityScore(a));
-
-    const jobsToScore = prunedJobs.slice(0, 20);
-    const scoredMatches = [];
-    const seenScoredIds = [];
-
-    for (const job of jobsToScore) {
-      const scoreData = await scoreJob(job, profile, groq);
-      const score = scoreData?.score ?? 0;
-      console.log(
-        `  [Score] "${job.title}" @ ${job.company?.display_name} [${job.location}] → ${score}/100`
-      );
-      if (score > 0) seenScoredIds.push(String(job.id));
-      if (score >= 90) scoredMatches.push({ job, scoreData });
-      await delay(1500);
+      if (!matchesRole || hitsSeniorTitle || hitsBlacklist) {
+        rejectedNonMatchIds.push(String(job.id));
+      } else {
+        prunedJobs.push(job);
+      }
     }
 
-    await appendSeenJobIds(sheets, auth, seenScoredIds);
+    // Deterministic Pre-Triage: eliminate obvious seniority caps (<=48) or weak fits (<56) in 0ms
+    const preScored = prunedJobs.map((job) => ({
+      job,
+      baseline: scoreJobDeterministic(job, profile),
+    }));
+
+    const llmEligible = [];
+    for (const item of preScored) {
+      if (item.baseline.subscores?.seniority_match <= 5 || item.baseline.score < 56) {
+        rejectedNonMatchIds.push(String(item.job.id));
+      } else {
+        llmEligible.push(item);
+      }
+    }
+
+    // Fallback safety floor: if strict triage left <5 roles, keep top non-seniority-blocked roles
+    if (llmEligible.length < 5) {
+      const eligibleSet = new Set(llmEligible.map((i) => String(i.job.id)));
+      const backup = preScored
+        .filter((i) => !eligibleSet.has(String(i.job.id)) && i.baseline.subscores?.seniority_match > 5)
+        .sort((a, b) => b.baseline.score - a.baseline.score)
+        .slice(0, 5 - llmEligible.length);
+      for (const b of backup) {
+        const idx = rejectedNonMatchIds.indexOf(String(b.job.id));
+        if (idx !== -1) rejectedNonMatchIds.splice(idx, 1);
+        llmEligible.push(b);
+      }
+    }
+
+    llmEligible.sort((a, b) => b.baseline.score - a.baseline.score);
+
+    const jobsToScore = llmEligible.slice(0, 25);
+    console.log(
+      `[Pre-Triage] Rejected ${rejectedNonMatchIds.length} non-matching/senior roles deterministically; queued ${jobsToScore.length}/${llmEligible.length} plausible candidates for LLM scoring.`
+    );
+
+    const scoredMatches = [];
+    const seenScoredIds = [];
+    let deadlineTriggered = false;
+
+    for (let i = 0; i < jobsToScore.length; i += 2) {
+      const chunk = jobsToScore.slice(i, i + 2);
+      const results = await Promise.all(
+        chunk.map(async ({ job, baseline }) => {
+          if (Date.now() - runStartMs > LLM_BUDGET_MS) {
+            deadlineTriggered = true;
+            return { job, scoreData: baseline };
+          }
+          const scoreData = await scoreJob(job, profile, groq, baseline);
+          return { job, scoreData };
+        })
+      );
+
+      for (const { job, scoreData } of results) {
+        const score = scoreData?.score ?? 0;
+        console.log(
+          `  [Score] "${job.title}" @ ${job.company?.display_name} [${job.location}] → ${score}/100 (${scoreData?.engine_used || 'LLM'})`
+        );
+        if (score > 0) seenScoredIds.push(String(job.id));
+        if (score >= 90) scoredMatches.push({ job, scoreData });
+      }
+
+      const anyLlmStillOpen =
+        (process.env.GEMINI_API_KEY && isProviderAvailable('gemini')) ||
+        (groq && isProviderAvailable('groq')) ||
+        (process.env.OPENROUTER_API_KEY && isProviderAvailable('openrouter'));
+
+      if (!deadlineTriggered && anyLlmStillOpen && i + 2 < jobsToScore.length) {
+        await delay(600);
+      }
+    }
+
+    if (deadlineTriggered) {
+      console.warn('[Scout] Reached 5.5m global LLM budget — completed remaining roles deterministically.');
+    }
+
+    // Flush both scored IDs and deterministically rejected non-match IDs to SeenJobs so backlog never stalls
+    await appendSeenJobIds(sheets, auth, [...seenScoredIds, ...rejectedNonMatchIds]);
 
     scoredMatches.sort((a, b) => b.scoreData.score - a.scoreData.score);
     const topMatches = scoredMatches.slice(0, 5);
@@ -1361,7 +1922,7 @@ async function main() {
       profile.name
     );
 
-    console.log('[Scout] Done ✅');
+    console.log(`[Scout] Done ✅ (${Math.round((Date.now() - runStartMs) / 1000)}s)`);
   } catch (error) {
     console.error('[Scout] FATAL:', error.message);
     process.exit(1);

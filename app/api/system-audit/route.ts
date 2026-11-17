@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { isAuthorizedRequest, isCustomAuthConfigured } from '@/lib/auth';
-import { isCloudSheetsConfigured, getPublicStats } from '@/lib/sheets';
-import { getCandidateProfile } from '@/lib/profile';
+import { isCloudSheetsConfigured, getPublicStats, getStorageHealthInfo } from '@/lib/sheets';
+import { getCandidateProfileAsync } from '@/lib/profile';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,7 +15,8 @@ export async function GET() {
   }
 
   const stats = await getPublicStats();
-  const profile = getCandidateProfile();
+  const profile = await getCandidateProfileAsync();
+  const storageHealth = getStorageHealthInfo(stats.cloud_error);
 
   const geminiConfigured = Boolean(process.env.GEMINI_API_KEY);
   const groqKey = process.env.GROQ_API_KEY || '';
@@ -57,7 +58,7 @@ export async function GET() {
       name: 'FREEHIRE_API_URL',
       category: 'Optional External Bridge',
       description:
-        'Optional self-hosted strelov1/freehire HTTP API bridge (built-in Greenhouse/Lever/Ashby connectors run regardless)',
+        'Optional SSRF-validated strelov1/freehire HTTP API bridge (built-in Greenhouse/Lever/Ashby connectors run regardless)',
       required: false,
       configured: freehireBridgeConfigured,
       fallback: 'Built-in Native Direct-ATS Connectors (Greenhouse · Lever · Ashby)',
@@ -72,24 +73,31 @@ export async function GET() {
     },
     {
       name: 'GOOGLE_SHEET_ID',
-      category: 'Google Sheets Ledger',
-      description: 'Primary Google Spreadsheet ID (Sheet1 + SeenJobs deduplication ledger)',
+      category: 'Google Sheets Ledger & Profile Sync',
+      description:
+        'Primary Google Spreadsheet ID (auto-provisions Sheet1 + SeenJobs + Profile tabs on first write)',
       required: true,
       configured: Boolean(process.env.GOOGLE_SHEET_ID),
-      fallback: 'Atomic Local JSON Store (data/jobs-store.json)',
+      fallback: storageHealth.ephemeralFallback
+        ? 'Ephemeral /tmp Runtime Store (resets on container cold restart)'
+        : 'Atomic Local JSON Store (data/jobs-store.json + data/profile.json)',
     },
     {
       name: 'GOOGLE_SERVICE_KEY_BASE64',
       category: 'Google Cloud Service Auth',
-      description: 'Base64-encoded Google Cloud Service Account JSON for Sheets v4 & Gmail API',
+      description:
+        'Base64 (or raw JSON) Google Cloud Service Account for Sheets v4 Ledger, Profile Sync & Gmail API',
       required: true,
       configured: Boolean(process.env.GOOGLE_SERVICE_KEY_BASE64),
-      fallback: 'Atomic Local JSON Store (data/jobs-store.json)',
+      fallback: storageHealth.ephemeralFallback
+        ? 'Ephemeral /tmp Runtime Store (resets on container cold restart)'
+        : 'Atomic Local JSON Store (data/jobs-store.json)',
     },
     {
       name: 'GMAIL_USER_EMAIL',
       category: 'Autonomous Reply Tracker',
-      description: 'Target inbox monitored by scripts/reply-tracker.js on weekdays (03:30 UTC)',
+      description:
+        'Google Workspace inbox monitored by scripts/reply-tracker.js on weekdays (03:30 UTC; requires Workspace Domain-Wide Delegation)',
       required: false,
       configured: Boolean(process.env.GMAIL_USER_EMAIL),
       fallback: `Active profile email (${profile.email})`,
@@ -142,9 +150,16 @@ export async function GET() {
         { label: 'Tier 1 · Gemini 4 Hydrogen', status: geminiConfigured ? 'Ready' : 'Skipped (No Key)' },
         {
           label: 'Tier 2 · Groq Llama 3.3 70B',
-          status: groqConfigured ? 'Ready' : groqHasDeprecatedXai ? 'Bypassed (xai- key)' : 'Skipped (No Key)',
+          status: groqConfigured
+            ? 'Ready'
+            : groqHasDeprecatedXai
+            ? 'Bypassed (xai- key)'
+            : 'Skipped (No Key)',
         },
-        { label: 'Tier 3 · OpenRouter 3-Model (:free)', status: openRouterConfigured ? 'Ready' : 'Skipped (No Key)' },
+        {
+          label: 'Tier 3 · OpenRouter 3-Model (:free)',
+          status: openRouterConfigured ? 'Ready' : 'Skipped (No Key)',
+        },
         { label: 'Tier 4 · Deterministic Rubric v3.2', status: 'Always-On Guarantee' },
       ],
     },
@@ -156,17 +171,34 @@ export async function GET() {
         ? 'FlateDecode Text + LLM Refinement + AST'
         : 'FlateDecode Zlib Stream + Deterministic AST',
       tiers: [
-        { label: 'Stage 1 · Gemini Native PDF Inline Bytes', status: geminiConfigured ? 'Ready' : 'Text Fallback' },
+        {
+          label: 'Stage 1 · Gemini Native PDF Inline Bytes',
+          status: geminiConfigured ? 'Ready' : 'Text Fallback',
+        },
         { label: 'Stage 2 · Node zlib FlateDecode + Tj/TJ AST', status: 'Always-On Guarantee' },
-        { label: 'Stage 3 · Google Drive / Docs Export Stream', status: 'Always-On Guarantee' },
+        { label: 'Stage 3 · Redirect-Pinned Google Drive / Docs Stream', status: 'Always-On Guarantee' },
       ],
     },
     {
       name: 'Persistence & Direct-ATS Ingestion',
-      activeTier: isCloudSheetsConfigured() ? 'Google Sheets v4 + Local Mirror' : 'Atomic Local Ledger (data/jobs-store.json)',
+      activeTier:
+        storageHealth.storageMode === 'cloud-sheets'
+          ? 'Google Sheets v4 (Auto-Provisioned + Profile Sync)'
+          : storageHealth.storageMode === 'ephemeral-tmp'
+          ? 'Ephemeral /tmp Runtime Fallback (Read-Only Host)'
+          : 'Atomic Local Disk (data/)',
       tiers: [
-        { label: 'Google Sheets v4 (Sheet1 + SeenJobs)', status: isCloudSheetsConfigured() ? 'Connected' : 'Local Fallback' },
-        { label: 'Native Direct-ATS (Greenhouse · Lever · Ashby)', status: 'Always-On' },
+        {
+          label: 'Google Sheets v4 (Sheet1 + SeenJobs + Profile)',
+          status: isCloudSheetsConfigured()
+            ? stats.cloud_error
+              ? 'Error (Using Fallback)'
+              : 'Connected'
+            : storageHealth.ephemeralFallback
+            ? '/tmp Ephemeral Fallback'
+            : 'Local Fallback',
+        },
+        { label: 'Native Direct-ATS (Greenhouse · Lever · Ashby)', status: 'Always-On (12 Boards)' },
         {
           label: 'External strelov1/freehire Bridge (FREEHIRE_API_URL)',
           status: freehireBridgeConfigured ? 'Connected' : 'Optional / Unconfigured',
@@ -178,26 +210,26 @@ export async function GET() {
   const auditFindings = [
     {
       id: 'ARCH-01',
-      layer: '4-Tier Free Multi-LLM Failover Chain (UI + CLI Parity)',
-      before: 'Legacy paid xAI Grok dependency and CLI OpenRouter single-model check.',
+      layer: 'Read-Only Container & Ephemeral /tmp + Cloud Profile Sync',
+      before: 'Serverless/Cloud Run hosts mounting data/ as read-only threw 503 EROFS on profile/job saves.',
       after:
-        'Full parity across lib/llm.ts and scripts/scout.js: Gemini 4 Hydrogen -> Groq Llama 3.3 70B -> OpenRouter 3-Model :free Cascade -> Deterministic 4-Pillar Rubric v3.2.',
+        '3-tier persistence: Google Sheets Profile!A1 & Sheet1 (auto-provisioned tabs) -> writable data/ or custom KAISIFOS_DATA_DIR -> automatic /tmp runtime overlay with honest UI telemetry.',
       status: 'VERIFIED',
     },
     {
       id: 'ARCH-02',
-      layer: 'Truthful strelov1/freehire Attribution & Direct-ATS Connectors',
-      before: 'UI copy implied the Go/Postgres strelov1/freehire runtime was bundled natively.',
+      layer: 'SSRF, CSV Injection, & Redirect-Pinned Security Perimeter',
+      before: 'Open redirects, private IP URL bridges, formula injection in CSV export, and unthrottled AI/login endpoints.',
       after:
-        'Clarified across UI, API, and README: built-in Node/Next.js Direct-ATS JSON connectors (Greenhouse, Lever, Ashby) inspired by strelov1/freehire + optional FREEHIRE_API_URL bridge.',
+        'Redirect host pinning on Drive, validateSafePublicUrl on FREEHIRE_API_URL, RFC4180 + formula escaping in CSV, and sliding-window IP rate limits on auth/evaluate/prep.',
       status: 'VERIFIED',
     },
     {
       id: 'ARCH-03',
-      layer: '12-Key Environment Parity & Workflow Reconciliation',
-      before: 'System audit omitted RAPIDAPI_KEY, APP_URL, and split ADMIN credentials; README cited outdated schedule.',
+      layer: 'Iframe Cookie Compatibility & Strict Cloud Sheet ID Lookup',
+      before: 'Hardcoded HTTPS cookie lockouts on local `next start` and rowId fallback overwriting shifted rows.',
       after:
-        'Full 12-variable telemetry across .env.example, scripts/check-env.js, /api/system-audit, job-scout.yml (0 4 * * 0,1,3,5), and reply-tracker.yml (30 3 * * 1-5).',
+        'Dynamic X-Forwarded-Proto + Sec-Fetch-Dest iframe cookie attributes, strict Col-B ID resolution, 42s scout sweep deadline fallback, and VC funding false-positive salary guards.',
       status: 'VERIFIED',
     },
   ];
@@ -206,7 +238,11 @@ export async function GET() {
     timestamp: new Date().toISOString(),
     authConfigured: isCustomAuthConfigured(),
     freehireBridgeConfigured,
-    storageMode: isCloudSheetsConfigured() ? 'cloud-sheets' : 'local-store',
+    storageMode: isCloudSheetsConfigured() && !stats.cloud_error ? 'cloud-sheets' : 'local-store',
+    persistenceMode: storageHealth.storageMode,
+    ephemeralFallback: storageHealth.ephemeralFallback,
+    resolvedDataDir: storageHealth.resolvedDataDir,
+    cloudError: stats.cloud_error,
     aiEngine: geminiConfigured
       ? 'Gemini 4 Hydrogen (Free Tier)'
       : groqConfigured

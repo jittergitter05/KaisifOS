@@ -4,6 +4,9 @@ export interface AtsCompanyTargets {
   greenhouse: string[];
   lever: string[];
   ashby: string[];
+  workable?: string[];
+  smartrecruiters?: string[];
+  recruitee?: string[];
 }
 
 export interface CandidateProfile {
@@ -29,12 +32,23 @@ export interface CandidateProfile {
   languages: string[];
   resume_synthesizer_url: string;
   ats_companies?: AtsCompanyTargets;
+  career_urls?: string[];
 }
+
+export const DEFAULT_CAREER_URLS: string[] = [
+  'https://www.postman.com/company/careers/',
+  'https://razorpay.com/jobs/',
+  'https://linear.app/careers',
+  'https://posthog.com/careers',
+];
 
 export const DEFAULT_ATS_COMPANIES: AtsCompanyTargets = {
   greenhouse: ['razorpay', 'postman', 'stripe', 'vercel', 'cloudflare'],
   lever: ['zepto', 'cred', 'mistral'],
   ashby: ['linear', 'posthog', 'supabase', 'langchain'],
+  workable: ['raycast'],
+  smartrecruiters: ['Visa'],
+  recruitee: ['framer'],
 };
 
 export interface ProfilePresetMetadata {
@@ -121,6 +135,7 @@ export const FORK_PROFILE_TEMPLATES: Record<string, CandidateProfile> = {
     languages: ['English (fluent)', 'Telugu (native)', 'Hindi (conversational)'],
     resume_synthesizer_url: 'https://portjitterglitter.vercel.app/resume',
     ats_companies: DEFAULT_ATS_COMPANIES,
+    career_urls: DEFAULT_CAREER_URLS,
   },
   swe_ai: {
     system_name: siteConfig.name,
@@ -165,6 +180,7 @@ export const FORK_PROFILE_TEMPLATES: Record<string, CandidateProfile> = {
     languages: ['English (fluent)'],
     resume_synthesizer_url: 'https://github.com/your-username',
     ats_companies: DEFAULT_ATS_COMPANIES,
+    career_urls: DEFAULT_CAREER_URLS,
   },
   data_ml: {
     system_name: siteConfig.name,
@@ -209,6 +225,7 @@ export const FORK_PROFILE_TEMPLATES: Record<string, CandidateProfile> = {
     languages: ['English (fluent)', 'Hindi (native)'],
     resume_synthesizer_url: 'https://github.com/your-data-portfolio',
     ats_companies: DEFAULT_ATS_COMPANIES,
+    career_urls: DEFAULT_CAREER_URLS,
   },
   blank_fork: {
     system_name: siteConfig.name,
@@ -242,6 +259,7 @@ export const FORK_PROFILE_TEMPLATES: Record<string, CandidateProfile> = {
     languages: ['English (fluent)'],
     resume_synthesizer_url: 'https://your-portfolio.com/resume',
     ats_companies: DEFAULT_ATS_COMPANIES,
+    career_urls: DEFAULT_CAREER_URLS,
   },
 };
 

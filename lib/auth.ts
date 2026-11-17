@@ -81,3 +81,23 @@ export async function isAuthorizedRequest(
   }
   return false;
 }
+
+/**
+ * Resolves secure & SameSite cookie attributes based on actual request transport & iframe context.
+ * Prevents login loops on local `next start` (http://localhost) AND embedded HTTPS iframes (Cloud Run).
+ */
+export function getCookieSecurityOptions(headers: Headers, requestUrl?: string) {
+  const forwardedProto = (headers.get('x-forwarded-proto') || '').split(',')[0]?.trim().toLowerCase();
+  const isHttps =
+    forwardedProto === 'https' ||
+    (typeof requestUrl === 'string' && requestUrl.startsWith('https://'));
+  const secFetchDest = (headers.get('sec-fetch-dest') || '').toLowerCase();
+  const isEmbeddedIframe = secFetchDest === 'iframe';
+
+  return {
+    httpOnly: true,
+    secure: isHttps,
+    sameSite: (isHttps && isEmbeddedIframe ? 'none' : 'lax') as 'none' | 'lax',
+    path: '/',
+  };
+}

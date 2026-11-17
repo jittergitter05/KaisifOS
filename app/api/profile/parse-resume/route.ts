@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { isAuthorizedRequest } from '@/lib/auth';
-import { getCandidateProfile } from '@/lib/profile';
+import { getCandidateProfileAsync } from '@/lib/profile';
 import { parseResumeInput } from '@/lib/resume-parser';
 
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB limit
@@ -16,7 +16,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const contentType = req.headers.get('content-type') || '';
-    const currentProfile = getCandidateProfile();
+    const currentProfile = await getCandidateProfileAsync();
 
     if (contentType.includes('multipart/form-data')) {
       const formData = await req.formData();

@@ -1,5 +1,6 @@
 import { google } from 'googleapis';
 import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
 
 dotenv.config();
 
@@ -19,40 +20,44 @@ export function groupCompanies(rows) {
   return { pendingRows, lowerCompanies };
 }
 
-function getAuthWithoutSubject() {
-  if (!process.env.GOOGLE_SERVICE_KEY_BASE64) {
-       throw new Error('Missing GOOGLE_SERVICE_KEY_BASE64');
+function decodeServiceAccountFromEnv() {
+  const raw = (process.env.GOOGLE_SERVICE_KEY_BASE64 || '').trim();
+  if (!raw) throw new Error('Missing GOOGLE_SERVICE_KEY_BASE64');
+  const jsonText = raw.startsWith('{')
+    ? raw
+    : Buffer.from(raw.replace(/\s+/g, ''), 'base64').toString('utf8').trim();
+  const credentials = JSON.parse(jsonText);
+  if (!credentials.client_email || !credentials.private_key) {
+    throw new Error('Google Service Account JSON missing client_email or private_key.');
   }
-  const credentials = JSON.parse(Buffer.from(process.env.GOOGLE_SERVICE_KEY_BASE64, 'base64').toString('utf8'));
-  return new google.auth.GoogleAuth({
-     credentials,
-     scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/gmail.readonly'],
-  });
+  credentials.private_key = String(credentials.private_key).replace(/\\n/g, '\n');
+  return credentials;
 }
 
 function getAuth() {
-  if (!process.env.GOOGLE_SERVICE_KEY_BASE64) {
-    throw new Error('Missing GOOGLE_SERVICE_KEY_BASE64');
-  }
-  const credentials = JSON.parse(Buffer.from(process.env.GOOGLE_SERVICE_KEY_BASE64, 'base64').toString('utf8'));
+  const credentials = decodeServiceAccountFromEnv();
   return new google.auth.GoogleAuth({
     credentials,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/gmail.readonly'],
-    clientOptions: process.env.GMAIL_USER_EMAIL ? {
-      subject: process.env.GMAIL_USER_EMAIL, 
-    } : undefined
+    scopes: [
+      'https://www.googleapis.com/auth/spreadsheets',
+      'https://www.googleapis.com/auth/gmail.readonly',
+    ],
+    clientOptions: process.env.GMAIL_USER_EMAIL
+      ? { subject: process.env.GMAIL_USER_EMAIL.trim() }
+      : undefined,
   });
 }
 
 async function sendDiscordAlert(content) {
   const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
   if (!webhookUrl) return;
-  
+
   try {
     await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: content.substring(0, 2000) }),
+      signal: AbortSignal.timeout(8000),
     });
   } catch (err) {
     console.error('[Discord] Alert failed:', err.message);
@@ -72,32 +77,37 @@ export function isCompanyMentioned(text, company) {
 
 async function main() {
   try {
-    let auth;
+    const auth = getAuth();
     try {
-        auth = getAuth();
-        await auth.getClient();
-    } catch(e) {
-        auth = getAuthWithoutSubject();
+      await auth.getClient();
+    } catch (authErr) {
+      const targetEmail = (process.env.GMAIL_USER_EMAIL || '').trim().toLowerCase();
+      if (targetEmail.endsWith('@gmail.com')) {
+        throw new Error(
+          `Gmail Domain-Wide Delegation error for consumer address (${targetEmail}). Google Service Accounts cannot impersonate @gmail.com inboxes — use a Google Workspace domain address with Gmail readonly delegation enabled.`
+        );
+      }
+      throw authErr;
     }
 
     const sheets = google.sheets('v4');
     const gmail = google.gmail('v1');
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-    
+
     const response = await sheets.spreadsheets.values.get({
       auth,
       spreadsheetId,
       range: 'Sheet1!A:K',
     });
-    
+
     const rows = response.data.values || [];
     if (rows.length === 0) {
       return;
     }
-    
+
     const { pendingRows, lowerCompanies } = groupCompanies(rows);
     if (pendingRows.length === 0) return;
-    
+
     const messages = [];
     let pageToken;
     let pages = 0;
@@ -117,68 +127,105 @@ async function main() {
         pages++;
       } while (pageToken && pages < 5);
     } catch (gerr) {
-        throw new Error(`Gmail API Error: ${gerr.message}`);
+      const targetEmail = (process.env.GMAIL_USER_EMAIL || '').trim().toLowerCase();
+      if (targetEmail.endsWith('@gmail.com')) {
+        throw new Error(
+          `Gmail API error (${gerr.message}). Note: consumer @gmail.com accounts do not support Service Account Domain-Wide Delegation.`
+        );
+      }
+      throw new Error(`Gmail API Error: ${gerr.message}`);
     }
 
+    const cappedMessages = messages.slice(0, 150);
     const matchedIndices = new Set();
     const hits = [];
 
-    for (const msg of messages) {
-       const msgData = await gmail.users.messages.get({
-          auth,
-          userId: 'me',
-          id: msg.id,
-          format: 'metadata',
-          metadataHeaders: ['From', 'Subject', 'Date']
-       });
-       
-       const headers = msgData.data.payload.headers || [];
-       const from = headers.find(h => h.name === 'From')?.value || '';
-       const subject = headers.find(h => h.name === 'Subject')?.value || '';
-       const dateStr = headers.find(h => h.name === 'Date')?.value || '';
-       
-       for (const [companyLowerCase, indices] of lowerCompanies.entries()) {
+    for (let i = 0; i < cappedMessages.length; i += 5) {
+      const batch = cappedMessages.slice(i, i + 5);
+      const batchPayloads = await Promise.allSettled(
+        batch.map((msg) =>
+          gmail.users.messages.get({
+            auth,
+            userId: 'me',
+            id: msg.id,
+            format: 'metadata',
+            metadataHeaders: ['From', 'Subject', 'Date'],
+          })
+        )
+      );
+
+      for (const settled of batchPayloads) {
+        if (settled.status !== 'fulfilled') continue;
+        const headers = settled.value.data?.payload?.headers || [];
+        const from = headers.find((h) => h.name === 'From')?.value || '';
+        const subject = headers.find((h) => h.name === 'Subject')?.value || '';
+        const dateStr = headers.find((h) => h.name === 'Date')?.value || '';
+
+        for (const [companyLowerCase, indices] of lowerCompanies.entries()) {
           const matchFound =
             isCompanyMentioned(from, companyLowerCase) ||
             isCompanyMentioned(subject, companyLowerCase);
           if (matchFound) {
-             for (const rowIndex of indices) {
-                if (!matchedIndices.has(rowIndex)) {
-                   matchedIndices.add(rowIndex);
-                   hits.push({
-                      rowIndex,
-                      company: pendingRows.find(p => p.index === rowIndex).row[3],
-                      from,
-                      subject,
-                      dateStr
-                   });
+            for (const rowIndex of indices) {
+              if (!matchedIndices.has(rowIndex)) {
+                matchedIndices.add(rowIndex);
+                const matchedRow = pendingRows.find((p) => p.index === rowIndex)?.row;
+                if (matchedRow) {
+                  hits.push({
+                    rowIndex,
+                    id: String(matchedRow[1] || '').trim(),
+                    company: matchedRow[3],
+                    from,
+                    subject,
+                    dateStr,
+                  });
                 }
-             }
-          }
-       }
-    }
-    
-    if (hits.length > 0) {
-      const today = new Date().toISOString().split('T')[0];
-      for (const hit of hits) {
-         const rowToUpdate = hit.rowIndex + 1; 
-         try {
-           await sheets.spreadsheets.values.update({
-              auth,
-              spreadsheetId,
-              range: `Sheet1!K${rowToUpdate}:L${rowToUpdate}`,
-              valueInputOption: 'USER_ENTERED',
-              requestBody: {
-                values: [['REPLIED', today]]
               }
-           });
-           const alertMsg = `📩 REPLY DETECTED\nCompany: ${hit.company}\nFrom: ${hit.from}\nSubject: ${hit.subject}\nDate: ${hit.dateStr}\n→ Update your tracker and respond within 2 hours.`;
-           await sendDiscordAlert(alertMsg);
-         } catch (updateErr) {
-           console.error(`[Sheets] Failed to update row for ${hit.company}:`, updateErr.message);
-         }
+            }
+          }
+        }
       }
-    } 
+    }
+
+    if (hits.length > 0) {
+      // Re-fetch Column B immediately before patching so concurrent Sheet appends/deletes cannot shift rows
+      const latestColB = await sheets.spreadsheets.values.get({
+        auth,
+        spreadsheetId,
+        range: 'Sheet1!B:B',
+      });
+      const colBValues = latestColB.data.values || [];
+
+      for (const hit of hits) {
+        let rowToUpdate = hit.rowIndex + 1;
+        if (hit.id) {
+          const verifiedIdx = colBValues.findIndex(
+            (r, idx) => idx >= 1 && String(r[0] || '').trim() === hit.id
+          );
+          if (verifiedIdx < 1) {
+            console.warn(`[Sheets] Skipping update for ${hit.company}: ID ${hit.id} no longer in Sheet1.`);
+            continue;
+          }
+          rowToUpdate = verifiedIdx + 1;
+        }
+
+        try {
+          await sheets.spreadsheets.values.update({
+            auth,
+            spreadsheetId,
+            range: `Sheet1!K${rowToUpdate}`,
+            valueInputOption: 'USER_ENTERED',
+            requestBody: {
+              values: [['REPLIED']],
+            },
+          });
+          const alertMsg = `📩 REPLY DETECTED\nCompany: ${hit.company}\nFrom: ${hit.from}\nSubject: ${hit.subject}\nDate: ${hit.dateStr}\n→ Update your tracker and respond within 2 hours.`;
+          await sendDiscordAlert(alertMsg);
+        } catch (updateErr) {
+          console.error(`[Sheets] Failed to update row for ${hit.company}:`, updateErr.message);
+        }
+      }
+    }
   } catch (error) {
     const errorMessage = error.stack || error.message || String(error);
     const safeError = errorMessage.substring(0, 1500);
@@ -188,8 +235,6 @@ async function main() {
     process.exit(1);
   }
 }
-
-import { fileURLToPath } from 'url';
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   main();

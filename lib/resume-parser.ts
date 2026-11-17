@@ -23,6 +23,9 @@ export interface ParsedResumeParameters {
     greenhouse: string[];
     lever: string[];
     ashby: string[];
+    workable?: string[];
+    smartrecruiters?: string[];
+    recruitee?: string[];
   };
 }
 
@@ -158,6 +161,9 @@ function recommendAtsBoardsForTrack(roles: string[]) {
       greenhouse: ['databricks', 'scaleai', 'dbt-labs', 'stripe', 'razorpay'],
       lever: ['mistral', 'cred', 'palantir'],
       ashby: ['posthog', 'langchain', 'linear', 'supabase'],
+      workable: DEFAULT_ATS_COMPANIES.workable,
+      smartrecruiters: DEFAULT_ATS_COMPANIES.smartrecruiters,
+      recruitee: DEFAULT_ATS_COMPANIES.recruitee,
     };
   }
   if (/(software|full-stack|frontend|backend|devops|ai application)/.test(joined)) {
@@ -165,6 +171,9 @@ function recommendAtsBoardsForTrack(roles: string[]) {
       greenhouse: ['vercel', 'stripe', 'anthropic', 'cloudflare', 'razorpay'],
       lever: ['plaid', 'mistral', 'palantir'],
       ashby: ['linear', 'supabase', 'posthog', 'langchain'],
+      workable: DEFAULT_ATS_COMPANIES.workable,
+      smartrecruiters: DEFAULT_ATS_COMPANIES.smartrecruiters,
+      recruitee: DEFAULT_ATS_COMPANIES.recruitee,
     };
   }
   return DEFAULT_ATS_COMPANIES;
@@ -299,9 +308,45 @@ export function extractTextFromPdfBuffer(buffer: Buffer): string {
 
   return extractedChunks
     .join('\n')
+    .replace(/\u00A0/g, ' ')
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+const isAllowedGoogleRedirectHost = (hostname: string): boolean => {
+  const host = hostname.toLowerCase();
+  return (
+    host === 'drive.google.com' ||
+    host === 'docs.google.com' ||
+    host === 'drive.usercontent.google.com' ||
+    host.endsWith('.googleusercontent.com') ||
+    host.endsWith('.gstatic.com') ||
+    host.endsWith('.google.com')
+  );
+};
+
+async function fetchGoogleWithSafeRedirects(initialUrl: string, maxRedirects = 4): Promise<Response> {
+  let currentUrl = initialUrl;
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    const parsed = new URL(currentUrl);
+    if (parsed.protocol !== 'https:' || !isAllowedGoogleRedirectHost(parsed.hostname)) {
+      throw new Error(`Security policy blocked unsafe redirect target: ${parsed.hostname}`);
+    }
+    const res = await fetch(currentUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; KaisifOSResumeParser/3.2)' },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get('location');
+      if (!location) break;
+      currentUrl = new URL(location, currentUrl).toString();
+      continue;
+    }
+    return res;
+  }
+  throw new Error('Exceeded maximum safe redirects while fetching Google Drive file.');
 }
 
 /**
@@ -336,18 +381,25 @@ export async function fetchGoogleDriveResume(driveUrl: string): Promise<{
     );
   }
 
+  if (/drive\.google\.com\/drive\/folders\//i.test(trimmed)) {
+    throw new Error(
+      'Google Drive folder links are not supported. Open your individual PDF resume in Drive and copy its file share link (/file/d/{ID}/view).'
+    );
+  }
+
   const docsMatch = trimmed.match(/docs\.google\.com\/document\/(?:u\/\d+\/)?d\/([a-zA-Z0-9_-]+)/);
   if (docsMatch) {
     const docId = docsMatch[1];
     const exportUrl = `https://docs.google.com/document/d/${docId}/export?format=txt`;
-    const res = await fetch(exportUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; OpenScoutResumeParser/3.0)' },
-      signal: AbortSignal.timeout(10000),
-    });
+    const res = await fetchGoogleWithSafeRedirects(exportUrl);
     if (!res.ok) {
       throw new Error(
         `Google Docs link returned HTTP ${res.status}. Ensure sharing is set to "Anyone with the link can view".`
       );
+    }
+    const contentLength = Number(res.headers.get('content-length') || '0');
+    if (contentLength > 8 * 1024 * 1024) {
+      throw new Error('Google Docs export exceeds the 8 MB maximum size limit.');
     }
     const text = (await res.text()).slice(0, 200000);
     return { text, mimeType: 'text/plain', resolvedUrl: exportUrl };
@@ -366,10 +418,7 @@ export async function fetchGoogleDriveResume(driveUrl: string): Promise<{
   const fileId = driveFileMatch[1];
   let targetUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
 
-  let res = await fetch(targetUrl, {
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; OpenScoutResumeParser/3.0)' },
-    signal: AbortSignal.timeout(10000),
-  });
+  let res = await fetchGoogleWithSafeRedirects(targetUrl);
 
   if (!res.ok) {
     throw new Error(
@@ -377,8 +426,13 @@ export async function fetchGoogleDriveResume(driveUrl: string): Promise<{
     );
   }
 
+  const initialLength = Number(res.headers.get('content-length') || '0');
+  if (initialLength > 8 * 1024 * 1024) {
+    throw new Error('Resume file exceeds the 8 MB maximum size limit.');
+  }
+
   let contentType = (res.headers.get('content-type') || '').toLowerCase();
-  let arrayBuffer = await res.arrayBuffer();
+  const arrayBuffer = await res.arrayBuffer();
   if (arrayBuffer.byteLength > 8 * 1024 * 1024) {
     throw new Error('Resume file exceeds the 8 MB maximum size limit.');
   }
@@ -400,17 +454,17 @@ export async function fetchGoogleDriveResume(driveUrl: string): Promise<{
 
     if (/uc-download-link|confirm=|virus scan|download-form/i.test(htmlPreview)) {
       const retryUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
-      const retryRes = await fetch(retryUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; OpenScoutResumeParser/3.0)' },
-        signal: AbortSignal.timeout(10000),
-      });
+      const retryRes = await fetchGoogleWithSafeRedirects(retryUrl);
       if (retryRes.ok) {
-        const retryBuf = Buffer.from(await retryRes.arrayBuffer());
-        if (retryBuf.byteLength <= 8 * 1024 * 1024) {
-          res = retryRes;
-          contentType = (retryRes.headers.get('content-type') || '').toLowerCase();
-          buffer = retryBuf;
-          targetUrl = retryUrl;
+        const retryLen = Number(retryRes.headers.get('content-length') || '0');
+        if (retryLen <= 8 * 1024 * 1024) {
+          const retryBuf = Buffer.from(await retryRes.arrayBuffer());
+          if (retryBuf.byteLength <= 8 * 1024 * 1024) {
+            res = retryRes;
+            contentType = (retryRes.headers.get('content-type') || '').toLowerCase();
+            buffer = retryBuf;
+            targetUrl = retryUrl;
+          }
         }
       }
     }
@@ -889,16 +943,19 @@ Return ONLY valid JSON with these exact keys:
   };
 
   const withTimeout = <T,>(p: Promise<T>, ms: number, label: string): Promise<T> => {
-    let timer: ReturnType<typeof setTimeout>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     return Promise.race([
       p,
       new Promise<never>((_, rej) => {
         timer = setTimeout(() => rej(new Error(`${label} timed out after ${ms}ms`)), ms);
       }),
-    ]).finally(() => clearTimeout(timer!));
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
   };
 
   const ai = getGeminiClient();
+  const geminiModel = process.env.GEMINI_MODEL?.trim() || 'gemini-4-hydrogen';
   if (ai) {
     try {
       const parts: Record<string, unknown>[] = [];
@@ -916,7 +973,7 @@ Return ONLY valid JSON with these exact keys:
 
       const response = await withTimeout(
         ai.models.generateContent({
-          model: 'gemini-4-hydrogen',
+          model: geminiModel,
           contents: { parts },
           config: {
             responseMimeType: 'application/json',

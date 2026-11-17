@@ -1,12 +1,31 @@
-import { CandidateProfile, DEFAULT_ATS_COMPANIES, getCandidateProfile } from './profile';
-import { evaluateRoleWithLLM } from './llm';
 import {
-  getAllSheetRows,
-  appendLocalJobRecord,
-  isCloudSheetsConfigured,
+  CandidateProfile,
+  DEFAULT_ATS_COMPANIES,
+  DEFAULT_CAREER_URLS,
+  getCandidateProfileAsync,
+} from './profile';
+import {
+  fetchCompanyCareerPages,
+  fetchWorkableBoards,
+  fetchSmartRecruitersBoards,
+  fetchRecruiteeBoards,
+} from './career-scraper';
+import { deterministicEvaluateJob, evaluateRoleWithLLM } from './llm';
+import {
+  appendCloudSeenJobIds,
   appendCloudSheetRecord,
+  appendLocalJobRecordDetailed,
+  appendLocalSeenJobIds,
+  getAllSheetRows,
+  getCloudSeenJobIds,
+  isCloudSheetsConfigured,
+  readLocalSeenJobIds,
 } from './sheets';
-import { deriveDynamicSearchParams, normalizeCanonicalFingerprint } from './utils';
+import {
+  deriveDynamicSearchParams,
+  normalizeCanonicalFingerprint,
+  validateSafePublicUrl,
+} from './utils';
 
 export interface RawScoutedJob {
   id: string;
@@ -24,6 +43,8 @@ export interface SourceHealthMetric {
   count: number;
   durationMs: number;
   error?: string;
+  failedBoards?: string[];
+  truncatedBoards?: number;
 }
 
 export interface ScoutRunSummary {
@@ -31,6 +52,8 @@ export interface ScoutRunSummary {
   sources_queried: string[];
   source_counts: Record<string, number>;
   source_health: Record<string, SourceHealthMetric>;
+  persistence_mode: 'cloud-sheets' | 'local-disk' | 'ephemeral-tmp';
+  warnings: string[];
   total_fetched: number;
   new_after_dedup: number;
   evaluated_count: number;
@@ -46,7 +69,8 @@ export interface ScoutRunSummary {
   }>;
 }
 
-// Uses canonical DEFAULT_ATS_COMPANIES imported from ./profile-presets
+const MAX_ATS_BOARDS_PER_PROVIDER = 12;
+const SWEEP_DEADLINE_MS = 42000;
 
 function stripHtml(html: string): string {
   if (!html) return '';
@@ -58,18 +82,34 @@ function stripHtml(html: string): string {
     .trim();
 }
 
+interface BoardFetchResult {
+  jobs: RawScoutedJob[];
+  failedBoards?: string[];
+  truncatedBoards?: number;
+}
+
 async function timedFetch(
   sourceKey: string,
-  fn: () => Promise<RawScoutedJob[]>,
+  fn: () => Promise<RawScoutedJob[] | BoardFetchResult>,
   healthMap: Record<string, SourceHealthMetric>
 ): Promise<RawScoutedJob[]> {
   const start = Date.now();
   try {
-    const items = await fn();
+    const raw = await fn();
+    const items = Array.isArray(raw) ? raw : raw.jobs;
+    const failedBoards = Array.isArray(raw) ? undefined : raw.failedBoards;
+    const truncatedBoards = Array.isArray(raw) ? undefined : raw.truncatedBoards;
+
     healthMap[sourceKey] = {
-      status: items.length > 0 ? 'ok' : 'empty',
+      status: items.length > 0 ? 'ok' : failedBoards && failedBoards.length > 0 ? 'error' : 'empty',
       count: items.length,
       durationMs: Date.now() - start,
+      failedBoards: failedBoards && failedBoards.length > 0 ? failedBoards : undefined,
+      truncatedBoards: truncatedBoards && truncatedBoards > 0 ? truncatedBoards : undefined,
+      error:
+        failedBoards && failedBoards.length > 0 && items.length === 0
+          ? `Failed boards: ${failedBoards.slice(0, 3).join(', ')}`
+          : undefined,
     };
     return items;
   } catch (err) {
@@ -77,14 +117,16 @@ async function timedFetch(
       status: 'error',
       count: 0,
       durationMs: Date.now() - start,
-      error: (err as Error).message.slice(0, 100),
+      error: (err as Error).message.slice(0, 140),
     };
     return [];
   }
 }
 
 async function fetchRemoteOK(tags: string[]): Promise<RawScoutedJob[]> {
-  const tagParam = encodeURIComponent((tags.length > 0 ? tags : ['product', 'growth', 'dev']).join(','));
+  const tagParam = encodeURIComponent(
+    (tags.length > 0 ? tags : ['product', 'growth', 'dev']).join(',')
+  );
   const res = await fetch(`https://remoteok.com/api?tags=${tagParam}`, {
     headers: {
       'User-Agent': 'KaisifOS-FreeHire-Scout/3.2',
@@ -139,7 +181,9 @@ async function fetchRemotive(categories: string[], keywords: string[]): Promise<
             source: 'Remotive',
           });
         }
-      } catch {}
+      } catch {
+        // Ignore transient per-category fetch errors so peer categories succeed
+      }
     })
   );
 
@@ -167,7 +211,9 @@ async function fetchRemotive(categories: string[], keywords: string[]): Promise<
           });
         }
       }
-    } catch {}
+    } catch {
+      // Non-fatal
+    }
   }
 
   return jobs;
@@ -190,9 +236,10 @@ async function fetchHimalayas(): Promise<RawScoutedJob[]> {
     const salStr = minSal
       ? `${item.currency || '$'}${minSal}${maxSal ? ` - ${maxSal}` : ''}`
       : 'Not listed';
-    const locs = Array.isArray(item.locationRestrictions) && item.locationRestrictions.length > 0
-      ? item.locationRestrictions.join(', ')
-      : 'Remote / Worldwide';
+    const locs =
+      Array.isArray(item.locationRestrictions) && item.locationRestrictions.length > 0
+        ? item.locationRestrictions.join(', ')
+        : 'Remote / Worldwide';
     return {
       id: `himalayas_${item.guid || item.slug || slugFallback}`,
       title: String(item.title || ''),
@@ -249,9 +296,15 @@ async function fetchTheMuse(): Promise<RawScoutedJob[]> {
 }
 
 async function fetchFreeHireOptionalApi(): Promise<RawScoutedJob[]> {
-  const endpoint = process.env.FREEHIRE_API_URL;
+  const endpoint = process.env.FREEHIRE_API_URL?.trim();
   if (!endpoint) return [];
-  const res = await fetch(endpoint, {
+
+  const check = validateSafePublicUrl(endpoint, { allowLocalDev: true });
+  if (!check.ok || !check.url) {
+    throw new Error(`FREEHIRE_API_URL rejected: ${check.reason}`);
+  }
+
+  const res = await fetch(check.url.toString(), {
     headers: { Accept: 'application/json' },
     signal: AbortSignal.timeout(7000),
   });
@@ -276,19 +329,23 @@ async function fetchFreeHireOptionalApi(): Promise<RawScoutedJob[]> {
   });
 }
 
-/**
- * FreeHire Direct ATS Connector 1: Greenhouse Public Job Board API
- */
-async function fetchGreenhouseBoards(boards: string[]): Promise<RawScoutedJob[]> {
+async function fetchGreenhouseBoards(boards: string[]): Promise<BoardFetchResult> {
   const results: RawScoutedJob[] = [];
+  const failedBoards: string[] = [];
+  const activeBoards = boards.slice(0, MAX_ATS_BOARDS_PER_PROVIDER);
+  const truncatedBoards = Math.max(0, boards.length - activeBoards.length);
+
   await Promise.all(
-    boards.slice(0, 5).map(async (board) => {
+    activeBoards.map(async (board) => {
       try {
         const res = await fetch(
           `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(board)}/jobs?content=true`,
           { signal: AbortSignal.timeout(6500) }
         );
-        if (!res.ok) return;
+        if (!res.ok) {
+          failedBoards.push(`${board} (${res.status})`);
+          return;
+        }
         const data = await res.json();
         for (const job of (data.jobs || []).slice(0, 6)) {
           results.push({
@@ -302,25 +359,32 @@ async function fetchGreenhouseBoards(boards: string[]): Promise<RawScoutedJob[]>
             source: 'Greenhouse',
           });
         }
-      } catch {}
+      } catch (err) {
+        failedBoards.push(`${board} (${(err as Error).message.slice(0, 24)})`);
+      }
     })
   );
-  return results;
+
+  return { jobs: results, failedBoards, truncatedBoards };
 }
 
-/**
- * FreeHire Direct ATS Connector 2: Lever Postings API
- */
-async function fetchLeverBoards(boards: string[]): Promise<RawScoutedJob[]> {
+async function fetchLeverBoards(boards: string[]): Promise<BoardFetchResult> {
   const results: RawScoutedJob[] = [];
+  const failedBoards: string[] = [];
+  const activeBoards = boards.slice(0, MAX_ATS_BOARDS_PER_PROVIDER);
+  const truncatedBoards = Math.max(0, boards.length - activeBoards.length);
+
   await Promise.all(
-    boards.slice(0, 4).map(async (board) => {
+    activeBoards.map(async (board) => {
       try {
         const res = await fetch(
           `https://api.lever.co/v0/postings/${encodeURIComponent(board)}?mode=json`,
           { signal: AbortSignal.timeout(6500) }
         );
-        if (!res.ok) return;
+        if (!res.ok) {
+          failedBoards.push(`${board} (${res.status})`);
+          return;
+        }
         const data = await res.json();
         if (!Array.isArray(data)) return;
         for (const job of data.slice(0, 5)) {
@@ -337,25 +401,32 @@ async function fetchLeverBoards(boards: string[]): Promise<RawScoutedJob[]> {
             source: 'Lever',
           });
         }
-      } catch {}
+      } catch (err) {
+        failedBoards.push(`${board} (${(err as Error).message.slice(0, 24)})`);
+      }
     })
   );
-  return results;
+
+  return { jobs: results, failedBoards, truncatedBoards };
 }
 
-/**
- * FreeHire Direct ATS Connector 3: Ashby Public Posting API
- */
-async function fetchAshbyBoards(boards: string[]): Promise<RawScoutedJob[]> {
+async function fetchAshbyBoards(boards: string[]): Promise<BoardFetchResult> {
   const results: RawScoutedJob[] = [];
+  const failedBoards: string[] = [];
+  const activeBoards = boards.slice(0, MAX_ATS_BOARDS_PER_PROVIDER);
+  const truncatedBoards = Math.max(0, boards.length - activeBoards.length);
+
   await Promise.all(
-    boards.slice(0, 4).map(async (board) => {
+    activeBoards.map(async (board) => {
       try {
         const res = await fetch(
           `https://api.ashbyhq.com/posting-api/job-board/${encodeURIComponent(board)}`,
           { signal: AbortSignal.timeout(6500) }
         );
-        if (!res.ok) return;
+        if (!res.ok) {
+          failedBoards.push(`${board} (${res.status})`);
+          return;
+        }
         const data = await res.json();
         for (const job of (data.jobs || []).slice(0, 6)) {
           results.push({
@@ -369,24 +440,38 @@ async function fetchAshbyBoards(boards: string[]): Promise<RawScoutedJob[]> {
             source: 'Ashby',
           });
         }
-      } catch {}
+      } catch (err) {
+        failedBoards.push(`${board} (${(err as Error).message.slice(0, 24)})`);
+      }
     })
   );
-  return results;
+
+  return { jobs: results, failedBoards, truncatedBoards };
 }
 
 /**
- * Executes a live multi-source + direct ATS job scout run driven by profile targeting,
- * deduplicates canonically across boards and existing ledger, evaluates top candidates, and persists matches.
+ * Executes a bounded-concurrency live multi-source + direct ATS job scout run driven by profile targeting,
+ * deduplicates canonically across Sheet1 + SeenJobs, evaluates top candidates within a 42s budget,
+ * and honestly reports persistence status.
  */
 export async function executeLiveScoutRun(options?: {
   minScoreToCommit?: number;
   maxToEvaluate?: number;
-  customBoards?: { greenhouse?: string[]; lever?: string[]; ashby?: string[] };
+  customBoards?: {
+    greenhouse?: string[];
+    lever?: string[];
+    ashby?: string[];
+    workable?: string[];
+    smartrecruiters?: string[];
+    recruitee?: string[];
+    career_urls?: string[];
+  };
 }): Promise<ScoutRunSummary> {
-  const profile: CandidateProfile = getCandidateProfile();
+  const sweepStartMs = Date.now();
+  const warnings: string[] = [];
+  const profile: CandidateProfile = await getCandidateProfileAsync();
   const minScore = options?.minScoreToCommit ?? 82;
-  const maxToEvaluate = options?.maxToEvaluate ?? 6;
+  const maxToEvaluate = Math.min(20, Math.max(1, options?.maxToEvaluate ?? 6));
   const { remoteOkTags, remotiveCategories, remotiveKeywords } = deriveDynamicSearchParams(profile);
 
   const ghBoards =
@@ -401,29 +486,85 @@ export async function executeLiveScoutRun(options?: {
     options?.customBoards?.ashby ||
     profile.ats_companies?.ashby ||
     DEFAULT_ATS_COMPANIES.ashby;
+  const workableBoards =
+    options?.customBoards?.workable ||
+    profile.ats_companies?.workable ||
+    DEFAULT_ATS_COMPANIES.workable ||
+    [];
+  const smartRecruitersBoards =
+    options?.customBoards?.smartrecruiters ||
+    profile.ats_companies?.smartrecruiters ||
+    DEFAULT_ATS_COMPANIES.smartrecruiters ||
+    [];
+  const recruiteeBoards =
+    options?.customBoards?.recruitee ||
+    profile.ats_companies?.recruitee ||
+    DEFAULT_ATS_COMPANIES.recruitee ||
+    [];
+  const careerUrls =
+    options?.customBoards?.career_urls ||
+    profile.career_urls ||
+    DEFAULT_CAREER_URLS;
 
   const sourceHealth: Record<string, SourceHealthMetric> = {};
+  const cloudConfigured = isCloudSheetsConfigured();
 
-  const [greenhouse, ashby, lever, remoteOk, remotive, himalayas, arbeitnow, theMuse, freeHire] =
-    await Promise.all([
-      timedFetch('Greenhouse', () => fetchGreenhouseBoards(ghBoards), sourceHealth),
-      timedFetch('Ashby', () => fetchAshbyBoards(ashbyBoards), sourceHealth),
-      timedFetch('Lever', () => fetchLeverBoards(leverBoards), sourceHealth),
-      timedFetch('RemoteOK', () => fetchRemoteOK(remoteOkTags), sourceHealth),
-      timedFetch('Remotive', () => fetchRemotive(remotiveCategories, remotiveKeywords), sourceHealth),
-      timedFetch('Himalayas', () => fetchHimalayas(), sourceHealth),
-      timedFetch('Arbeitnow', () => fetchArbeitnow(), sourceHealth),
-      timedFetch('TheMuse', () => fetchTheMuse(), sourceHealth),
-      process.env.FREEHIRE_API_URL
-        ? timedFetch('FreeHire API', () => fetchFreeHireOptionalApi(), sourceHealth)
-        : Promise.resolve([]),
-    ]);
+  const [
+    careerPages,
+    greenhouse,
+    ashby,
+    lever,
+    workable,
+    smartRecruiters,
+    recruitee,
+    remoteOk,
+    remotive,
+    himalayas,
+    arbeitnow,
+    theMuse,
+    freeHire,
+    ledgerData,
+    seenJobIds,
+  ] = await Promise.all([
+    timedFetch('Company Career Pages', () => fetchCompanyCareerPages(careerUrls), sourceHealth),
+    timedFetch('Greenhouse', () => fetchGreenhouseBoards(ghBoards), sourceHealth),
+    timedFetch('Ashby', () => fetchAshbyBoards(ashbyBoards), sourceHealth),
+    timedFetch('Lever', () => fetchLeverBoards(leverBoards), sourceHealth),
+    timedFetch('Workable', () => fetchWorkableBoards(workableBoards), sourceHealth),
+    timedFetch('SmartRecruiters', () => fetchSmartRecruitersBoards(smartRecruitersBoards), sourceHealth),
+    timedFetch('Recruitee', () => fetchRecruiteeBoards(recruiteeBoards), sourceHealth),
+    timedFetch('RemoteOK', () => fetchRemoteOK(remoteOkTags), sourceHealth),
+    timedFetch('Remotive', () => fetchRemotive(remotiveCategories, remotiveKeywords), sourceHealth),
+    timedFetch('Himalayas', () => fetchHimalayas(), sourceHealth),
+    timedFetch('Arbeitnow', () => fetchArbeitnow(), sourceHealth),
+    timedFetch('TheMuse', () => fetchTheMuse(), sourceHealth),
+    process.env.FREEHIRE_API_URL
+      ? timedFetch('FreeHire API', () => fetchFreeHireOptionalApi(), sourceHealth)
+      : Promise.resolve([]),
+    getAllSheetRows(),
+    cloudConfigured
+      ? getCloudSeenJobIds().catch(() => readLocalSeenJobIds())
+      : Promise.resolve(readLocalSeenJobIds()),
+  ]);
+
+  for (const [src, metric] of Object.entries(sourceHealth)) {
+    if (metric.failedBoards && metric.failedBoards.length > 0) {
+      warnings.push(`${src} board issues: ${metric.failedBoards.join(', ')}`);
+    }
+    if (metric.truncatedBoards && metric.truncatedBoards > 0) {
+      warnings.push(`${src}: ${metric.truncatedBoards} configured boards exceeded the ${MAX_ATS_BOARDS_PER_PROVIDER}-board per-sweep limit.`);
+    }
+  }
 
   const rawCombined: RawScoutedJob[] = [
+    ...careerPages,
     ...freeHire,
     ...greenhouse,
     ...ashby,
     ...lever,
+    ...workable,
+    ...smartRecruiters,
+    ...recruitee,
     ...remoteOk,
     ...remotive,
     ...himalayas,
@@ -436,11 +577,11 @@ export async function executeLiveScoutRun(options?: {
     sourceCounts[j.source] = (sourceCounts[j.source] || 0) + 1;
   }
 
-  // Ledger deduplication + In-Batch Canonical Fingerprint Deduplication
-  const { rows } = await getAllSheetRows();
-  const existingIds = new Set(rows.slice(1).map((r) => String(r[1] || '')));
+  const existingIds = new Set(ledgerData.rows.slice(1).map((r) => String(r[1] || '').trim()));
   const existingFingerprints = new Set(
-    rows.slice(1).map((r) => normalizeCanonicalFingerprint(String(r[3] || ''), String(r[2] || '')))
+    ledgerData.rows
+      .slice(1)
+      .map((r) => normalizeCanonicalFingerprint(String(r[3] || ''), String(r[2] || '')))
   );
 
   const seenBatchIds = new Set<string>();
@@ -452,6 +593,7 @@ export async function executeLiveScoutRun(options?: {
     const fp = normalizeCanonicalFingerprint(j.company, j.title);
     if (
       existingIds.has(j.id) ||
+      seenJobIds.has(j.id) ||
       existingFingerprints.has(fp) ||
       seenBatchIds.has(j.id) ||
       seenBatchFingerprints.has(fp)
@@ -516,17 +658,64 @@ export async function executeLiveScoutRun(options?: {
   const committedJobs: ScoutRunSummary['committed_jobs'] = [];
   const todayStr = new Date().toISOString().split('T')[0];
 
-  for (const candidate of candidatesToScore) {
-    const evalResult = await evaluateRoleWithLLM(
-      {
-        title: candidate.title,
-        company: candidate.company,
-        location: candidate.location,
-        salary: candidate.salary,
-        description: candidate.description,
-      },
-      profile
+  // Evaluate in bounded pairs to reduce runtime while respecting API RPM limits & 42s timeout budget
+  const evaluatedPairs: Array<{
+    candidate: RawScoutedJob;
+    evalResult: Awaited<ReturnType<typeof evaluateRoleWithLLM>>;
+  }> = [];
+  let deadlineTriggered = false;
+
+  for (let i = 0; i < candidatesToScore.length; i += 2) {
+    const chunk = candidatesToScore.slice(i, i + 2);
+    const chunkResults = await Promise.all(
+      chunk.map(async (candidate) => {
+        if (Date.now() - sweepStartMs > SWEEP_DEADLINE_MS) {
+          deadlineTriggered = true;
+          return {
+            candidate,
+            evalResult: deterministicEvaluateJob(
+              {
+                title: candidate.title,
+                company: candidate.company,
+                location: candidate.location,
+                salary: candidate.salary,
+                description: candidate.description,
+              },
+              profile
+            ),
+          };
+        }
+        const evalResult = await evaluateRoleWithLLM(
+          {
+            title: candidate.title,
+            company: candidate.company,
+            location: candidate.location,
+            salary: candidate.salary,
+            description: candidate.description,
+          },
+          profile
+        );
+        return { candidate, evalResult };
+      })
     );
+    evaluatedPairs.push(...chunkResults);
+  }
+
+  if (deadlineTriggered) {
+    warnings.push(
+      'Sweep deadline budget (42s) reached; remaining candidates scored instantaneously with Deterministic 4-Pillar Rubric v3.2.'
+    );
+  }
+
+  const newlyEvaluatedIds: string[] = [];
+  let resolvedPersistenceMode: ScoutRunSummary['persistence_mode'] = cloudConfigured
+    ? 'cloud-sheets'
+    : 'local-disk';
+
+  for (const { candidate, evalResult } of evaluatedPairs) {
+    if (evalResult.score > 0) {
+      newlyEvaluatedIds.push(candidate.id);
+    }
 
     if (evalResult.score >= minScore) {
       const status = evalResult.score >= 90 ? 'SHORTLISTED' : 'NEW';
@@ -544,14 +733,37 @@ export async function executeLiveScoutRun(options?: {
         status,
       };
 
-      appendLocalJobRecord(record);
+      const localWrite = appendLocalJobRecordDetailed(record);
+      let cloudSaved = false;
+      let cloudError: string | undefined;
 
-      if (isCloudSheetsConfigured()) {
+      if (cloudConfigured) {
         try {
           await appendCloudSheetRecord(record);
+          cloudSaved = true;
         } catch (e) {
-          console.warn('[LiveScout] Cloud sheet append skipped, stored locally:', e);
+          cloudError = (e as Error).message;
         }
+      }
+
+      if (cloudSaved) {
+        resolvedPersistenceMode = 'cloud-sheets';
+      } else if (localWrite.ok) {
+        resolvedPersistenceMode =
+          localWrite.mode === 'ephemeral-tmp' ? 'ephemeral-tmp' : 'local-disk';
+        if (cloudError) {
+          warnings.push(`Cloud sheet append failed (${cloudError}); saved to ${localWrite.mode}.`);
+        } else if (localWrite.mode === 'ephemeral-tmp' && !warnings.some((w) => w.includes('/tmp'))) {
+          warnings.push(
+            'Container mounts data/ as read-only; committed matches saved in ephemeral /tmp memory. Configure GOOGLE_SHEET_ID for durable cloud persistence.'
+          );
+        }
+      } else {
+        throw new Error(
+          cloudError
+            ? `Failed persisting scouted job "${record.title}" to Google Sheets (${cloudError}) and runtime disk is read-only.`
+            : `Read-only storage prevented committing "${record.title}". Configure GOOGLE_SHEET_ID + GOOGLE_SERVICE_KEY_BASE64 for cloud persistence.`
+        );
       }
 
       committedJobs.push({
@@ -566,10 +778,26 @@ export async function executeLiveScoutRun(options?: {
     }
   }
 
+  // Persist seen IDs so rejected < minScore jobs aren't re-evaluated in the next sweep
+  if (newlyEvaluatedIds.length > 0) {
+    appendLocalSeenJobIds(newlyEvaluatedIds);
+    if (cloudConfigured) {
+      try {
+        await appendCloudSeenJobIds(newlyEvaluatedIds);
+      } catch {
+        // Non-fatal
+      }
+    }
+  }
+
   const sourcesQueried = [
+    'Company Career Pages',
     'Greenhouse Direct ATS',
     'Ashby Direct ATS',
     'Lever Direct ATS',
+    'Workable Direct ATS',
+    'SmartRecruiters Direct ATS',
+    'Recruitee Direct ATS',
     'RemoteOK API',
     'Remotive API',
     'Himalayas API',
@@ -585,6 +813,8 @@ export async function executeLiveScoutRun(options?: {
     sources_queried: sourcesQueried,
     source_counts: sourceCounts,
     source_health: sourceHealth,
+    persistence_mode: resolvedPersistenceMode,
+    warnings,
     total_fetched: rawCombined.length,
     new_after_dedup: unseen.length,
     evaluated_count: candidatesToScore.length,

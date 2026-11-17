@@ -6,9 +6,13 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export const SOURCE_FILTER_OPTIONS = [
+  'Company Career Page',
   'Greenhouse ATS',
   'Lever ATS',
   'Ashby ATS',
+  'Workable ATS',
+  'SmartRecruiters ATS',
+  'Recruitee ATS',
   'FreeHire API',
   'Himalayas',
   'Internshala',
@@ -21,9 +25,13 @@ export const SOURCE_FILTER_OPTIONS = [
 ] as const;
 
 export function detectSource(id: string): string {
+  if (id.startsWith('career_')) return 'Company Career Page';
   if (id.startsWith('greenhouse_')) return 'Greenhouse ATS';
   if (id.startsWith('lever_')) return 'Lever ATS';
   if (id.startsWith('ashby_')) return 'Ashby ATS';
+  if (id.startsWith('workable_')) return 'Workable ATS';
+  if (id.startsWith('smartrecruiters_')) return 'SmartRecruiters ATS';
+  if (id.startsWith('recruitee_')) return 'Recruitee ATS';
   if (id.startsWith('freehire_')) return 'FreeHire API';
   if (id.startsWith('himalayas_')) return 'Himalayas';
   if (id.startsWith('arbeitnow_')) return 'Arbeitnow';
@@ -48,6 +56,19 @@ export function safeExternalUrl(rawUrl: string | undefined | null): string {
 }
 
 /**
+ * Extracts a clean display hostname from an external job apply URL (returns '' if invalid).
+ */
+export function extractExternalHost(rawUrl: string | undefined | null): string {
+  const safe = safeExternalUrl(rawUrl);
+  if (safe === '#') return '';
+  try {
+    return new URL(safe).hostname.replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+
+/**
  * Produces a deterministic canonical fingerprint for deduplicating company + role pairs across boards.
  */
 export function normalizeCanonicalFingerprint(company: string, title: string): string {
@@ -57,6 +78,107 @@ export function normalizeCanonicalFingerprint(company: string, title: string): s
       .replace(/\b(inc|llc|ltd|corp|co|pvt|technologies|tech|ai|labs)\b/g, '')
       .replace(/[^a-z0-9]/g, '');
   return `${norm(company)}::${norm(title)}`;
+}
+
+/**
+ * Prevents CSV/Excel formula injection (=, +, -, @, \t, \r) on client-exported spreadsheets.
+ */
+export function sanitizeCsvCell(val: unknown): string {
+  const raw = String(val ?? '');
+  const trimmed = raw.trimStart();
+  const safe = /^[=+\-@\t\r]/.test(raw) || /^[=+\-@\t\r]/.test(trimmed) ? `'${raw}` : raw;
+  return `"${safe.replace(/"/g, '""')}"`;
+}
+
+/**
+ * Validates optional external HTTP/HTTPS endpoints (such as FREEHIRE_API_URL) against SSRF risks.
+ */
+export function validateSafePublicUrl(
+  rawUrl: string,
+  options?: { allowLocalDev?: boolean }
+): { ok: boolean; url?: URL; reason?: string } {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl.trim());
+  } catch {
+    return { ok: false, reason: 'Invalid URL syntax' };
+  }
+
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return { ok: false, reason: `Disallowed URL scheme: ${parsed.protocol}` };
+  }
+
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const isLocalHost =
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '::1' ||
+    host.endsWith('.local');
+
+  const isMetadataOrPrivate =
+    host === '169.254.169.254' ||
+    host === 'metadata.google.internal' ||
+    host.startsWith('10.') ||
+    host.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
+    host.startsWith('fc') ||
+    host.startsWith('fd') ||
+    host.startsWith('fe80:');
+
+  if (isMetadataOrPrivate || (isLocalHost && !options?.allowLocalDev && process.env.NODE_ENV === 'production')) {
+    return { ok: false, reason: `Blocked private or metadata endpoint host: ${host}` };
+  }
+
+  if (process.env.NODE_ENV === 'production' && parsed.protocol !== 'https:' && !isLocalHost) {
+    return { ok: false, reason: 'Production external bridge URLs must use HTTPS' };
+  }
+
+  return { ok: true, url: parsed };
+}
+
+/**
+ * Parses YYYY-MM-DD consistently at local noon to prevent UTC midnight timezone off-by-one drift.
+ */
+export function parseIsoDateTimestamp(dateStr: string | undefined | null): number {
+  if (!dateStr || typeof dateStr !== 'string') return NaN;
+  const trimmed = dateStr.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    const [y, m, d] = trimmed.split('-').map(Number);
+    return new Date(y, m - 1, d, 12, 0, 0).getTime();
+  }
+  return new Date(trimmed).getTime();
+}
+
+/**
+ * Iframe-safe & HTTP-safe clipboard copy with hidden textarea fallback.
+ */
+export async function copyToClipboardSafe(text: string): Promise<boolean> {
+  if (!text || typeof document === 'undefined') return false;
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through to execCommand fallback (e.g., inside permission-restricted iframes)
+  }
+
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '-9999px';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return ok;
+  } catch {
+    return false;
+  }
 }
 
 /**

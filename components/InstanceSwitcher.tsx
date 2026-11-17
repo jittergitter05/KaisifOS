@@ -1,8 +1,8 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Check, RefreshCw, ArrowRight } from 'lucide-react';
+import { Check, RefreshCw, ArrowRight, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   PROFILE_PRESET_METADATA,
@@ -27,13 +27,33 @@ export default function InstanceSwitcher({ currentProfile }: InstanceSwitcherPro
   );
   const [saving, setSaving] = useState(false);
   const [savedBanner, setSavedBanner] = useState<string | null>(null);
+  const [warningBanner, setWarningBanner] = useState<string | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+
+  const profileMetric0 = currentProfile.key_metrics[0] || '';
+  const profileRolesSummary = currentProfile.target_roles.slice(0, 4).join(', ');
+  const profileCitiesSummary = currentProfile.target_cities.join(', ');
+
+  useEffect(() => {
+    setSystemName(currentProfile.system_name || siteConfig.name);
+    setOwnerName(currentProfile.name || '');
+    setRolesText(profileRolesSummary);
+    setCitiesText(profileCitiesSummary);
+    setLeadMetric(profileMetric0 || 'Delivered measurable impact across core KPIs');
+  }, [
+    currentProfile.system_name,
+    currentProfile.name,
+    profileRolesSummary,
+    profileCitiesSummary,
+    profileMetric0,
+  ]);
 
   const activePresetKey = detectMatchingPresetKey(currentProfile);
 
   const applyPreset = async (presetKey: string) => {
     setSaving(true);
     setSavedBanner(null);
+    setWarningBanner(null);
     setErrorBanner(null);
     try {
       const res = await fetch('/api/profile', {
@@ -54,7 +74,14 @@ export default function InstanceSwitcher({ currentProfile }: InstanceSwitcherPro
           setCitiesText(data.profile.target_cities.join(', '));
           setLeadMetric(data.profile.key_metrics[0] || '');
         }
-        setSavedBanner('Profile updated.');
+        setSavedBanner(
+          data.persistenceMode === 'cloud-sheets'
+            ? 'Profile updated and synced to Google Sheets.'
+            : 'Profile updated.'
+        );
+        if (data.warning) {
+          setWarningBanner(data.warning);
+        }
         router.refresh();
       } else {
         setErrorBanner(data.error || `Failed to switch track (HTTP ${res.status}).`);
@@ -70,6 +97,7 @@ export default function InstanceSwitcher({ currentProfile }: InstanceSwitcherPro
     e.preventDefault();
     setSaving(true);
     setSavedBanner(null);
+    setWarningBanner(null);
     setErrorBanner(null);
     try {
       const updated = {
@@ -101,7 +129,14 @@ export default function InstanceSwitcher({ currentProfile }: InstanceSwitcherPro
       }
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
-        setSavedBanner(`Saved profile for ${updated.name}.`);
+        setSavedBanner(
+          data.persistenceMode === 'cloud-sheets'
+            ? `Saved profile for ${updated.name} to Google Sheets.`
+            : `Saved profile for ${updated.name}.`
+        );
+        if (data.warning) {
+          setWarningBanner(data.warning);
+        }
         setOpenCustom(false);
         router.refresh();
       } else {
@@ -148,6 +183,13 @@ export default function InstanceSwitcher({ currentProfile }: InstanceSwitcherPro
         <div className="bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-700/60 text-emerald-700 dark:text-emerald-300 px-3.5 py-2 rounded-md text-xs flex items-center gap-2">
           <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
           <span>{savedBanner}</span>
+        </div>
+      )}
+
+      {warningBanner && (
+        <div className="bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-700/60 text-amber-800 dark:text-amber-200 px-3.5 py-2 rounded-md text-xs flex items-start gap-2">
+          <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+          <span>{warningBanner}</span>
         </div>
       )}
 
