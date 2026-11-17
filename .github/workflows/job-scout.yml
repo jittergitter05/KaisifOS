@@ -24,6 +24,9 @@ jobs:
       - name: Install dependencies
         run: npm install
         
+      - name: Typecheck
+        run: npm run typecheck
+
       - name: Run Tests
         run: npm test
         
@@ -31,6 +34,8 @@ jobs:
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          FREEHIRE_API_URL: ${{ secrets.FREEHIRE_API_URL }}
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}

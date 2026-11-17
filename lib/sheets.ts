@@ -19,6 +19,21 @@ export interface StoredJobRecord {
 
 const LOCAL_STORE_PATH = path.join(process.cwd(), 'data', 'jobs-store.json');
 
+/**
+ * Atomic write-to-temp + renameSync prevents partial/corrupt JSON writes on concurrent mutations.
+ */
+export function atomicWriteJsonFile(targetPath: string, data: unknown): void {
+  const dir = path.dirname(targetPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  const tmpPath = `${targetPath}.tmp.${process.pid}.${Date.now()}.${Math.random()
+    .toString(36)
+    .slice(2, 7)}`;
+  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');
+  fs.renameSync(tmpPath, targetPath);
+}
+
 export function isCloudSheetsConfigured(): boolean {
   return Boolean(process.env.GOOGLE_SERVICE_KEY_BASE64 && process.env.GOOGLE_SHEET_ID);
 }
@@ -33,6 +48,18 @@ export async function getAuth() {
   });
 }
 
+/**
+ * Defends spreadsheet exports and Google Sheets cells against CSV/Formula injection (=, +, -, @, \t, \r).
+ */
+export function sanitizeSheetCell(val: unknown, maxLen = 2000): string {
+  const raw = String(val ?? '').slice(0, maxLen);
+  const str = raw.trim();
+  if (/^[=+\-@\t\r]/.test(raw) || /^[=+\-@\t\r]/.test(str)) {
+    return `'${str}`;
+  }
+  return str;
+}
+
 export async function appendCloudSheetRecord(record: StoredJobRecord): Promise<void> {
   if (!isCloudSheetsConfigured()) return;
   const auth = await getAuth();
@@ -45,17 +72,17 @@ export async function appendCloudSheetRecord(record: StoredJobRecord): Promise<v
     requestBody: {
       values: [
         [
-          record.date,
-          record.id,
-          record.title,
-          record.company,
-          record.score,
-          record.reasons,
-          record.gap,
-          record.url,
-          record.dm,
-          record.resumeAngle,
-          record.status,
+          sanitizeSheetCell(record.date || new Date().toISOString().split('T')[0], 20),
+          sanitizeSheetCell(record.id, 120),
+          sanitizeSheetCell(record.title, 200),
+          sanitizeSheetCell(record.company, 160),
+          Math.max(0, Math.min(100, Math.round(Number(record.score) || 0))),
+          sanitizeSheetCell(record.reasons, 1000),
+          sanitizeSheetCell(record.gap, 500),
+          sanitizeSheetCell(record.url, 500),
+          sanitizeSheetCell(record.dm, 1500),
+          sanitizeSheetCell(record.resumeAngle, 500),
+          sanitizeSheetCell(record.status, 40),
         ],
       ],
     },
@@ -63,16 +90,142 @@ export async function appendCloudSheetRecord(record: StoredJobRecord): Promise<v
 }
 
 export async function updateCloudSheetRowStatus(rowId: number, status: string): Promise<void> {
-  if (!isCloudSheetsConfigured()) return;
+  await updateCloudSheetRowFields({ rowId }, { status });
+}
+
+export interface JobFieldPatch {
+  status?: string;
+  dm?: string;
+  resumeAngle?: string;
+  gap?: string;
+  score?: number;
+  reasons?: string;
+}
+
+export async function updateCloudSheetRowFields(
+  target: { id?: string; rowId?: number },
+  patch: JobFieldPatch
+): Promise<boolean> {
+  if (!isCloudSheetsConfigured()) return false;
   const auth = await getAuth();
   const sheets = google.sheets('v4');
-  await sheets.spreadsheets.values.update({
+  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+
+  let targetRow = target.rowId;
+  if (target.id) {
+    try {
+      const idColRes = await sheets.spreadsheets.values.get({
+        auth,
+        spreadsheetId,
+        range: 'Sheet1!B:B',
+      });
+      const colValues = idColRes.data.values || [];
+      const foundIdx = colValues.findIndex((r) => String(r[0] || '').trim() === target.id);
+      if (foundIdx >= 1) {
+        targetRow = foundIdx + 1;
+      }
+    } catch (lookupErr) {
+      console.warn('[Sheets] ID lookup fell back to rowId:', lookupErr);
+    }
+  }
+
+  if (!targetRow || !Number.isInteger(targetRow) || targetRow < 2) {
+    return false;
+  }
+
+  const data: Array<{ range: string; values: (string | number)[][] }> = [];
+  if (patch.score !== undefined) {
+    data.push({
+      range: `Sheet1!E${targetRow}`,
+      values: [[Math.max(0, Math.min(100, Math.round(Number(patch.score) || 0)))]],
+    });
+  }
+  if (patch.reasons !== undefined) {
+    data.push({ range: `Sheet1!F${targetRow}`, values: [[sanitizeSheetCell(patch.reasons, 1000)]] });
+  }
+  if (patch.gap !== undefined) {
+    data.push({ range: `Sheet1!G${targetRow}`, values: [[sanitizeSheetCell(patch.gap, 500)]] });
+  }
+  if (patch.dm !== undefined) {
+    data.push({ range: `Sheet1!I${targetRow}`, values: [[sanitizeSheetCell(patch.dm, 1500)]] });
+  }
+  if (patch.resumeAngle !== undefined) {
+    data.push({
+      range: `Sheet1!J${targetRow}`,
+      values: [[sanitizeSheetCell(patch.resumeAngle, 500)]],
+    });
+  }
+  if (patch.status !== undefined) {
+    data.push({ range: `Sheet1!K${targetRow}`, values: [[sanitizeSheetCell(patch.status, 40)]] });
+  }
+
+  if (data.length === 0) return false;
+
+  await sheets.spreadsheets.values.batchUpdate({
     auth,
-    spreadsheetId: process.env.GOOGLE_SHEET_ID,
-    range: `Sheet1!K${rowId}`,
-    valueInputOption: 'USER_ENTERED',
-    requestBody: { values: [[status]] },
+    spreadsheetId,
+    requestBody: {
+      valueInputOption: 'USER_ENTERED',
+      data,
+    },
   });
+  return true;
+}
+
+/**
+ * Atomic single-call batch status update on Google Sheets v4 for bulk toolbar actions.
+ */
+export async function batchUpdateCloudSheetRows(
+  targets: Array<{ id?: string; rowId?: number }>,
+  status: string
+): Promise<number> {
+  if (!isCloudSheetsConfigured() || targets.length === 0) return 0;
+  const auth = await getAuth();
+  const sheets = google.sheets('v4');
+  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+
+  const idToRow = new Map<string, number>();
+  if (targets.some((t) => Boolean(t.id))) {
+    try {
+      const idColRes = await sheets.spreadsheets.values.get({
+        auth,
+        spreadsheetId,
+        range: 'Sheet1!B:B',
+      });
+      const colValues = idColRes.data.values || [];
+      colValues.forEach((r, idx) => {
+        const key = String(r[0] || '').trim();
+        if (idx >= 1 && key) idToRow.set(key, idx + 1);
+      });
+    } catch (lookupErr) {
+      console.warn('[Sheets] Batch ID lookup fell back to rowIds:', lookupErr);
+    }
+  }
+
+  const safeStatus = sanitizeSheetCell(status, 40);
+  const data: Array<{ range: string; values: string[][] }> = [];
+  const seenRows = new Set<number>();
+
+  for (const t of targets) {
+    const resolved = (t.id ? idToRow.get(t.id) : undefined) ?? t.rowId;
+    if (resolved && Number.isInteger(resolved) && resolved >= 2 && !seenRows.has(resolved)) {
+      seenRows.add(resolved);
+      data.push({ range: `Sheet1!K${resolved}`, values: [[safeStatus]] });
+    }
+  }
+
+  if (data.length === 0) return 0;
+
+  await sheets.spreadsheets.values.batchUpdate({
+    auth,
+    spreadsheetId,
+    requestBody: {
+      valueInputOption: 'USER_ENTERED',
+      data,
+    },
+  });
+
+  return data.length;
 }
 
 function resolveDateString(record: StoredJobRecord): string {
@@ -122,23 +275,65 @@ export function readLocalJobRows(): string[][] {
 }
 
 export function updateLocalJobRow(
-  rowId: number,
-  patch: { status?: string; dm?: string; resumeAngle?: string; gap?: string }
+  target: number | { id?: string; rowId?: number },
+  patch: JobFieldPatch
 ): boolean {
   try {
     if (!fs.existsSync(LOCAL_STORE_PATH)) return false;
     const raw = JSON.parse(fs.readFileSync(LOCAL_STORE_PATH, 'utf8')) as StoredJobRecord[];
-    const idx = rowId - 2;
+
+    const targetId = typeof target === 'object' ? target.id : undefined;
+    const targetRowId = typeof target === 'number' ? target : target.rowId;
+
+    let idx = targetId ? raw.findIndex((item) => item.id === targetId) : -1;
+    if (idx < 0 && typeof targetRowId === 'number') {
+      idx = targetRowId - 2;
+    }
+
     if (idx < 0 || idx >= raw.length) return false;
     if (patch.status !== undefined) raw[idx].status = patch.status;
     if (patch.dm !== undefined) raw[idx].dm = patch.dm;
     if (patch.resumeAngle !== undefined) raw[idx].resumeAngle = patch.resumeAngle;
     if (patch.gap !== undefined) raw[idx].gap = patch.gap;
-    fs.writeFileSync(LOCAL_STORE_PATH, JSON.stringify(raw, null, 2), 'utf8');
+    if (patch.score !== undefined) {
+      raw[idx].score = Math.max(0, Math.min(100, Math.round(Number(patch.score) || 0)));
+    }
+    if (patch.reasons !== undefined) raw[idx].reasons = patch.reasons;
+    atomicWriteJsonFile(LOCAL_STORE_PATH, raw);
     return true;
   } catch (e) {
     console.error('[LocalStore] Failed updating row:', e);
     return false;
+  }
+}
+
+export function batchUpdateLocalJobRows(
+  targets: Array<{ id?: string; rowId?: number }>,
+  status: string
+): number {
+  try {
+    if (!fs.existsSync(LOCAL_STORE_PATH) || targets.length === 0) return 0;
+    const raw = JSON.parse(fs.readFileSync(LOCAL_STORE_PATH, 'utf8')) as StoredJobRecord[];
+    let updatedCount = 0;
+
+    for (const target of targets) {
+      let idx = target.id ? raw.findIndex((item) => item.id === target.id) : -1;
+      if (idx < 0 && typeof target.rowId === 'number') {
+        idx = target.rowId - 2;
+      }
+      if (idx >= 0 && idx < raw.length) {
+        raw[idx].status = status;
+        updatedCount += 1;
+      }
+    }
+
+    if (updatedCount > 0) {
+      atomicWriteJsonFile(LOCAL_STORE_PATH, raw);
+    }
+    return updatedCount;
+  } catch (e) {
+    console.error('[LocalStore] Failed batch updating rows:', e);
+    return 0;
   }
 }
 
@@ -147,12 +342,13 @@ export function appendLocalJobRecord(record: StoredJobRecord): boolean {
     const existing: StoredJobRecord[] = fs.existsSync(LOCAL_STORE_PATH)
       ? JSON.parse(fs.readFileSync(LOCAL_STORE_PATH, 'utf8'))
       : [];
-    existing.unshift({
+    const deduped = record.id ? existing.filter((item) => item.id !== record.id) : existing;
+    deduped.unshift({
       ...record,
       date: record.date || new Date().toISOString().split('T')[0],
       daysAgo: 0,
     });
-    fs.writeFileSync(LOCAL_STORE_PATH, JSON.stringify(existing, null, 2), 'utf8');
+    atomicWriteJsonFile(LOCAL_STORE_PATH, deduped);
     return true;
   } catch (e) {
     console.error('[LocalStore] Failed appending record:', e);
@@ -213,6 +409,15 @@ export async function getPublicStats() {
       if (['INTERVIEW', 'OFFER'].includes(status)) offersAndInterviews++;
     }
 
+    const sortedRecent = [...dataRows]
+      .sort((a, b) => {
+        const tA = new Date(a[0]).getTime() || 0;
+        const tB = new Date(b[0]).getTime() || 0;
+        if (tB !== tA) return tB - tA;
+        return parseInt(b[4] || '0', 10) - parseInt(a[4] || '0', 10);
+      })
+      .slice(0, 5);
+
     return {
       jobs_scouted_this_week: scoutedWeek,
       total_tracked: dataRows.length,
@@ -222,7 +427,7 @@ export async function getPublicStats() {
       interviews_and_offers: offersAndInterviews,
       response_rate: applied > 0 ? `${Math.round((replied / applied) * 100)}%` : '0%',
       storage_mode: mode,
-      recent_matches: dataRows.slice(0, 5).map((r) => ({
+      recent_matches: sortedRecent.map((r) => ({
         date: r[0],
         id: r[1],
         title: r[2],

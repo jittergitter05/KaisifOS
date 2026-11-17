@@ -91,14 +91,36 @@ export function deriveDynamicSearchParams(profile) {
 
 // ─── PROMPT GENERATOR ────────────────────────────────────────────────────────
 
+function extractHighSignalJdForScout(rawDesc, maxLen = 1400) {
+  const clean = String(rawDesc || '').trim();
+  if (clean.length <= maxLen) return clean;
+  const intro = clean.slice(0, 500);
+  const chunks = clean
+    .slice(500)
+    .split(/\n+|(?<=[.!?])\s+/)
+    .map((c) => c.trim())
+    .filter((c) => c.length > 15);
+  const priority = chunks.filter((c) =>
+    /\b(require|qualification|must|experience|years?|yrs?|senior|junior|entry|fresher|salary|compensation|lpa|ctc|\$\d|visa|sponsor|relocation|remote|skills?)\b/i.test(c)
+  );
+  const picked = [];
+  let len = intro.length;
+  for (const chunk of priority) {
+    if (len + chunk.length + 3 > maxLen) break;
+    picked.push(chunk);
+    len += chunk.length + 3;
+  }
+  return picked.length > 0 ? `${intro} ... ${picked.join(' | ')}` : clean.slice(0, maxLen);
+}
+
 export function buildPrompt(job, profile) {
-  const desc = (job.description || '').substring(0, 600);
+  const desc = extractHighSignalJdForScout(job.description || '', 1400);
   const location = job.location || 'Not specified';
   const salaryInfo = job.salary_min
     ? `Min salary: ${job.salary_min} ${job.salary_max ? `- ${job.salary_max}` : ''}`
     : 'Salary: Not listed';
 
-  const expYears = profile.experience_years;
+  const expYears = profile.experience_years ?? 0;
   const isFresher = expYears === 0;
 
   // Relocation logic based on profile
@@ -106,24 +128,25 @@ export function buildPrompt(job, profile) {
   const targetCities = (profile.target_cities || []).join(', ');
   let locationRule = '';
   if (willRelocate) {
-    locationRule = `3. Location (20 pts): Candidate is open to relocation globally (especially ${profile.relocation_preference?.preferred_regions?.join(', ')}). Give 20/20 for remote roles OR roles anywhere they are willing to relocate. Give 0/20 ONLY if the role explicitly forbids their relocation or is in an undesired location.`;
+    locationRule = `4. Comp & Location (15 pts): Candidate is open to relocation globally (especially ${profile.relocation_preference?.preferred_regions?.join(', ')}). Min salary ₹${profile.min_salary_lpa} LPA India or $${profile.min_salary_usd_annual || 30000} USD abroad. Give full 15/15 for remote or relo/visa-supported roles meeting salary floor; 0–5 if visa is forbidden or below floor.`;
   } else {
-    locationRule = `3. Location (20 pts): MUST be located in ${targetCities} (on-site/hybrid) or fully remote. Give 0/20 for any other location requiring relocation.`;
+    locationRule = `4. Comp & Location (15 pts): MUST be located in ${targetCities} (on-site/hybrid) or fully remote and meet ₹${profile.min_salary_lpa} LPA / $${profile.min_salary_usd_annual || 30000} USD. Give 0–4/15 for other locations or below floor.`;
   }
 
   // Experience logic
   let expRule = '';
   let hardExpRule = '';
   if (isFresher) {
-    expRule = `2. Experience match (25 pts): Candidate is a FRESHER (0 full-time years). Full marks only if the role is entry-level, junior, associate, or open to freshers. Penalise heavily (score 0/25) if it requires 2+ years of experience.`;
-    hardExpRule = `- DO NOT score above 50 if the role explicitly requires 2+ years of experience.`;
+    expRule = `3. Seniority & Experience match (15 pts): Candidate is a FRESHER (0 full-time years). Full marks only if the role is entry-level, junior, associate, or open to freshers. Score <=5/15 if it requires 3+ years or Senior/Director titles.`;
+    hardExpRule = `- DO NOT score above 48 total if the role explicitly requires 2+ years of experience.`;
   } else {
-    expRule = `2. Experience match (25 pts): Candidate has ${expYears} years of experience. Score based on how well this matches the role's requirements.`;
-    hardExpRule = `- DO NOT score above 50 if the role requires significantly more experience than ${expYears} years.`;
+    expRule = `3. Seniority & Experience match (15 pts): Candidate has ${expYears} years of experience. Score based on how well this matches the role's requirements.`;
+    hardExpRule = `- DO NOT score above 48 total if the role requires significantly more experience than ${expYears} years.`;
   }
 
-  return `You are a recruiting AI. Score this job for this specific candidate.
+  return `You are a recruiting AI. Score this job for this specific candidate using the 100-point 4-pillar rubric.
 Return ONLY valid JSON. No markdown. No explanation. No code fences.
+CRITICAL: NEVER invent candidate metrics or years not listed below. Evaluate evidence before assigning score.
 
 CANDIDATE:
 Name: ${profile.name}
@@ -141,23 +164,21 @@ Location: ${location}
 ${salaryInfo}
 Description: ${desc}
 
-SCORING RULES — READ ALL:
-1. Role match (40 pts): How well does the title/description match ${(profile.target_roles || []).slice(0, 4).join('/')}?
+SCORING RULES (4 PILLARS SUMMING TO 0–100):
+1. Role Affinity (40 pts): How well does the title/description match ${(profile.target_roles || []).slice(0, 4).join('/')}?
+2. Skill & Proof Coverage (30 pts): Overlap with candidate's skills (${(profile.skills || []).slice(0, 8).join(', ')}) and quantified proof metrics.
 ${expRule}
 ${locationRule}
-4. Salary (15 pts): Listed salary ≥ ₹${profile.min_salary_lpa} LPA India or ≥ $${profile.min_salary_usd_annual} USD abroad = full marks. Unlisted = 10/15 (assume standard).
-
-BONUS: Add 5–10 points if relocation/accommodation/visa is explicitly mentioned.
 
 HARD RULES:
 ${hardExpRule}
-- DO score below 40 for: clearly unrelated domain (engineering, law, medicine), or irrelevant seniority.
+- DO score below 40 for: clearly unrelated domain (law, medicine, facilities, unrelated trades), or irrelevant seniority.
 
 Return exactly:
 {
-  "score": <integer 0-100>,
-  "match_reasons": ["reason 1", "reason 2", "reason 3"],
+  "match_reasons": ["reason 1 (xx/40 Role)", "reason 2 (xx/30 Skill)", "reason 3 (xx/15 Seniority · xx/15 Comp/Geo)"],
   "gap": "one line on the biggest risk or weakness for this specific role",
+  "score": <integer 0-100 matching sum of 4 pillars>,
   "dm_draft": "3-sentence LinkedIn DM opening with the strongest matching metric from candidate profile",
   "resume_angle": "which specific candidate metric to lead with for THIS role",
   "relocation_note": "brief note on relocation/accommodation situation for this role, or 'N/A if local'"
@@ -166,58 +187,157 @@ Return exactly:
 
 // ─── DETERMINISTIC 4-PILLAR RUBRIC ENGINE (ZERO-KEY FALLBACK) ────────────────
 
+function escapeRegExp(str) {
+  return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function hasWholeToken(text, token) {
+  const clean = String(token || '').trim();
+  if (!clean) return false;
+  return new RegExp(`(?:^|[^a-z0-9])${escapeRegExp(clean)}(?:$|[^a-z0-9])`, 'i').test(text);
+}
+
+const SCOUT_ROLE_STOP_WORDS = new Set([
+  'manager', 'associate', 'lead', 'analyst', 'engineer', 'developer', 'specialist',
+  'coordinator', 'head', 'director', 'senior', 'junior', 'intern', 'executive',
+  'officer', 'team', 'member', 'staff', 'principal', 'operations', 'strategy',
+]);
+
+function sanitizeSheetCell(val, maxLen = 2000) {
+  const raw = String(val ?? '').slice(0, maxLen);
+  const str = raw.trim();
+  return /^[=+\-@\t\r]/.test(raw) || /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
+}
+
 export function scoreJobDeterministic(job, profile) {
   const fullText = `${job.title || ''} ${job.description || ''} ${job.location || ''}`.toLowerCase();
   const titleLower = (job.title || '').toLowerCase();
   const roles = profile.target_roles || [];
   const skills = profile.skills || [];
 
-  let roleScore = 20;
-  const matchedRoles = roles.filter(
-    (r) =>
-      titleLower.includes(r.toLowerCase()) ||
-      r
-        .toLowerCase()
-        .split(/\s+/)
-        .filter((w) => w.length > 3)
-        .some((w) => titleLower.includes(w))
-  );
-  if (matchedRoles.length >= 2) roleScore = 38;
-  else if (matchedRoles.length === 1) roleScore = 35;
-  else if (/(product|marketing|growth|founder|associate|analyst|engineer)/i.test(titleLower)) {
-    roleScore = 28;
+  let roleScore = 8;
+  const exactMatched = roles.filter((r) => hasWholeToken(titleLower, r.toLowerCase()));
+  const domainMatched = roles.filter((r) => {
+    const words = r
+      .toLowerCase()
+      .split(/\W+/)
+      .filter((w) => w.length >= 3 && !SCOUT_ROLE_STOP_WORDS.has(w));
+    if (words.length === 0) return hasWholeToken(titleLower, r.toLowerCase());
+    const hits = words.filter((w) => hasWholeToken(titleLower, w)).length;
+    return words.length === 1 ? hits === 1 : hits >= Math.min(2, words.length);
+  });
+  const matchedRoles = exactMatched.length > 0 ? exactMatched : domainMatched;
+
+  if (exactMatched.length >= 2) roleScore = 38;
+  else if (exactMatched.length === 1) roleScore = 36;
+  else if (domainMatched.length >= 2) roleScore = 34;
+  else if (domainMatched.length === 1) roleScore = 31;
+  else if (
+    /\b(product|marketing|growth|founder|analytics|gtm)\b/i.test(titleLower) &&
+    roles.some((r) => /(product|marketing|growth|founder|analyst|gtm)/i.test(r))
+  ) {
+    roleScore = 24;
+  } else if (
+    /\b(software|engineer|developer|data|ai|ml|frontend|backend)\b/i.test(titleLower) &&
+    roles.some((r) => /(engineer|developer|scientist|data|ai|ml)/i.test(r))
+  ) {
+    roleScore = 24;
   }
 
-  const matchedSkills = skills.filter(
-    (s) =>
-      fullText.includes(s.toLowerCase()) ||
-      s
-        .toLowerCase()
-        .split(/\s+/)
-        .some((w) => w.length > 2 && fullText.includes(w))
-  );
-  const skillScore = Math.min(30, 16 + matchedSkills.length * 3);
+  const matchedSkills = skills.filter((s) => {
+    const sLower = s.toLowerCase();
+    if (hasWholeToken(fullText, sLower)) return true;
+    const tokens = sLower
+      .split(/[\s/&]+/)
+      .filter((w) => w.length >= 3 && !SCOUT_ROLE_STOP_WORDS.has(w));
+    return tokens.length > 0 && tokens.every((w) => hasWholeToken(fullText, w));
+  });
+  const skillDenom = Math.max(3, Math.min(6, skills.length || 3));
+  const skillScore =
+    matchedSkills.length === 0
+      ? 4
+      : Math.min(30, Math.max(8, Math.round(8 + Math.min(1, matchedSkills.length / skillDenom) * 22)));
 
-  const isFresher = (profile.experience_years || 0) === 0;
+  const candidateYears = profile.experience_years ?? 0;
+  const nonReqYearsRegex =
+    /\b\d{1,2}\+?\s*years?\s+(?:in\s+business|of\s+history|old|ago|strong|legacy|founded|operating|market\s+presence)\b/gi;
+  let requiredYears = null;
+  for (const rawSentence of fullText.split(/[\n.!?;]+/)) {
+    const cleanedSentence = rawSentence.replace(nonReqYearsRegex, '').trim();
+    if (!cleanedSentence) continue;
+    const yearsMatches = [
+      ...cleanedSentence.matchAll(/\b(\d{1,2})\s*(?:[-–to]+\s*(\d{1,2}))?\s*\+?\s*(?:years?|yrs?)\b/gi),
+    ];
+    for (const m of yearsMatches) {
+      const minY = parseInt(m[1], 10);
+      if (Number.isFinite(minY) && minY <= 25) {
+        requiredYears = requiredYears === null ? minY : Math.max(requiredYears, minY);
+      }
+    }
+  }
+
   let seniorityScore = 13;
   if (
-    isFresher &&
-    (/\b([3-9]|10)\+?\s*years/i.test(fullText) ||
-      /\b(senior|director|vp|principal|head of|staff)\b/i.test(titleLower))
+    /\b(director|vp|vice president|principal|head of|chief|staff)\b/i.test(titleLower) ||
+    (/\b(senior|sr\.?|lead)\b/i.test(titleLower) && candidateYears < 2) ||
+    (requiredYears !== null && requiredYears >= candidateYears + 3)
   ) {
     seniorityScore = 3;
-  } else if (/\b(fresher|entry|associate|junior|0-1|0-2|new grad|intern)\b/i.test(fullText)) {
-    seniorityScore = 15;
+  } else if (
+    (/\b(senior|sr\.?|lead)\b/i.test(titleLower) && candidateYears < 4) ||
+    (requiredYears !== null && requiredYears > candidateYears + 1)
+  ) {
+    seniorityScore = 7;
+  } else if (/\b(fresher|entry[- ]level|associate|junior|0-1|0-2|new grad|graduate|intern)\b/i.test(fullText)) {
+    seniorityScore = candidateYears <= 2 ? 15 : 13;
+  } else if (candidateYears > 0) {
+    seniorityScore = 14;
   }
 
   const locLower = (job.location || '').toLowerCase();
   const isTargetLoc =
-    (profile.target_cities || []).some((c) => locLower.includes(c.toLowerCase())) ||
-    /remote|worldwide|bengaluru|bangalore|hyderabad|dubai|singapore|london/i.test(locLower);
-  const compGeoScore = isTargetLoc ? 14 : profile.open_to_relocation ? 12 : 7;
+    (profile.target_cities || []).some((c) => hasWholeToken(locLower, c.toLowerCase())) ||
+    /\b(remote|worldwide|bengaluru|bangalore|hyderabad|dubai|singapore|london|global)\b/i.test(locLower);
+  const forbidsVisa = /no visa|no sponsorship|without sponsorship|us citizens only/i.test(fullText);
 
-  const raw = Math.min(98, roleScore + skillScore + seniorityScore + compGeoScore);
-  const finalScore = seniorityScore <= 4 ? Math.min(48, raw) : raw;
+  let compGeoScore = forbidsVisa && !isTargetLoc ? 5 : isTargetLoc ? 14 : profile.open_to_relocation ? 12 : 7;
+  if (job.salary_min && Number(job.salary_min) > 0) {
+    const minUsd = profile.min_salary_usd_annual || 30000;
+    const annual = Number(job.salary_min) < 500 ? Number(job.salary_min) * 1000 : Number(job.salary_min);
+    compGeoScore = Math.min(15, Math.max(2, annual >= minUsd ? compGeoScore + 1 : compGeoScore - 4));
+  } else {
+    const lpaDesc = fullText.match(/(\d+(?:\.\d+)?)\s*(?:[-–to]+\s*(\d+(?:\.\d+)?))?\s*lpa\b/i);
+    const inrDesc = fullText.match(/(?:₹|inr\s*|rs\.?\s*)(\d+(?:,\d{2,3})*(?:\.\d+)?)\s*(k|lakh|lakhs)?\s*(\/\s*(?:mo|month|mth)|per\s+month)?/i);
+    const fxDesc = fullText.match(/(?:(\$|usd\s*)|(€|eur\s*)|(£|gbp\s*))(\d+(?:,\d{3})*(?:\.\d+)?)\s*(k)?\s*(\/\s*(?:hr|hour|mo|month)|per\s+(?:hour|month))?/i);
+    if (lpaDesc) {
+      const low = parseFloat(lpaDesc[1]);
+      const high = lpaDesc[2] ? parseFloat(lpaDesc[2]) : low;
+      const lpa = (low + high) / 2;
+      compGeoScore = Math.min(15, Math.max(2, lpa >= (profile.min_salary_lpa || 8) ? compGeoScore + 1 : compGeoScore - 4));
+    } else if (inrDesc) {
+      let val = parseFloat(inrDesc[1].replace(/,/g, ''));
+      if (inrDesc[2]?.toLowerCase() === 'k') val *= 1000;
+      else if (inrDesc[2]?.toLowerCase().startsWith('lakh')) val *= 100000;
+      const annualInr = inrDesc[3] ? val * 12 : val;
+      const lpa = annualInr >= 100000 ? annualInr / 100000 : inrDesc[3] ? (val * 12) / 100000 : val;
+      if (lpa >= 1 && lpa <= 200) {
+        compGeoScore = Math.min(15, Math.max(2, lpa >= (profile.min_salary_lpa || 8) ? compGeoScore + 1 : compGeoScore - 4));
+      }
+    } else if (fxDesc) {
+      const fx = fxDesc[3] ? 1.26 : fxDesc[2] ? 1.08 : 1;
+      const n = parseFloat(fxDesc[4].replace(/,/g, ''));
+      const cadence = (fxDesc[6] || '').toLowerCase();
+      const annualUsd = /hr|hour/.test(cadence)
+        ? n * (fxDesc[5] ? 1000 : 1) * 2080 * fx
+        : /mo|month/.test(cadence)
+        ? (fxDesc[5] || n < 100 ? n * 1000 : n) * 12 * fx
+        : (fxDesc[5] || n < 500 ? n * 1000 : n) * fx;
+      compGeoScore = Math.min(15, Math.max(2, annualUsd >= (profile.min_salary_usd_annual || 30000) ? compGeoScore + 1 : compGeoScore - 4));
+    }
+  }
+
+  const raw = Math.min(98, Math.max(12, roleScore + skillScore + seniorityScore + compGeoScore));
+  const finalScore = seniorityScore <= 5 ? Math.min(48, raw) : raw;
 
   const m1 = profile.key_metrics?.[0] || 'verified product & growth metrics';
   const m2 = profile.key_metrics?.[1] || 'end-to-end execution velocity';
@@ -232,12 +352,14 @@ export function scoreJobDeterministic(job, profile) {
       comp_geo_match: compGeoScore,
     },
     match_reasons: [
-      `Direct alignment with ${matchedRoles[0] || roles[0] || 'Target Role'} (${roleScore}/40 Role Pillar)`,
-      `Matched ${matchedSkills.slice(0, 3).join(', ') || 'core domain skills'} (${skillScore}/30 Skill Pillar)`,
-      `Seniority (${seniorityScore}/15) & Location/Comp (${compGeoScore}/15) verified for ${job.location || 'Remote'}`,
+      `Direct alignment with ${matchedRoles[0] || roles[0] || 'Target Role'} (${roleScore}/40 Role)`,
+      matchedSkills.length > 0
+        ? `Matched ${matchedSkills.slice(0, 3).join(', ')} (${skillScore}/30 Skill)`
+        : `Low direct skill keyword overlap (${skillScore}/30 Skill)`,
+      `Seniority (${seniorityScore}/15 Seniority) & Location/Comp (${compGeoScore}/15 Comp/Geo) for ${job.location || 'Remote'}`,
     ],
     gap:
-      seniorityScore <= 6
+      seniorityScore <= 7
         ? `Role specifies multi-year experience; offset immediately with ${m2}.`
         : `Lead screening conversation with ${m1} and hands-on system execution.`,
     dm_draft: `Hi ${companyName} team — I saw the ${job.title} opening and wanted to reach out directly. In my recent work, I delivered ${m1} and ${m2}. I'd welcome the chance to bring that exact execution velocity to ${companyName}.`,
@@ -356,9 +478,10 @@ export async function fetchInternshalaJobs(profile) {
               d?.props?.pageProps?.listings ||
               [];
             for (const job of list.slice(0, 8)) {
-              const id = `internshala_${job.id || job.job_id || Math.random().toString(36).slice(2)}`;
               const title = job.profile || job.title || job.job_title || '';
               const company = job.company_name || job.employer_name || job.company || 'Unknown';
+              const fallbackId = `${category}_${company}_${title}`.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 48);
+              const id = `internshala_${job.id || job.job_id || fallbackId}`;
               const desc = stripHtmlTags(
                 job.description || job.job_description || `${title} at ${company} in ${city}.`
               ).trim();
@@ -419,7 +542,7 @@ export async function fetchRemoteOKJobs(profile) {
   const jobs = [];
   const { remoteOkTags } = deriveDynamicSearchParams(profile);
   const headers = {
-    'User-Agent': 'OpenScout Job Intelligence Engine',
+    'User-Agent': 'KaisifOS Job Intelligence Engine',
     Accept: 'application/json',
   };
 
@@ -519,7 +642,7 @@ export async function fetchRemotiveJobs(profile) {
           description.toLowerCase()
         );
         jobs.push({
-          id: `remotive_kw_${item.id}`,
+          id: `remotive_${item.id}`,
           title: item.title,
           company: { display_name: item.company_name || 'Unknown' },
           description: description.substring(0, 800),
@@ -542,9 +665,9 @@ export async function fetchRemotiveJobs(profile) {
 export async function fetchFreeHireAtsJobs(profile) {
   const jobs = [];
   const atsConfig = profile?.ats_companies || {
-    greenhouse: ['razorpay', 'postman', 'stripe', 'vercel'],
+    greenhouse: ['razorpay', 'postman', 'stripe', 'vercel', 'cloudflare'],
     lever: ['zepto', 'cred', 'mistral'],
-    ashby: ['linear', 'posthog', 'supabase'],
+    ashby: ['linear', 'posthog', 'supabase', 'langchain'],
   };
 
   // 4A. Optional self-hosted strelov1/freehire endpoint
@@ -558,8 +681,12 @@ export async function fetchFreeHireAtsJobs(profile) {
         const data = await res.json();
         const list = Array.isArray(data) ? data : data.jobs || [];
         for (const item of list.slice(0, 20)) {
+          const fallbackSlug = `${item.company || 'co'}_${item.title || item.position || 'role'}`
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '_')
+            .slice(0, 48);
           jobs.push({
-            id: `freehire_${item.id || Math.random().toString(36).slice(2)}`,
+            id: `freehire_${item.id || fallbackSlug}`,
             title: item.title || item.position,
             company: { display_name: item.company || 'FreeHire Partner' },
             description: stripHtmlTags(item.description || '').substring(0, 800),
@@ -665,8 +792,12 @@ export async function fetchFreeHireAtsJobs(profile) {
       const data = await res.json();
       for (const item of (data.data || []).slice(0, 15)) {
         const desc = stripHtmlTags(item.description || '').trim();
+        const fallbackSlug = `${item.company_name || 'co'}_${item.title || 'role'}`
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '_')
+          .slice(0, 48);
         jobs.push({
-          id: `arbeitnow_${item.slug || Math.random().toString(36).slice(2)}`,
+          id: `arbeitnow_${item.slug || fallbackSlug}`,
           title: item.title,
           company: { display_name: item.company_name || 'Unknown' },
           description: desc.substring(0, 800),
@@ -679,6 +810,45 @@ export async function fetchFreeHireAtsJobs(profile) {
   } catch (_) {}
 
   console.log(`[FreeHire ATS + Arbeitnow] Total: ${jobs.length}`);
+  return jobs;
+}
+
+// ─── SOURCE 4B: HIMALAYAS PUBLIC REMOTE API ──────────────────────────────────
+
+export async function fetchHimalayasJobs() {
+  const jobs = [];
+  try {
+    const res = await fetch('https://himalayas.app/jobs/api?limit=15', {
+      headers: { Accept: 'application/json', 'User-Agent': 'KaisifOS Job Intelligence Engine' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return jobs;
+    const data = await res.json();
+    for (const item of (data.jobs || []).slice(0, 15)) {
+      const desc = stripHtmlTags(item.description || item.excerpt || '').trim();
+      const fallbackSlug = `${item.companyName || 'co'}_${item.title || 'role'}`
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .slice(0, 48);
+      jobs.push({
+        id: `himalayas_${item.guid || item.slug || fallbackSlug}`,
+        title: item.title || '',
+        company: { display_name: item.companyName || 'Unknown' },
+        description: desc.substring(0, 800),
+        redirect_url: item.applicationLink || item.guid || '',
+        salary_min: item.minSalary || null,
+        salary_max: item.maxSalary || null,
+        location:
+          Array.isArray(item.locationRestrictions) && item.locationRestrictions.length > 0
+            ? item.locationRestrictions.join(', ')
+            : 'Remote / Worldwide',
+        has_relocation: /relocation|visa\s*sponsor|relo/i.test(desc),
+      });
+    }
+  } catch (err) {
+    console.warn('[Himalayas] Error:', err.message);
+  }
+  console.log(`[Himalayas] Total: ${jobs.length}`);
   return jobs;
 }
 
@@ -726,7 +896,7 @@ async function fetchJSearchJobs(profile) {
 
 // ─── MULTI-PROVIDER FREE LLM SCORING CHAIN ───────────────────────────────────
 // Replaces paid xAI Grok (api.x.ai) with:
-// 1. Gemini 2.5 Flash (Free Tier)
+// 1. Gemini 4 Hydrogen (Free Tier)
 // 2. Groq Llama 3.3 70B (Free Tier)
 // 3. OpenRouter Llama 3.3 70B (:free)
 // 4. Deterministic 4-Pillar Rubric Fallback
@@ -742,14 +912,18 @@ export async function scoreJobWithGemini(job, profile, apiKey) {
   while (retries > 0) {
     try {
       const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-4-hydrogen:generateContent?key=${apiKey}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { responseMimeType: 'application/json' },
+            generationConfig: {
+              responseMimeType: 'application/json',
+              thinkingConfig: { thinkingLevel: 'LOW' },
+            },
           }),
+          signal: AbortSignal.timeout(12000),
         }
       );
 
@@ -844,42 +1018,77 @@ export async function scoreJobWithGroq(job, profile, groq) {
 
 export async function scoreJobWithOpenRouter(job, profile, apiKey) {
   const prompt = buildPrompt(job, profile);
-  try {
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: 'meta-llama/llama-3.3-70b-instruct:free',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.1,
-        response_format: { type: 'json_object' },
-      }),
-    });
-    if (!res.ok) return { score: 0 };
-    const data = await res.json();
-    const raw = (data.choices?.[0]?.message?.content || '{}')
-      .replace(/^```json\s*/i, '')
-      .replace(/```\s*$/, '')
-      .trim();
-    const parsed = JSON.parse(raw);
-    if (typeof parsed.score === 'number' && parsed.score >= 0 && parsed.score <= 100) {
-      return parsed;
+  const freeModels = [
+    'meta-llama/llama-3.3-70b-instruct:free',
+    'google/gemma-3-27b-it:free',
+    'openrouter/free',
+  ];
+
+  for (const model of freeModels) {
+    try {
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+          'HTTP-Referer': process.env.APP_URL || 'https://kaisifos.local',
+          'X-Title': 'KaisifOS Job Intelligence',
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.1,
+          response_format: { type: 'json_object' },
+        }),
+        signal: AbortSignal.timeout(12000),
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const raw = (data.choices?.[0]?.message?.content || '{}')
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/```\s*$/i, '')
+        .trim();
+      let parsed = null;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        const firstBrace = raw.indexOf('{');
+        const lastBrace = raw.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          parsed = JSON.parse(raw.slice(firstBrace, lastBrace + 1));
+        }
+      }
+      if (
+        parsed &&
+        typeof parsed.score === 'number' &&
+        Number.isFinite(parsed.score) &&
+        parsed.score >= 0 &&
+        parsed.score <= 100
+      ) {
+        return parsed;
+      }
+    } catch (err) {
+      console.warn(`[OpenRouter] Model ${model} error for "${job.title}":`, err.message);
     }
-  } catch (err) {
-    console.warn(`[OpenRouter] Error for "${job.title}":`, err.message);
   }
   return { score: 0 };
 }
 
 export async function scoreJob(job, profile, groq) {
+  const baseline = scoreJobDeterministic(job, profile);
+  const enforceGuardrail = (res) => {
+    const clampedScore = Math.min(100, Math.max(0, Math.round(Number(res.score) || 0)));
+    const safeScore =
+      baseline.subscores?.seniority_match <= 5 ? Math.min(48, clampedScore) : clampedScore;
+    return { ...baseline, ...res, score: safeScore };
+  };
+
   // 1. Provider 1: Google Gemini Free Tier
   if (process.env.GEMINI_API_KEY) {
     try {
       const res = await scoreJobWithGemini(job, profile, process.env.GEMINI_API_KEY);
-      if (res && res.score > 0) return res;
+      if (res && res.score > 0) return enforceGuardrail(res);
     } catch (err) {
       console.warn(`[Scout] Gemini fallback triggered for "${job.title}":`, err.message);
     }
@@ -890,7 +1099,7 @@ export async function scoreJob(job, profile, groq) {
   if (groq && !groqKey.startsWith('xai-') && !global.groqFailed) {
     try {
       const res = await scoreJobWithGroq(job, profile, groq);
-      if (res && res.score > 0) return res;
+      if (res && res.score > 0) return enforceGuardrail(res);
     } catch (err) {
       if (
         err?.status === 401 ||
@@ -908,14 +1117,14 @@ export async function scoreJob(job, profile, groq) {
   if (process.env.OPENROUTER_API_KEY) {
     try {
       const res = await scoreJobWithOpenRouter(job, profile, process.env.OPENROUTER_API_KEY);
-      if (res && res.score > 0) return res;
+      if (res && res.score > 0) return enforceGuardrail(res);
     } catch (err) {
       console.warn(`[Scout] OpenRouter fallback triggered:`, err.message);
     }
   }
 
   // 4. Provider 4: Deterministic 4-Pillar Rubric Fallback
-  return scoreJobDeterministic(job, profile);
+  return baseline;
 }
 
 // ─── SHEET & DISCORD OPS ─────────────────────────────────────────────────────
@@ -972,7 +1181,7 @@ async function sendDiscordDigest(matches, portfolioUrl, totalScanned, weeklyStat
 
   const date = new Date().toISOString().split('T')[0];
   let content = `📋 **JOB SCOUT DIGEST (${profileName}) — ${date}**\n`;
-  content += `Scanned **${totalScanned}** roles across FreeHire ATS + Global Feeds, **${matches.length}** matched ≥90\n`;
+  content += `Scanned **${totalScanned}** roles across Direct-ATS + Global Feeds, **${matches.length}** matched ≥90\n`;
   content += `───────────────────────────────\n`;
 
   if (matches.length > 0) {
@@ -992,7 +1201,7 @@ async function sendDiscordDigest(matches, portfolioUrl, totalScanned, weeklyStat
       content += `🔗 <${m.job.redirect_url}>\n`;
     });
   } else {
-    content += `\n_No roles crossed 90 today._\nSources: FreeHire Direct-ATS (Greenhouse/Lever/Ashby) + Internshala + RemoteOK + Remotive + Arbeitnow\n`;
+    content += `\n_No roles crossed 90 today._\nSources: Direct-ATS (Greenhouse/Lever/Ashby) + Internshala + RemoteOK + Remotive + Arbeitnow\n`;
   }
 
   if (weeklyStats) {
@@ -1022,7 +1231,7 @@ async function main() {
     const profile = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
 
     console.log(
-      '[Scout] Starting — sources: FreeHire Direct-ATS (Greenhouse/Lever/Ashby) + Internshala + RemoteOK + Remotive + Arbeitnow + JSearch'
+      '[Scout] Starting — sources: FreeHire Direct-ATS (Greenhouse/Lever/Ashby) + Internshala + RemoteOK + Remotive + Himalayas + Arbeitnow + JSearch'
     );
 
     const auth = await getAuth();
@@ -1030,23 +1239,26 @@ async function main() {
     const seenIds = await getSeenJobIds(sheets, auth);
     console.log(`[Scout] ${seenIds.size} seen job IDs in SeenJobs tab.`);
 
-    const [rawFreeHire, rawInternshala, rawRemoteOK, rawRemotive, rawJSearch] = await Promise.all([
-      fetchFreeHireAtsJobs(profile),
-      fetchInternshalaJobs(profile),
-      fetchRemoteOKJobs(profile),
-      fetchRemotiveJobs(profile),
-      fetchJSearchJobs(profile),
-    ]);
+    const [rawFreeHire, rawInternshala, rawRemoteOK, rawRemotive, rawHimalayas, rawJSearch] =
+      await Promise.all([
+        fetchFreeHireAtsJobs(profile),
+        fetchInternshalaJobs(profile),
+        fetchRemoteOKJobs(profile),
+        fetchRemotiveJobs(profile),
+        fetchHimalayasJobs(),
+        fetchJSearchJobs(profile),
+      ]);
 
     const rawJobs = [
       ...rawFreeHire,
       ...rawInternshala,
       ...rawRemoteOK,
       ...rawRemotive,
+      ...rawHimalayas,
       ...rawJSearch,
     ];
     console.log(
-      `[Scout] Raw: ${rawJobs.length} (FreeHire ATS: ${rawFreeHire.length} | Internshala: ${rawInternshala.length} | RemoteOK: ${rawRemoteOK.length} | Remotive: ${rawRemotive.length} | JSearch: ${rawJSearch.length})`
+      `[Scout] Raw: ${rawJobs.length} (FreeHire ATS: ${rawFreeHire.length} | Internshala: ${rawInternshala.length} | RemoteOK: ${rawRemoteOK.length} | Remotive: ${rawRemotive.length} | Himalayas: ${rawHimalayas.length} | JSearch: ${rawJSearch.length})`
     );
 
     // Canonical Fingerprint Deduplication (ID + normalized company::title)
@@ -1072,24 +1284,37 @@ async function main() {
     const targetMatchingJobs = newJobs.filter((j) => whitelistRegex.test(j.title || ''));
 
     const blacklistRegex =
-      /\b(senior\s+(?:manager|director|engineer|developer|consultant)|director\s+of|vp\s+of|head\s+of|principal\s+\w+|staff\s+engineer|5\+?\s*years?|4\+?\s*years?|video\s+editor|graphic\s+designer|telecaller|inside\s+sales|telemarketing|customer\s+support|data\s+entry|tutor|teacher)\b/i;
+      /\b(senior\s+(?:manager|director|engineer|developer|consultant)|director\s+of|vp\s+of|head\s+of|principal\s+\w+|staff\s+engineer|(?:[4-9]|1\d)\+?\s*years?|video\s+editor|graphic\s+designer|telecaller|inside\s+sales|telemarketing|customer\s+support|data\s+entry|tutor|teacher)\b/i;
     const prunedJobs =
       (profile.experience_years || 0) === 0
-        ? targetMatchingJobs.filter((j) => !blacklistRegex.test(j.title || ''))
+        ? targetMatchingJobs.filter(
+            (j) => !blacklistRegex.test(`${j.title || ''} ${(j.description || '').slice(0, 400)}`)
+          )
         : targetMatchingJobs;
 
-    prunedJobs.sort((a, b) => {
-      const aScore =
-        (a.has_relocation ? 2 : 0) +
-        (/(hyderabad|bangalore|bengaluru|india|remote)/i.test(a.location || '') ? 1 : 0);
-      const bScore =
-        (b.has_relocation ? 2 : 0) +
-        (/(hyderabad|bangalore|bengaluru|india|remote)/i.test(b.location || '') ? 1 : 0);
-      return bScore - aScore;
-    });
+    const domainTokens = Array.from(
+      new Set(
+        (profile.target_roles || [])
+          .join(' ')
+          .toLowerCase()
+          .split(/\W+/)
+          .filter((w) => w.length >= 3 && !SCOUT_ROLE_STOP_WORDS.has(w))
+      )
+    );
+
+    const priorityScore = (j) => {
+      const titleHits = domainTokens.filter((t) => hasWholeToken(j.title || '', t)).length * 3;
+      const geoHits =
+        (j.has_relocation ? 2 : 0) +
+        (/(hyderabad|bangalore|bengaluru|india|remote)/i.test(j.location || '') ? 1 : 0);
+      return titleHits + geoHits;
+    };
+
+    prunedJobs.sort((a, b) => priorityScore(b) - priorityScore(a));
 
     const jobsToScore = prunedJobs.slice(0, 20);
     const scoredMatches = [];
+    const seenScoredIds = [];
 
     for (const job of jobsToScore) {
       const scoreData = await scoreJob(job, profile, groq);
@@ -1097,12 +1322,12 @@ async function main() {
       console.log(
         `  [Score] "${job.title}" @ ${job.company?.display_name} [${job.location}] → ${score}/100`
       );
+      if (score > 0) seenScoredIds.push(String(job.id));
       if (score >= 90) scoredMatches.push({ job, scoreData });
       await delay(1500);
     }
 
-    const allScoredIds = jobsToScore.map((j) => String(j.id));
-    await appendSeenJobIds(sheets, auth, allScoredIds);
+    await appendSeenJobIds(sheets, auth, seenScoredIds);
 
     scoredMatches.sort((a, b) => b.scoreData.score - a.scoreData.score);
     const topMatches = scoredMatches.slice(0, 5);
@@ -1110,16 +1335,16 @@ async function main() {
     if (topMatches.length > 0) {
       const dateStr = new Date().toISOString().split('T')[0];
       const rows = topMatches.map((m) => [
-        dateStr,
-        m.job.id,
-        m.job.title,
-        m.job.company?.display_name || 'Unknown',
-        m.scoreData.score,
-        (m.scoreData.match_reasons || []).join(' | '),
-        m.scoreData.gap || '',
-        m.job.redirect_url || '',
-        m.scoreData.dm_draft || '',
-        m.scoreData.resume_angle || '',
+        sanitizeSheetCell(dateStr, 20),
+        sanitizeSheetCell(m.job.id, 120),
+        sanitizeSheetCell(m.job.title, 200),
+        sanitizeSheetCell(m.job.company?.display_name || 'Unknown', 160),
+        Math.max(0, Math.min(100, Math.round(Number(m.scoreData.score) || 0))),
+        sanitizeSheetCell((m.scoreData.match_reasons || []).join(' | '), 1000),
+        sanitizeSheetCell(m.scoreData.gap || '', 500),
+        sanitizeSheetCell(m.job.redirect_url || '', 500),
+        sanitizeSheetCell(m.scoreData.dm_draft || '', 1500),
+        sanitizeSheetCell(m.scoreData.resume_angle || '', 500),
         'NEW',
       ]);
       await appendToSheet(sheets, auth, rows);

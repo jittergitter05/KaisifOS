@@ -4,7 +4,20 @@ import {
   DEFAULT_OPERATOR_USER,
   DEFAULT_OPERATOR_KEY,
   isCustomAuthConfigured,
+  constantTimeEqual,
 } from '@/lib/auth';
+import { getCandidateProfile } from '@/lib/profile';
+import { siteConfig } from '@/config/site';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET() {
+  const profile = getCandidateProfile();
+  return NextResponse.json({
+    customAuthConfigured: isCustomAuthConfigured(),
+    brandName: profile.system_name || siteConfig.name,
+  });
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -14,9 +27,14 @@ export async function POST(req: NextRequest) {
     const adminPass = process.env.ADMIN_PASS || DEFAULT_OPERATOR_KEY;
     const customConfigured = isCustomAuthConfigured();
 
+    const userStr = typeof username === 'string' ? username : '';
+    const passStr = typeof password === 'string' ? password : '';
+
     const isValidCredentials =
-      (username === adminUser && password === adminPass) ||
-      (!customConfigured && username === 'admin' && password === 'secret');
+      (constantTimeEqual(userStr, adminUser) && constantTimeEqual(passStr, adminPass)) ||
+      (!customConfigured &&
+        constantTimeEqual(userStr, 'admin') &&
+        constantTimeEqual(passStr, 'secret'));
     const isQuickOperatorAccess = quickAccess === true && !customConfigured;
 
     if (isValidCredentials || isQuickOperatorAccess) {

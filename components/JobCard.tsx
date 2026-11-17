@@ -4,6 +4,7 @@ import MetricBar from './MetricBar';
 import StatusBadge, { ALL_STATUSES } from './StatusBadge';
 import { Button } from './ui/button';
 import { Copy, Check, ArrowUpRight, BookOpen, RefreshCw } from 'lucide-react';
+import { deriveJobPillarBreakdown, safeExternalUrl } from '@/lib/utils';
 
 export interface JobData {
   rowId?: number;
@@ -19,6 +20,14 @@ export interface JobData {
   Status?: string;
 }
 
+interface PrepData {
+  tailored_bullets?: string[];
+  follow_up_sequence?: {
+    day_3_nudge?: string;
+    day_7_value_add?: string;
+  };
+}
+
 export default function JobCard({
   job,
   onStatusChange,
@@ -29,7 +38,8 @@ export default function JobCard({
   const [copiedField, setCopiedField] = useState<'dm' | 'angle' | null>(null);
   const [showPrep, setShowPrep] = useState(false);
   const [loadingPrep, setLoadingPrep] = useState(false);
-  const [prepData, setPrepData] = useState<any>(null);
+  const [prepData, setPrepData] = useState<PrepData | null>(null);
+  const [prepError, setPrepError] = useState<string | null>(null);
 
   const copyText = (text: string, field: 'dm' | 'angle') => {
     if (!text) return;
@@ -46,6 +56,7 @@ export default function JobCard({
     setShowPrep(true);
     if (prepData) return;
     setLoadingPrep(true);
+    setPrepError(null);
     try {
       const res = await fetch('/api/prep', {
         method: 'POST',
@@ -59,9 +70,11 @@ export default function JobCard({
       });
       if (res.ok) {
         setPrepData(await res.json());
+      } else {
+        setPrepError(`Unable to generate prep pack (HTTP ${res.status}).`);
       }
-    } catch (e) {
-      console.error('Prep load failed:', e);
+    } catch {
+      setPrepError('Network error while generating role prep pack.');
     } finally {
       setLoadingPrep(false);
     }
@@ -72,27 +85,23 @@ export default function JobCard({
     .map((s) => s.trim())
     .filter(Boolean);
 
-  // Reconstruct 4-pillar distribution from score
-  const rolePillar = Math.min(40, Math.round(job.Score * 0.4));
-  const expPillar = Math.min(25, Math.round(job.Score * 0.25));
-  const geoPillar = Math.min(20, Math.round(job.Score * 0.2));
-  const compPillar = Math.min(15, Math.max(5, job.Score - (rolePillar + expPillar + geoPillar)));
+  const pillars = deriveJobPillarBreakdown({ score: job.Score, reasons: job.Reasons });
 
   return (
-    <div className="bg-[#111827] border border-slate-800/90 rounded-xl p-6 transition-colors hover:border-slate-700">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pb-4 border-b border-slate-800/80">
+    <div className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800/90 rounded-xl p-6 transition-colors hover:border-slate-300 dark:hover:border-slate-700">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pb-4 border-b border-slate-200 dark:border-slate-800/80">
         <div>
-          <div className="flex items-center gap-2 text-xs text-slate-400 mb-1">
-            <span className="font-medium text-slate-200">{job.Company}</span>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400 mb-1">
+            <span className="font-medium text-slate-800 dark:text-slate-200">{job.Company}</span>
             <span aria-hidden="true">·</span>
             <span className="font-mono tabular-nums">{job.Date}</span>
             <span aria-hidden="true">·</span>
-            <span className="font-mono tabular-nums text-slate-300">
-              Role {rolePillar}/40 · Seniority {expPillar}/25 · Geo {geoPillar}/20 · Comp{' '}
-              {compPillar}/15
+            <span className="font-mono tabular-nums text-slate-600 dark:text-slate-300">
+              Role {pillars.role.earned}/40 · Skill {pillars.skill.earned}/30 · Seniority{' '}
+              {pillars.seniority.earned}/15 · Comp/Geo {pillars.compGeo.earned}/15
             </span>
           </div>
-          <h3 className="text-lg font-display font-semibold text-white tracking-tight">
+          <h3 className="text-lg font-display font-semibold text-slate-900 dark:text-white tracking-tight">
             {job.Title}
           </h3>
         </div>
@@ -110,7 +119,11 @@ export default function JobCard({
                     className="absolute inset-0 opacity-0 cursor-pointer w-full z-20"
                   >
                     {ALL_STATUSES.map((s) => (
-                      <option key={s} value={s} className="bg-slate-900 text-slate-200">
+                      <option
+                        key={s}
+                        value={s}
+                        className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-200"
+                      >
                         {s}
                       </option>
                     ))}
@@ -125,16 +138,16 @@ export default function JobCard({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 py-5 border-b border-slate-800/80">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 py-5 border-b border-slate-200 dark:border-slate-800/80">
         <div>
-          <div className="text-xs font-medium text-slate-400 mb-2">
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-2">
             Rubric Alignment Reasons
           </div>
           {reasonItems.length > 1 ? (
-            <ul className="space-y-1.5 text-sm text-slate-300 leading-relaxed">
+            <ul className="space-y-1.5 text-sm text-slate-700 dark:text-slate-300 leading-relaxed">
               {reasonItems.map((r, idx) => (
                 <li key={idx} className="flex items-baseline gap-2">
-                  <span className="text-emerald-400 font-mono text-xs tabular-nums">
+                  <span className="text-emerald-600 dark:text-emerald-400 font-mono text-xs tabular-nums">
                     0{idx + 1}.
                   </span>
                   <span>{r}</span>
@@ -142,7 +155,7 @@ export default function JobCard({
               ))}
             </ul>
           ) : (
-            <p className="text-sm text-slate-300 leading-relaxed">
+            <p className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed">
               {job.Reasons || 'Direct alignment with target role and location criteria.'}
             </p>
           )}
@@ -150,10 +163,10 @@ export default function JobCard({
 
         <div className="space-y-4">
           <div>
-            <div className="text-xs font-medium text-amber-400/90 mb-1">
+            <div className="text-xs font-medium text-amber-600 dark:text-amber-400/90 mb-1">
               Identified Risk & Mitigation Angle
             </div>
-            <p className="text-sm text-slate-300 leading-relaxed">
+            <p className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed">
               {job.Gap || 'No critical blockers detected; emphasize shipped AI & GTM metrics.'}
             </p>
           </div>
@@ -161,17 +174,17 @@ export default function JobCard({
           {job.ResumeAngle && (
             <div>
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-medium text-blue-400">
+                <span className="text-xs font-medium text-blue-600 dark:text-blue-400">
                   Recommended Resume Positioning
                 </span>
                 <button
                   type="button"
                   onClick={() => copyText(job.ResumeAngle, 'angle')}
-                  className="text-xs text-slate-400 hover:text-slate-200 inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0"
+                  className="text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   {copiedField === 'angle' ? (
                     <>
-                      <Check className="h-3 w-3 text-emerald-400" /> Copied
+                      <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" /> Copied
                     </>
                   ) : (
                     <>
@@ -180,7 +193,9 @@ export default function JobCard({
                   )}
                 </button>
               </div>
-              <p className="text-xs text-slate-300 font-mono">{job.ResumeAngle}</p>
+              <p className="text-xs text-slate-700 dark:text-slate-300 font-mono">
+                {job.ResumeAngle}
+              </p>
             </div>
           )}
         </div>
@@ -189,17 +204,18 @@ export default function JobCard({
       {job.DM && (
         <div className="pt-4 pb-2">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-medium text-slate-400">
+            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
               Synthesized Founder / Recruiter Outreach Draft
             </span>
             <button
               type="button"
               onClick={() => copyText(job.DM, 'dm')}
-              className="px-2.5 py-1 rounded text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+              className="px-2.5 py-1 rounded text-xs font-medium bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               {copiedField === 'dm' ? (
                 <>
-                  <Check className="h-3.5 w-3.5 text-emerald-400" /> Copied to Clipboard
+                  <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" /> Copied
+                  to Clipboard
                 </>
               ) : (
                 <>
@@ -208,37 +224,41 @@ export default function JobCard({
               )}
             </button>
           </div>
-          <p className="text-sm text-slate-300 leading-relaxed bg-[#0B0F17] border border-slate-800/80 rounded-lg p-3.5">
+          <p className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed bg-slate-50 dark:bg-[#0B0F17] rounded-lg p-3.5">
             {job.DM}
           </p>
         </div>
       )}
 
       {showPrep && (
-        <div className="mt-4 bg-[#0B0F17] border border-slate-800 rounded-lg p-4 space-y-3 text-xs">
+        <div className="mt-4 bg-slate-50 dark:bg-[#0B0F17] rounded-lg p-4 space-y-3 text-xs border-t border-slate-200 dark:border-slate-800">
           {loadingPrep ? (
-            <div className="py-4 text-center text-slate-400 font-mono flex items-center justify-center gap-2">
-              <RefreshCw className="h-4 w-4 animate-spin text-emerald-400" /> Generating Role Prep
-              Pack...
+            <div className="py-4 text-center text-slate-500 dark:text-slate-400 font-mono flex items-center justify-center gap-2">
+              <RefreshCw className="h-4 w-4 animate-spin text-emerald-500 dark:text-emerald-400" />{' '}
+              Generating Role Prep Pack...
+            </div>
+          ) : prepError ? (
+            <div className="py-2 text-rose-600 dark:text-rose-400 font-mono text-xs">
+              {prepError}
             </div>
           ) : prepData ? (
             <>
               <div>
-                <div className="font-semibold text-emerald-400 mb-1">
+                <div className="font-semibold text-emerald-600 dark:text-emerald-400 mb-1">
                   Tailored STAR Resume Bullets for {job.Company}
                 </div>
-                <ul className="space-y-1 text-slate-200 leading-relaxed">
+                <ul className="space-y-1 text-slate-700 dark:text-slate-200 leading-relaxed">
                   {(prepData.tailored_bullets || []).map((b: string, i: number) => (
                     <li key={i}>• {b}</li>
                   ))}
                 </ul>
               </div>
-              <div className="border-t border-slate-800 pt-2.5">
-                <div className="font-semibold text-blue-400 mb-1">
+              <div className="border-t border-slate-200 dark:border-slate-800 pt-2.5">
+                <div className="font-semibold text-blue-600 dark:text-blue-400 mb-1">
                   Day-3 & Day-7 Recruiter Follow-Up Sequence
                 </div>
-                <p className="text-slate-300 leading-relaxed">
-                  <strong className="text-white">Day 3:</strong>{' '}
+                <p className="text-slate-700 dark:text-slate-300 leading-relaxed">
+                  <strong className="text-slate-900 dark:text-white">Day 3:</strong>{' '}
                   {prepData.follow_up_sequence?.day_3_nudge}
                 </p>
               </div>
@@ -255,7 +275,7 @@ export default function JobCard({
           <button
             type="button"
             onClick={handleLoadPrep}
-            className="text-xs font-medium text-emerald-400 hover:text-emerald-300 inline-flex items-center gap-1 cursor-pointer"
+            className="text-xs font-medium text-emerald-600 dark:text-emerald-400 hover:text-emerald-700 dark:hover:text-emerald-300 inline-flex items-center gap-1 cursor-pointer"
           >
             <BookOpen className="h-3.5 w-3.5" />
             {showPrep ? 'Hide Interview & Resume Prep' : 'Interview & STAR Bullet Prep'}
@@ -267,7 +287,7 @@ export default function JobCard({
           size="sm"
           className="text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-500 border-0 whitespace-nowrap shrink-0"
         >
-          <a href={job.URL} target="_blank" rel="noreferrer">
+          <a href={safeExternalUrl(job.URL)} target="_blank" rel="noreferrer">
             Open Application <ArrowUpRight className="ml-1.5 h-3.5 w-3.5" />
           </a>
         </Button>

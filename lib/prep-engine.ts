@@ -1,5 +1,6 @@
 import { CandidateProfile, getCandidateProfile } from './profile';
 import { generateStructuredJSONWithLLM } from './llm';
+import { extractHighSignalJdContext } from './utils';
 
 export interface RolePrepPack {
   company: string;
@@ -14,6 +15,54 @@ export interface RolePrepPack {
     day_3_nudge: string;
     day_7_value_add: string;
   };
+  defendable_proof_anchors?: string[];
+}
+
+export function buildDeterministicRolePrepPack(
+  job: {
+    title: string;
+    company: string;
+    reasons?: string;
+    gap?: string;
+    description?: string;
+  },
+  profile: CandidateProfile
+): RolePrepPack {
+  const m1 = profile.key_metrics[0] || 'Delivered measurable growth across core KPIs';
+  const m2 = profile.key_metrics[1] || 'Scaled conversion and user acquisition velocity';
+  const m3 = profile.key_metrics[2] || 'Built automated data & workflow pipelines';
+  const skillsList = (profile.skills || []).slice(0, 5).join(', ');
+
+  return {
+    company: job.company,
+    title: job.title,
+    engine_used: 'Deterministic STAR Copilot v3.0',
+    defendable_proof_anchors: (profile.key_metrics || []).slice(0, 3),
+    tailored_bullets: [
+      `Spearheaded high-velocity execution (${m1}), directly transferable to ${job.company}'s ${job.title} roadmap.`,
+      `Scaled measurable funnel conversion and discovery (${m2}) by combining ${skillsList} with rapid experimentation.`,
+      `${m3}, reducing manual operational overhead and accelerating 0-to-1 launch cadence.`,
+      `Synthesized qualitative user signals and quantitative telemetry into repeatable cross-functional playbooks.`,
+    ],
+    screening_questions: [
+      {
+        question: `Why ${job.company} and why the ${job.title} role right now?`,
+        answer_framework: `Anchor on ${job.company}'s product velocity and connect immediately to your verified proof: "${m1}" and "${m2}". Explain how you already operate with ${skillsList}.`,
+      },
+      {
+        question: `How do you address the identified role gap (${job.gap || 'domain tenure'})?`,
+        answer_framework: `Reframe tenure into output density: walk through the architecture behind "${m2}" and offer a concrete 30-day execution plan for ${job.company}.`,
+      },
+      {
+        question: `Walk through a high-impact experiment or system you shipped end-to-end.`,
+        answer_framework: `Use the STAR method: Situation (baseline bottleneck), Task (objective), Action (leveraging ${skillsList}), Result (${m1}).`,
+      },
+    ],
+    follow_up_sequence: {
+      day_3_nudge: `Hi ${job.company} team — following up on my application for ${job.title}. Having delivered ${m1} and ${m2} in my recent work, I'd love to share a concise 3-point execution brief for my first 30 days at ${job.company}.`,
+      day_7_value_add: `Hi ${job.company} team — circling back one last time on the ${job.title} role. I put together a quick teardown of ${job.company}'s current workflow based on the systems that helped me achieve ${m2}. Happy to share (${profile.portfolio}).`,
+    },
+  };
 }
 
 export async function generateRolePrepPack(
@@ -27,43 +76,14 @@ export async function generateRolePrepPack(
   profileOverride?: CandidateProfile
 ): Promise<RolePrepPack> {
   const profile = profileOverride || getCandidateProfile();
-  const m1 = profile.key_metrics[0] || '~425% organic search growth';
-  const m2 = profile.key_metrics[1] || '~1,466% product page view growth';
-  const m3 = profile.key_metrics[2] || 'Built automated data & GTM workflows';
-  const skillsList = profile.skills.slice(0, 5).join(', ');
-
-  const deterministicPack: RolePrepPack = {
-    company: job.company,
-    title: job.title,
-    engine_used: 'Deterministic STAR Copilot v2.5',
-    tailored_bullets: [
-      `Spearheaded high-velocity growth & product execution (${m1}), directly transferable to ${job.company}'s ${job.title} roadmap.`,
-      `Scaled conversion and product discovery (${m2}) by combining ${skillsList} with rapid funnel experimentation.`,
-      `${m3}, reducing manual operational overhead and accelerating 0-to-1 launch cadence.`,
-      `Synthesized qualitative user signals and quantitative telemetry into repeatable GTM & product playbooks.`,
-    ],
-    screening_questions: [
-      {
-        question: `Why ${job.company} and why the ${job.title} role right now?`,
-        answer_framework: `Anchor on ${job.company}'s product velocity and connect immediately to your verified proof: "${m1}" and "${m2}". Explain how you already operate with ${skillsList}.`,
-      },
-      {
-        question: `How do you address the identified role gap (${job.gap || 'domain tenure'})?`,
-        answer_framework: `Reframe tenure into output density: walk through the architecture behind "${m2}" and offer a concrete 30-day experiment plan for ${job.company}.`,
-      },
-      {
-        question: `Walk through a high-impact experiment or system you shipped end-to-end.`,
-        answer_framework: `Use the STAR method: Situation (baseline bottleneck), Task (growth/engineering objective), Action (leveraging ${skillsList}), Result (${m1}).`,
-      },
-    ],
-    follow_up_sequence: {
-      day_3_nudge: `Hi ${job.company} team — following up on my application for ${job.title}. Having driven ${m1} and ${m2} in my recent work, I'd love to share a quick 3-bullet breakdown of growth/product experiments I'd prioritize in my first 30 days at ${job.company}.`,
-      day_7_value_add: `Hi ${job.company} team — circling back one last time on the ${job.title} role. I put together a brief teardown of ${job.company}'s current funnel & onboarding flow based on the systems that helped me scale ${m2}. Happy to send it over if useful (${profile.portfolio}).`,
-    },
-  };
+  const deterministicPack = buildDeterministicRolePrepPack(job, profile);
+  const jdExcerpt = job.description ? extractHighSignalJdContext(job.description, 1500) : '';
 
   const prompt = `Generate an executive Role Prep Pack for ${profile.name} applying to "${job.title}" at "${job.company}".
 Return ONLY valid JSON matching the exact schema below.
+
+CRITICAL GROUNDING RULE:
+- Use ONLY the verified metrics, skills, and portfolio listed under CANDIDATE. NEVER fabricate numbers, employers, or years of experience.
 
 CANDIDATE:
 - Name: ${profile.name}
@@ -76,7 +96,7 @@ TARGET ROLE:
 - Title: ${job.title}
 - Company: ${job.company}
 - Fit Reasons: ${job.reasons || 'Strong role alignment'}
-- Identified Gap to Mitigate: ${job.gap || 'Emphasize hands-on shipping velocity'}
+- Identified Gap to Mitigate: ${job.gap || 'Emphasize hands-on shipping velocity'}${jdExcerpt ? `\n- Key JD Context:\n${jdExcerpt}` : ''}
 
 Return JSON with exact keys:
 {
@@ -105,7 +125,8 @@ Return JSON with exact keys:
 
   const llmRes = await generateStructuredJSONWithLLM<Partial<RolePrepPack>>(
     prompt,
-    'You are an executive interview and resume strategist. Output strictly valid JSON.'
+    'You are an executive interview and resume strategist. Cite only verified metrics and output strictly valid JSON.',
+    { thinkingLevel: 'LOW' }
   );
 
   if (
@@ -117,6 +138,7 @@ Return JSON with exact keys:
       company: job.company,
       title: job.title,
       engine_used: llmRes.engine_used,
+      defendable_proof_anchors: deterministicPack.defendable_proof_anchors,
       tailored_bullets: llmRes.data.tailored_bullets,
       screening_questions:
         Array.isArray(llmRes.data.screening_questions) &&
@@ -125,7 +147,12 @@ Return JSON with exact keys:
           : deterministicPack.screening_questions,
       follow_up_sequence:
         llmRes.data.follow_up_sequence?.day_3_nudge
-          ? llmRes.data.follow_up_sequence
+          ? {
+              day_3_nudge: llmRes.data.follow_up_sequence.day_3_nudge,
+              day_7_value_add:
+                llmRes.data.follow_up_sequence.day_7_value_add ||
+                deterministicPack.follow_up_sequence.day_7_value_add,
+            }
           : deterministicPack.follow_up_sequence,
     };
   }

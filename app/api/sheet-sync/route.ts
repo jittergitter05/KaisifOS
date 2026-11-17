@@ -6,33 +6,26 @@ import {
   getPublicStats,
   isCloudSheetsConfigured,
   updateLocalJobRow,
+  batchUpdateLocalJobRows,
   appendLocalJobRecord,
   appendCloudSheetRecord,
-  updateCloudSheetRowStatus,
+  updateCloudSheetRowFields,
+  batchUpdateCloudSheetRows,
+  sanitizeSheetCell,
 } from '@/lib/sheets';
 
 const ALLOWED_STATUSES = new Set([
   'NEW',
   'SHORTLISTED',
   'APPLIED',
-  'INTERVIEWING',
+  'REPLIED',
+  'INTERVIEW',
   'OFFER',
   'REJECTED',
-  'ARCHIVED',
-  'REPLIED',
+  'WITHDRAWN',
+  'GHOSTED',
+  'IGNORED',
 ]);
-
-/**
- * Prevents spreadsheet formula injection (CSV/Sheet injection) when writing
- * user-controlled strings with valueInputOption: 'USER_ENTERED'.
- */
-function sanitizeSheetCell(val: unknown, maxLen = 2000): string {
-  const str = String(val ?? '').trim().slice(0, maxLen);
-  if (/^[=+\-@]/.test(str)) {
-    return `'${str}`;
-  }
-  return str;
-}
 
 export const dynamic = 'force-dynamic';
 
@@ -85,6 +78,50 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
 
+    if (body.action === 'batch_update' && Array.isArray(body.targets)) {
+      const normalized = String(body.status || '').toUpperCase().trim();
+      if (!ALLOWED_STATUSES.has(normalized)) {
+        return NextResponse.json(
+          { error: `Invalid status value: ${normalized}` },
+          { status: 400 }
+        );
+      }
+
+      const targets = (body.targets as Array<{ id?: unknown; rowId?: unknown }>)
+        .slice(0, 200)
+        .map((t) => ({
+          id: typeof t.id === 'string' && t.id.trim() ? t.id.trim().slice(0, 120) : undefined,
+          rowId:
+            t.rowId !== undefined && Number.isInteger(Number(t.rowId)) && Number(t.rowId) >= 2
+              ? Number(t.rowId)
+              : undefined,
+        }))
+        .filter((t) => t.id || t.rowId);
+
+      if (targets.length === 0) {
+        return NextResponse.json({ error: 'No valid targets provided for batch update.' }, { status: 400 });
+      }
+
+      let cloudCount = 0;
+      if (isCloudSheetsConfigured()) {
+        try {
+          cloudCount = await batchUpdateCloudSheetRows(targets, normalized);
+        } catch (cloudErr) {
+          console.warn('[sheet-sync] Cloud batch update failed, updating local store:', cloudErr);
+        }
+      }
+
+      const localCount = batchUpdateLocalJobRows(targets, normalized);
+      if (cloudCount === 0 && localCount === 0) {
+        return NextResponse.json(
+          { error: 'No matching pipeline records found or storage is read-only.' },
+          { status: 404 }
+        );
+      }
+
+      return NextResponse.json({ success: true, cloudCount, localCount });
+    }
+
     if (body.action === 'append' && body.job) {
       const { job } = body;
       const dateStr = sanitizeSheetCell(job.date || new Date().toISOString().split('T')[0], 20);
@@ -108,44 +145,82 @@ export async function POST(request: NextRequest) {
         status: safeStatus,
       };
 
+      let cloudSaved = false;
       if (isCloudSheetsConfigured()) {
         try {
           await appendCloudSheetRecord(record);
+          cloudSaved = true;
         } catch (cloudErr) {
           console.warn('[sheet-sync] Cloud append failed, saving to local store:', cloudErr);
         }
       }
 
-      appendLocalJobRecord(record);
-      return NextResponse.json({ success: true, record });
-    }
-
-    const { rowId, status, dm, resumeAngle, gap } = body;
-    const numericRowId = Number(rowId);
-    if (!rowId || !Number.isInteger(numericRowId) || numericRowId < 2) {
-      return NextResponse.json({ error: 'Invalid or missing rowId' }, { status: 400 });
-    }
-
-    const safeStatus =
-      status && ALLOWED_STATUSES.has(String(status).toUpperCase())
-        ? String(status).toUpperCase()
-        : undefined;
-
-    if (isCloudSheetsConfigured() && safeStatus) {
-      try {
-        await updateCloudSheetRowStatus(numericRowId, safeStatus);
-      } catch (cloudErr) {
-        console.warn('[sheet-sync] Cloud status update failed, updating local store:', cloudErr);
+      const localSaved = appendLocalJobRecord(record);
+      if (!cloudSaved && !localSaved) {
+        return NextResponse.json(
+          { error: 'Unable to persist record (read-only filesystem without Cloud Sheets configured).' },
+          { status: 500 }
+        );
       }
+      return NextResponse.json({ success: true, record, cloudSaved, localSaved });
     }
 
-    updateLocalJobRow(numericRowId, {
+    const { id, rowId, status, dm, resumeAngle, gap, score, reasons } = body;
+    const targetId = typeof id === 'string' && id.trim() ? id.trim().slice(0, 120) : undefined;
+    const numericRowId = rowId !== undefined ? Number(rowId) : undefined;
+
+    if (!targetId && (!numericRowId || !Number.isInteger(numericRowId) || numericRowId < 2)) {
+      return NextResponse.json({ error: 'Invalid or missing job id / rowId' }, { status: 400 });
+    }
+
+    let safeStatus: string | undefined;
+    if (status !== undefined) {
+      const normalized = String(status).toUpperCase().trim();
+      if (!ALLOWED_STATUSES.has(normalized)) {
+        return NextResponse.json(
+          { error: `Invalid status value: ${normalized}` },
+          { status: 400 }
+        );
+      }
+      safeStatus = normalized;
+    }
+
+    const patch = {
       status: safeStatus,
       dm: dm !== undefined ? sanitizeSheetCell(dm, 1500) : undefined,
       resumeAngle: resumeAngle !== undefined ? sanitizeSheetCell(resumeAngle, 500) : undefined,
       gap: gap !== undefined ? sanitizeSheetCell(gap, 500) : undefined,
-    });
-    return NextResponse.json({ success: true });
+      score:
+        score !== undefined && Number.isFinite(Number(score))
+          ? Math.max(0, Math.min(100, Math.round(Number(score))))
+          : undefined,
+      reasons:
+        reasons !== undefined
+          ? sanitizeSheetCell(Array.isArray(reasons) ? reasons.join(' | ') : reasons, 1000)
+          : undefined,
+    };
+
+    let cloudUpdated = false;
+    if (isCloudSheetsConfigured()) {
+      try {
+        cloudUpdated = await updateCloudSheetRowFields(
+          { id: targetId, rowId: numericRowId },
+          patch
+        );
+      } catch (cloudErr) {
+        console.warn('[sheet-sync] Cloud field update failed, updating local store:', cloudErr);
+      }
+    }
+
+    const localUpdated = updateLocalJobRow({ id: targetId, rowId: numericRowId }, patch);
+    if (!cloudUpdated && !localUpdated) {
+      return NextResponse.json(
+        { error: 'Matching pipeline record was not found or storage is read-only.' },
+        { status: 404 }
+      );
+    }
+
+    return NextResponse.json({ success: true, cloudUpdated, localUpdated });
   } catch (e) {
     console.error('[sheet-sync POST]', e);
     return NextResponse.json({ error: 'Operation failed' }, { status: 500 });

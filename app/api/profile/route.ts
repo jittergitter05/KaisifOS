@@ -7,7 +7,8 @@ import {
   CandidateProfile,
   DEFAULT_ATS_COMPANIES,
 } from '@/lib/profile';
-import fs from 'fs';
+import { atomicWriteJsonFile } from '@/lib/sheets';
+import { siteConfig } from '@/config/site';
 import path from 'path';
 
 function sanitizeStringArray(val: unknown, fallback: string[] = []): string[] {
@@ -42,6 +43,23 @@ export async function GET(request: NextRequest) {
   }
 }
 
+function tryWriteLocalProfile(profile: CandidateProfile): { ok: boolean; error?: string } {
+  try {
+    const profilePath = path.join(process.cwd(), 'data', 'profile.json');
+    atomicWriteJsonFile(profilePath, profile);
+    return { ok: true };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return {
+      ok: false,
+      error:
+        code === 'EROFS' || code === 'EACCES'
+          ? 'This deployment mounts data/profile.json as read-only. Update data/profile.json in your repository or redeploy with writable storage.'
+          : (err as Error).message,
+    };
+  }
+}
+
 export async function POST(request: NextRequest) {
   const cookieStore = cookies();
   const authCookie = cookieStore.get('kaisifos_auth')?.value;
@@ -57,8 +75,10 @@ export async function POST(request: NextRequest) {
 
     if (body.presetKey && typeof body.presetKey === 'string' && FORK_PROFILE_TEMPLATES[body.presetKey]) {
       const preset = FORK_PROFILE_TEMPLATES[body.presetKey];
-      const profilePath = path.join(process.cwd(), 'data', 'profile.json');
-      fs.writeFileSync(profilePath, JSON.stringify(preset, null, 2), 'utf8');
+      const writeRes = tryWriteLocalProfile(preset);
+      if (!writeRes.ok) {
+        return NextResponse.json({ error: writeRes.error }, { status: 503 });
+      }
       return NextResponse.json({ success: true, profile: preset });
     }
 
@@ -88,7 +108,7 @@ export async function POST(request: NextRequest) {
 
     // Explicitly whitelist and sanitize all CandidateProfile fields (prevents prototype pollution / arbitrary key injection)
     const updatedProfile: CandidateProfile = {
-      system_name: String(body.system_name || current.system_name || 'CareerOS').trim().slice(0, 80),
+      system_name: String(body.system_name || current.system_name || siteConfig.name).trim().slice(0, 80),
       name: String(body.name).trim().slice(0, 120),
       email: String(body.email ?? current.email ?? '').trim().slice(0, 120),
       target_roles: sanitizeStringArray(body.target_roles, current.target_roles),
@@ -152,8 +172,10 @@ export async function POST(request: NextRequest) {
       },
     };
 
-    const profilePath = path.join(process.cwd(), 'data', 'profile.json');
-    fs.writeFileSync(profilePath, JSON.stringify(updatedProfile, null, 2), 'utf8');
+    const writeRes = tryWriteLocalProfile(updatedProfile);
+    if (!writeRes.ok) {
+      return NextResponse.json({ error: writeRes.error }, { status: 503 });
+    }
 
     return NextResponse.json({ success: true, profile: updatedProfile });
   } catch (e) {

@@ -27,6 +27,7 @@ export function useKeyboardNav({
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (!enabled || totalRows === 0) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       // Don't capture if user is typing in an input/select
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;

@@ -16,51 +16,32 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { ParsedResumeParameters, ResumeParseDiagnostics } from '@/lib/resume-parser';
+import { deriveDynamicSearchParams } from '@/lib/utils';
+import {
+  PROFILE_PRESET_METADATA,
+  DEFAULT_ATS_COMPANIES,
+  detectMatchingPresetKey,
+  type CandidateProfile,
+} from '@/lib/profile-presets';
+import { siteConfig } from '@/config/site';
 
-interface Profile {
-  system_name?: string;
-  name: string;
-  email: string;
-  target_roles: string[];
-  target_cities: string[];
-  open_to_relocation: boolean;
-  relocation_preference: {
-    willing: boolean;
-    requirements: string[];
-    preferred_regions: string[];
-    avoid: string[];
-  };
-  min_salary_lpa: number;
-  min_salary_usd_annual: number;
-  experience_years: number;
-  experience_level: string;
-  portfolio: string;
-  key_metrics: string[];
-  skills: string[];
-  languages: string[];
-  resume_synthesizer_url: string;
-  ats_companies?: {
-    greenhouse: string[];
-    lever: string[];
-    ashby: string[];
-  };
-}
+type Profile = CandidateProfile;
 
-const SAMPLE_RESUME_TEXT = `SHAIK KAISIF BASHA
-shaikkaisifbasha04@gmail.com | https://portjitterglitter.vercel.app | Hyderabad & Bengaluru, India
+const SAMPLE_RESUME_TEXT = `JORDAN PATEL
+jordan.patel@example.com | https://your-portfolio.com | Bengaluru & Remote
 
 SUMMARY
-Entry-level Product, Growth & AI Systems Builder (0 full-time years / Fresher) specializing in product marketing, technical SEO, Python EDA, and automated GTM pipelines. Open to global relocation (UAE, Singapore, UK, Europe).
+Early-career Product, Growth & AI Systems Builder (1 full-time year) specializing in product marketing, technical SEO, SQL/Python analytics, and automated GTM pipelines. Open to global relocation (Singapore, UAE, UK, Europe).
 
 EXPERIENCE & KEY INITIATIVES
-Growth & Product Marketing — Smatr AI (2024)
-• Drove ~425% organic search growth at Smatr AI through programmatic SEO and Google Search Console telemetry.
-• Scaled ~1,466% product page view growth at Smatr AI via conversion funnel experimentation in GA4.
-• Executed product marketing across Reddit, Discord, and Pinterest driving 1,000+ unique monthly visits.
-• Created digital contact database for 2,000+ alumni and automated outreach workflows using Python and Cloudflare Workers.
+Growth & Product Marketing — Acme Cloud Systems (2024)
+• Scaled organic product search acquisition by 310% over two quarters using technical SEO and Search Console telemetry.
+• Improved trial-to-paid funnel conversion by 38% via A/B activation experiments in GA4 and PostHog.
+• Built automated lead enrichment and outreach workflows using Python, SQL, and TypeScript edge workers.
+• Compiled and segmented a 1,500+ community builder directory for developer beta launches.
 
 SKILLS
-GTM Strategy, Product Marketing, Growth Marketing, SEO, Python, Python EDA, SQL, GA4, Google Search Console, Notion, Cloudflare Workers, TypeScript, Next.js, AI Workflow Automation, A/B Testing`;
+GTM Strategy, Product Marketing, Growth Marketing, SEO, Python, SQL, GA4, Google Search Console, Notion, TypeScript, Next.js, AI Workflow Automation, A/B Testing`;
 
 function ArrayEditor({
   label,
@@ -76,18 +57,20 @@ function ArrayEditor({
   const [newItem, setNewItem] = useState('');
   return (
     <div>
-      <label className="text-xs font-medium text-slate-300 mb-2 block">{label}</label>
+      <label className="text-xs font-medium text-slate-700 dark:text-slate-300 mb-2 block">
+        {label}
+      </label>
       <div className="flex flex-wrap gap-1.5 mb-2.5">
         {items.map((item, i) => (
           <span
             key={i}
-            className="inline-flex items-center gap-1.5 bg-[#0B0F17] border border-slate-800 text-slate-200 text-xs rounded px-2.5 py-1 font-mono"
+            className="inline-flex items-center gap-1.5 bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 text-xs rounded px-2.5 py-1 font-mono"
           >
             {item}
             <button
               type="button"
               onClick={() => onChange(items.filter((_, j) => j !== i))}
-              className="text-slate-500 hover:text-rose-400 transition-colors cursor-pointer"
+              className="text-slate-400 dark:text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 transition-colors cursor-pointer"
               aria-label={`Remove ${item}`}
             >
               <X className="h-3 w-3" />
@@ -108,7 +91,7 @@ function ArrayEditor({
             }
           }}
           placeholder={placeholder || 'Add item...'}
-          className="flex-1 bg-[#0B0F17] border border-slate-800 rounded-md px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
+          className="flex-1 bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md px-3 py-1.5 text-xs text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
         />
         <Button
           type="button"
@@ -120,7 +103,7 @@ function ArrayEditor({
               setNewItem('');
             }
           }}
-          className="bg-slate-900 border-slate-800 hover:bg-slate-800 text-slate-300 h-8 px-3 text-xs"
+          className="bg-slate-100 dark:bg-slate-900 border-slate-300 dark:border-slate-800 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-300 h-8 px-3 text-xs whitespace-nowrap shrink-0"
         >
           <Plus className="h-3.5 w-3.5 mr-1" /> Add
         </Button>
@@ -134,6 +117,7 @@ export default function ProfilePage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<'idle' | 'saved' | 'error'>('idle');
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
 
   const [parserTab, setParserTab] = useState<'pdf_upload' | 'google_drive' | 'raw_text'>(
@@ -142,6 +126,7 @@ export default function ProfilePage() {
   const [resumeText, setResumeText] = useState('');
   const [driveUrl, setDriveUrl] = useState('');
   const [pdfFile, setPdfFile] = useState<File | null>(null);
+  const [isDraggingPdf, setIsDraggingPdf] = useState(false);
   const [parsing, setParsing] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
   const [parsedResult, setParsedResult] = useState<{
@@ -180,17 +165,26 @@ export default function ProfilePage() {
   const saveProfileData = async (targetProfile: Profile) => {
     setSaving(true);
     setStatus('idle');
+    setSaveError(null);
     try {
       const res = await fetch('/api/profile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(targetProfile),
       });
-      if (!res.ok) throw new Error('Save failed');
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        throw new Error(errData?.error || `Save failed (HTTP ${res.status}).`);
+      }
       setStatus('saved');
       setTimeout(() => setStatus('idle'), 3000);
-    } catch {
+    } catch (e) {
       setStatus('error');
+      setSaveError((e as Error).message || 'Failed to save profile.');
     }
     setSaving(false);
   };
@@ -202,20 +196,28 @@ export default function ProfilePage() {
   const applyPreset = async (presetKey: string) => {
     setSaving(true);
     setStatus('idle');
+    setSaveError(null);
     try {
       const res = await fetch('/api/profile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ presetKey }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.profile) setProfile(data.profile);
-        setStatus('saved');
-        setTimeout(() => setStatus('idle'), 3000);
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return;
       }
-    } catch {
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        throw new Error(errData?.error || `Preset apply failed (HTTP ${res.status}).`);
+      }
+      const data = await res.json();
+      if (data.profile) setProfile(data.profile);
+      setStatus('saved');
+      setTimeout(() => setStatus('idle'), 3000);
+    } catch (e) {
       setStatus('error');
+      setSaveError((e as Error).message || 'Failed to apply preset.');
     }
     setSaving(false);
   };
@@ -325,13 +327,13 @@ export default function ProfilePage() {
     const isFresher = profile.experience_years === 0;
     const targetCities = profile.target_cities.join(', ');
     const expRule = isFresher
-      ? `3. Seniority (15 pts): Candidate has 0 full-time years. Cap total score at 50 if 2+ years required.`
+      ? `3. Seniority (15 pts): Candidate has 0 full-time years. Cap total score at 48 if 2+ years required.`
       : `3. Seniority (15 pts): Candidate has ${profile.experience_years} years of experience.`;
     const locRule = profile.open_to_relocation
       ? `4. Comp & Geo (15 pts): Open to relocation (${profile.relocation_preference?.preferred_regions?.join(', ')}). Floor: ₹${profile.min_salary_lpa}L / $${profile.min_salary_usd_annual}.`
       : `4. Comp & Geo (15 pts): Must be in ${targetCities} or Remote.`;
 
-    return `Instance: ${profile.system_name || 'CareerOS'}
+    return `Instance: ${profile.system_name || siteConfig.name}
 Owner: ${profile.name} (${profile.experience_level})
 Roles: ${profile.target_roles.join(', ')}
 Hubs: ${targetCities}
@@ -346,34 +348,36 @@ ${expRule}
 ${locRule}`;
   }, [profile]);
 
+  const derivedTargets = useMemo(() => {
+    if (!profile) return null;
+    return deriveDynamicSearchParams(profile);
+  }, [profile]);
+
   if (loading)
     return (
-      <div className="flex-1 flex items-center justify-center p-12 text-slate-400 font-mono text-xs">
+      <div className="flex-1 flex items-center justify-center p-12 text-slate-500 dark:text-slate-400 font-mono text-xs">
         Loading profile...
       </div>
     );
   if (!profile)
     return (
-      <div className="flex-1 flex items-center justify-center p-12 text-rose-400 font-mono text-xs">
+      <div className="flex-1 flex items-center justify-center p-12 text-rose-600 dark:text-rose-400 font-mono text-xs">
         Failed to load profile.json.
       </div>
     );
 
-  const atsCompanies = profile.ats_companies || {
-    greenhouse: ['razorpay', 'postman', 'stripe', 'vercel'],
-    lever: ['zepto', 'cred', 'mistral'],
-    ashby: ['linear', 'posthog', 'supabase'],
-  };
+  const atsCompanies = profile.ats_companies || DEFAULT_ATS_COMPANIES;
+  const activePresetKey = detectMatchingPresetKey(profile);
 
   return (
-    <div className="flex flex-col flex-1 w-full bg-[#0B0F17] text-[#F8FAFC]">
+    <div className="flex flex-col flex-1 w-full bg-slate-50 dark:bg-[#0B0F17] text-slate-900 dark:text-[#F8FAFC]">
       <div className="flex-1 py-6 px-4 sm:px-6 lg:px-8 max-w-6xl mx-auto w-full pb-24 space-y-6">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-5">
           <div>
-            <h1 className="text-2xl font-display font-bold tracking-tight text-white">
-              Owner & Targeting Parameters
+            <h1 className="text-2xl font-display font-bold tracking-tight text-slate-900 dark:text-white">
+              Owner &amp; Targeting Parameters
             </h1>
-            <p className="text-xs text-slate-400 mt-1">
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
               Parse a resume or edit parameters directly in{' '}
               <span className="font-mono">data/profile.json</span>.
             </p>
@@ -402,21 +406,38 @@ ${locRule}`;
           </Button>
         </div>
 
+        {saveError && (
+          <div className="bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/70 text-rose-800 dark:text-rose-200 px-4 py-2.5 rounded-md text-xs font-mono flex items-center justify-between gap-3">
+            <span className="flex items-center gap-2">
+              <AlertCircle className="h-3.5 w-3.5 text-rose-600 dark:text-rose-400 shrink-0" />
+              {saveError}
+            </span>
+            <button
+              type="button"
+              onClick={() => setSaveError(null)}
+              aria-label="Dismiss error"
+              className="text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white shrink-0 cursor-pointer"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+
         {/* Multi-Source Resume Parser */}
-        <section className="bg-[#111827] border border-slate-800 rounded-lg overflow-hidden">
-          <div className="px-6 py-4 border-b border-slate-800 bg-[#0D131F] flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <section className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
+          <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0D131F] flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div>
-              <h2 className="text-sm font-display font-semibold text-white">
+              <h2 className="text-sm font-display font-semibold text-slate-900 dark:text-white">
                 Resume / CV Parameter Parser
               </h2>
-              <p className="text-xs text-slate-400 mt-0.5">
-                Upload a PDF, paste a Google Drive link, or paste raw text to extract roles, skills,
-                and proof metrics.
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Upload a PDF, paste a Google Drive link, or paste raw text to extract roles,
+                skills, and proof metrics.
               </p>
             </div>
 
             <div className="flex flex-wrap items-center gap-1.5">
-              <div className="flex items-center gap-1 bg-[#0B0F17] border border-slate-800 p-1 rounded-md">
+              <div className="flex items-center gap-1 bg-white dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 p-1 rounded-md">
                 {[
                   { id: 'pdf_upload', label: 'Upload PDF', icon: Upload },
                   { id: 'google_drive', label: 'Google Drive Link', icon: Link2 },
@@ -431,10 +452,10 @@ ${locRule}`;
                         setParserTab(t.id as typeof parserTab);
                         setParseError(null);
                       }}
-                      className={`px-3 py-1.5 text-xs font-medium rounded flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
+                      className={`px-3 py-1.5 text-xs font-medium rounded flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                         parserTab === t.id
-                          ? 'bg-slate-800 text-white'
-                          : 'text-slate-400 hover:text-slate-200'
+                          ? 'bg-slate-200 dark:bg-slate-800 text-slate-900 dark:text-white'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                       }`}
                     >
                       <Icon className="h-3.5 w-3.5" />
@@ -451,7 +472,7 @@ ${locRule}`;
                   setResumeText(SAMPLE_RESUME_TEXT);
                   runResumeParser(SAMPLE_RESUME_TEXT);
                 }}
-                className="px-3 py-1.5 text-xs font-mono bg-[#0B0F17] border border-slate-800 hover:border-emerald-500/60 text-slate-300 rounded-md cursor-pointer whitespace-nowrap"
+                className="px-3 py-1.5 text-xs font-mono bg-white dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 hover:border-emerald-500/60 text-slate-700 dark:text-slate-300 rounded-md cursor-pointer whitespace-nowrap shrink-0"
               >
                 Parse Sample CV
               </button>
@@ -460,21 +481,43 @@ ${locRule}`;
 
           <div className="p-6 space-y-5">
             {parserTab === 'pdf_upload' && (
-              <div className="border border-dashed border-slate-700 bg-[#0B0F17] rounded-lg p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDraggingPdf(true);
+                }}
+                onDragLeave={() => setIsDraggingPdf(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setIsDraggingPdf(false);
+                  const dropped = e.dataTransfer.files?.[0];
+                  if (dropped) {
+                    setPdfFile(dropped);
+                    setParseError(null);
+                  }
+                }}
+                className={`border border-dashed rounded-lg p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 transition-colors ${
+                  isDraggingPdf
+                    ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/20'
+                    : 'border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0F17]'
+                }`}
+              >
                 <div className="space-y-1">
-                  <div className="text-xs font-medium text-white">Resume File (.pdf or .txt)</div>
-                  <p className="text-xs text-slate-400">
-                    Extracts text via Gemini 2.5 Flash multimodal PDF comprehension or built-in zlib
-                    stream decoding.
+                  <div className="text-xs font-medium text-slate-900 dark:text-white">
+                    Drag &amp; Drop or Select Resume File (.pdf or .txt)
+                  </div>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Extracts text via Gemini 4 Hydrogen multimodal PDF comprehension or built-in
+                    zlib stream decoding.
                   </p>
                   {pdfFile && (
-                    <div className="text-xs font-mono text-emerald-400 pt-1">
+                    <div className="text-xs font-mono text-emerald-600 dark:text-emerald-400 pt-1">
                       Selected: {pdfFile.name} ({Math.round(pdfFile.size / 1024)} KB)
                     </div>
                   )}
                 </div>
                 <div className="flex items-center gap-2.5 shrink-0">
-                  <label className="px-3.5 py-2 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-100 rounded-md cursor-pointer whitespace-nowrap">
+                  <label className="px-3.5 py-2 text-xs font-medium bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-900 dark:text-slate-100 rounded-md cursor-pointer whitespace-nowrap">
                     Choose File
                     <input
                       type="file"
@@ -491,7 +534,7 @@ ${locRule}`;
                     type="button"
                     disabled={parsing || !pdfFile}
                     onClick={() => runResumeParser()}
-                    className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs h-9 px-4"
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs h-9 px-4 whitespace-nowrap shrink-0"
                   >
                     {parsing ? (
                       <>
@@ -508,8 +551,8 @@ ${locRule}`;
             )}
 
             {parserTab === 'google_drive' && (
-              <div className="bg-[#0B0F17] border border-slate-800 rounded-lg p-5 space-y-3">
-                <label className="block text-xs font-medium text-white">
+              <div className="bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-lg p-5 space-y-3">
+                <label className="block text-xs font-medium text-slate-900 dark:text-white">
                   Public Google Drive PDF or Google Docs URL
                 </label>
                 <div className="flex flex-col sm:flex-row gap-2.5">
@@ -518,7 +561,7 @@ ${locRule}`;
                     value={driveUrl}
                     onChange={(e) => setDriveUrl(e.target.value)}
                     placeholder="https://drive.google.com/file/d/.../view"
-                    className="flex-1 bg-[#111827] border border-slate-800 rounded-md px-3.5 py-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
+                    className="flex-1 bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-md px-3.5 py-2 text-xs font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
                   />
                   <Button
                     type="button"
@@ -532,12 +575,12 @@ ${locRule}`;
                       </>
                     ) : (
                       <>
-                        Fetch & Parse <ArrowRight className="h-3.5 w-3.5 ml-1.5" />
+                        Fetch &amp; Parse <ArrowRight className="h-3.5 w-3.5 ml-1.5" />
                       </>
                     )}
                   </Button>
                 </div>
-                <p className="text-[11px] text-slate-400">
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
                   Set link sharing to &ldquo;Anyone with the link can view&rdquo;.
                 </p>
               </div>
@@ -550,17 +593,17 @@ ${locRule}`;
                   value={resumeText}
                   onChange={(e) => setResumeText(e.target.value)}
                   placeholder="Paste full resume text..."
-                  className="w-full bg-[#0B0F17] border border-slate-800 rounded-md p-3.5 text-xs font-mono text-slate-200 leading-relaxed focus:outline-none focus:border-emerald-500"
+                  className="w-full bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md p-3.5 text-xs font-mono text-slate-800 dark:text-slate-200 leading-relaxed focus:outline-none focus:border-emerald-500"
                 />
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-mono text-slate-400 tabular-nums">
+                  <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400 tabular-nums">
                     {resumeText.length} characters
                   </span>
                   <Button
                     type="button"
                     disabled={parsing}
                     onClick={() => runResumeParser()}
-                    className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs h-9 px-4"
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs h-9 px-4 whitespace-nowrap shrink-0"
                   >
                     {parsing ? (
                       <>
@@ -577,19 +620,19 @@ ${locRule}`;
             )}
 
             {parseError && (
-              <div className="bg-rose-950/40 border border-rose-800/70 text-rose-300 px-4 py-3 rounded-md text-xs font-mono">
+              <div className="bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/70 text-rose-700 dark:text-rose-300 px-4 py-3 rounded-md text-xs font-mono">
                 {parseError}
               </div>
             )}
 
             {parsedResult && (
-              <div className="border border-emerald-700/60 bg-[#0B0F17] rounded-lg overflow-hidden space-y-4">
-                <div className="px-5 py-3.5 bg-emerald-950/30 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
+              <div className="border border-emerald-300 dark:border-emerald-700/60 bg-slate-50 dark:bg-[#0B0F17] rounded-lg overflow-hidden space-y-4">
+                <div className="px-5 py-3.5 bg-emerald-50 dark:bg-emerald-950/30 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <div className="text-xs font-mono text-emerald-400">
+                    <div className="text-xs font-mono text-emerald-700 dark:text-emerald-400">
                       Parsed via {parsedResult.diagnostics.engine_used}
                     </div>
-                    <div className="text-[11px] text-slate-400 font-mono mt-0.5 tabular-nums">
+                    <div className="text-[11px] text-slate-600 dark:text-slate-400 font-mono mt-0.5 tabular-nums">
                       Confidence: {parsedResult.diagnostics.confidence_score}% ·{' '}
                       {parsedResult.diagnostics.char_count} bytes
                     </div>
@@ -600,7 +643,7 @@ ${locRule}`;
                       variant="outline"
                       size="sm"
                       onClick={() => setParsedResult(null)}
-                      className="bg-slate-900 border-slate-700 text-slate-300 text-xs h-8"
+                      className="bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 text-xs h-8"
                     >
                       Discard
                     </Button>
@@ -618,14 +661,14 @@ ${locRule}`;
                 <div className="overflow-x-auto px-5 pb-4">
                   <table className="w-full text-left border-collapse text-xs">
                     <thead>
-                      <tr className="border-b border-slate-800 text-slate-400 font-mono text-[11px]">
+                      <tr className="border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 font-mono text-[11px]">
                         <th className="py-2.5 pr-3 w-10">Apply</th>
                         <th className="py-2.5 px-3 w-44">Parameter</th>
                         <th className="py-2.5 px-3">Current Value</th>
                         <th className="py-2.5 pl-3">Extracted Value</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-800/80">
+                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800/80">
                       <tr>
                         <td className="py-3 pr-3 align-top">
                           <input
@@ -637,11 +680,13 @@ ${locRule}`;
                             className="accent-emerald-500 rounded"
                           />
                         </td>
-                        <td className="py-3 px-3 align-top font-medium text-white">Identity</td>
-                        <td className="py-3 px-3 align-top text-slate-400 font-mono">
+                        <td className="py-3 px-3 align-top font-medium text-slate-900 dark:text-white">
+                          Identity
+                        </td>
+                        <td className="py-3 px-3 align-top text-slate-500 dark:text-slate-400 font-mono">
                           {profile.name} · {profile.email}
                         </td>
-                        <td className="py-3 pl-3 align-top text-emerald-400 font-mono">
+                        <td className="py-3 pl-3 align-top text-emerald-700 dark:text-emerald-400 font-mono">
                           {parsedResult.parsed.name} · {parsedResult.parsed.email}
                         </td>
                       </tr>
@@ -652,16 +697,21 @@ ${locRule}`;
                             type="checkbox"
                             checked={mergeSelection.experience}
                             onChange={(e) =>
-                              setMergeSelection({ ...mergeSelection, experience: e.target.checked })
+                              setMergeSelection({
+                                ...mergeSelection,
+                                experience: e.target.checked,
+                              })
                             }
                             className="accent-emerald-500 rounded"
                           />
                         </td>
-                        <td className="py-3 px-3 align-top font-medium text-white">Seniority</td>
-                        <td className="py-3 px-3 align-top text-slate-400 font-mono tabular-nums">
+                        <td className="py-3 px-3 align-top font-medium text-slate-900 dark:text-white">
+                          Seniority
+                        </td>
+                        <td className="py-3 px-3 align-top text-slate-500 dark:text-slate-400 font-mono tabular-nums">
                           {profile.experience_level} ({profile.experience_years} yrs)
                         </td>
-                        <td className="py-3 pl-3 align-top text-emerald-400 font-mono tabular-nums">
+                        <td className="py-3 pl-3 align-top text-emerald-700 dark:text-emerald-400 font-mono tabular-nums">
                           {parsedResult.parsed.experience_level} (
                           {parsedResult.parsed.experience_years} yrs)
                         </td>
@@ -678,13 +728,13 @@ ${locRule}`;
                             className="accent-emerald-500 rounded"
                           />
                         </td>
-                        <td className="py-3 px-3 align-top font-medium text-white">
+                        <td className="py-3 px-3 align-top font-medium text-slate-900 dark:text-white">
                           Target Roles ({parsedResult.parsed.target_roles.length})
                         </td>
-                        <td className="py-3 px-3 align-top text-slate-400">
+                        <td className="py-3 px-3 align-top text-slate-500 dark:text-slate-400">
                           {profile.target_roles.join(' · ')}
                         </td>
-                        <td className="py-3 pl-3 align-top text-emerald-300 font-medium">
+                        <td className="py-3 pl-3 align-top text-emerald-700 dark:text-emerald-300 font-medium">
                           {parsedResult.parsed.target_roles.join(' · ')}
                         </td>
                       </tr>
@@ -700,13 +750,13 @@ ${locRule}`;
                             className="accent-emerald-500 rounded"
                           />
                         </td>
-                        <td className="py-3 px-3 align-top font-medium text-white">
+                        <td className="py-3 px-3 align-top font-medium text-slate-900 dark:text-white">
                           Hard Skills ({parsedResult.parsed.skills.length})
                         </td>
-                        <td className="py-3 px-3 align-top text-slate-400 font-mono">
+                        <td className="py-3 px-3 align-top text-slate-500 dark:text-slate-400 font-mono">
                           {profile.skills.join(' · ')}
                         </td>
-                        <td className="py-3 pl-3 align-top text-emerald-300 font-mono">
+                        <td className="py-3 pl-3 align-top text-emerald-700 dark:text-emerald-300 font-mono">
                           {parsedResult.parsed.skills.join(' · ')}
                         </td>
                       </tr>
@@ -722,13 +772,13 @@ ${locRule}`;
                             className="accent-emerald-500 rounded"
                           />
                         </td>
-                        <td className="py-3 px-3 align-top font-medium text-white">
+                        <td className="py-3 px-3 align-top font-medium text-slate-900 dark:text-white">
                           Proof Metrics ({parsedResult.parsed.key_metrics.length})
                         </td>
-                        <td className="py-3 px-3 align-top text-slate-400">
+                        <td className="py-3 px-3 align-top text-slate-500 dark:text-slate-400">
                           {profile.key_metrics.slice(0, 2).join(' | ')}
                         </td>
-                        <td className="py-3 pl-3 align-top text-emerald-300">
+                        <td className="py-3 pl-3 align-top text-emerald-700 dark:text-emerald-300">
                           <ul className="space-y-1">
                             {parsedResult.parsed.key_metrics.map((m, idx) => (
                               <li key={idx}>• {m}</li>
@@ -751,14 +801,14 @@ ${locRule}`;
                             className="accent-emerald-500 rounded"
                           />
                         </td>
-                        <td className="py-3 px-3 align-top font-medium text-white">
-                          Hubs & Floor
+                        <td className="py-3 px-3 align-top font-medium text-slate-900 dark:text-white">
+                          Hubs &amp; Floor
                         </td>
-                        <td className="py-3 px-3 align-top text-slate-400 font-mono tabular-nums">
+                        <td className="py-3 px-3 align-top text-slate-500 dark:text-slate-400 font-mono tabular-nums">
                           {profile.target_cities.join(', ')} · ₹{profile.min_salary_lpa}L / $
                           {profile.min_salary_usd_annual}
                         </td>
-                        <td className="py-3 pl-3 align-top text-emerald-400 font-mono tabular-nums">
+                        <td className="py-3 pl-3 align-top text-emerald-700 dark:text-emerald-400 font-mono tabular-nums">
                           {parsedResult.parsed.target_cities.join(', ')} · ₹
                           {parsedResult.parsed.min_salary_lpa}L / $
                           {parsedResult.parsed.min_salary_usd_annual}
@@ -773,81 +823,85 @@ ${locRule}`;
         </section>
 
         {/* Track Presets */}
-        <div className="bg-[#111827] border border-slate-800 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="text-xs text-slate-300">
-            <strong className="text-white">Role Track Presets:</strong> Load a baseline template in
-            one click.
+        <div className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="text-xs text-slate-600 dark:text-slate-300">
+            <strong className="text-slate-900 dark:text-white">Role Track Presets:</strong> Load a
+            baseline template in one click.
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {[
-              { key: 'blank_fork', label: 'Clean White-Label' },
-              { key: 'swe_ai', label: 'Full-Stack / AI SWE' },
-              { key: 'data_ml', label: 'Data Science / ML' },
-              { key: 'pm_growth', label: 'PM / Growth' },
-            ].map((tpl) => (
-              <button
-                key={tpl.key}
-                type="button"
-                onClick={() => applyPreset(tpl.key)}
-                className="px-3 py-1.5 rounded-md text-xs font-medium bg-[#0B0F17] border border-slate-800 hover:border-emerald-500/60 text-slate-200 transition-colors cursor-pointer"
-              >
-                {tpl.label}
-              </button>
-            ))}
+            {PROFILE_PRESET_METADATA.map((tpl) => {
+              const isActive = activePresetKey === tpl.key;
+              return (
+                <button
+                  key={tpl.key}
+                  type="button"
+                  onClick={() => applyPreset(tpl.key)}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                    isActive
+                      ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500 text-emerald-700 dark:text-emerald-300'
+                      : 'bg-slate-50 dark:bg-[#0B0F17] border-slate-200 dark:border-slate-800 hover:border-emerald-500/60 text-slate-700 dark:text-slate-200'
+                  }`}
+                >
+                  {tpl.label}
+                </button>
+              );
+            })}
           </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           <div className="lg:col-span-7 space-y-6">
-            <div className="bg-[#111827] border border-slate-800 rounded-lg p-6 space-y-4">
-              <h2 className="text-sm font-display font-semibold text-white border-b border-slate-800 pb-3">
-                01. Identity & Seniority
+            <div className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-6 space-y-4">
+              <h2 className="text-sm font-display font-semibold text-slate-900 dark:text-white border-b border-slate-200 dark:border-slate-800 pb-3">
+                01. Identity &amp; Seniority
               </h2>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="text-xs font-medium text-slate-400 mb-1 block">
+                  <label className="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1 block">
                     Workspace Title
                   </label>
                   <input
                     type="text"
-                    value={profile.system_name || 'CareerOS'}
+                    value={profile.system_name || siteConfig.name}
                     onChange={(e) => update({ system_name: e.target.value })}
-                    className="w-full bg-[#0B0F17] border border-slate-800 rounded-md px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+                    className="w-full bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md px-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-medium text-slate-400 mb-1 block">
+                  <label className="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1 block">
                     Candidate Name
                   </label>
                   <input
                     type="text"
                     value={profile.name}
                     onChange={(e) => update({ name: e.target.value })}
-                    className="w-full bg-[#0B0F17] border border-slate-800 rounded-md px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+                    className="w-full bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md px-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-medium text-slate-400 mb-1 block">Email</label>
+                  <label className="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1 block">
+                    Email
+                  </label>
                   <input
                     type="email"
                     value={profile.email}
                     onChange={(e) => update({ email: e.target.value })}
-                    className="w-full bg-[#0B0F17] border border-slate-800 rounded-md px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+                    className="w-full bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md px-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-medium text-slate-400 mb-1 block">
+                  <label className="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1 block">
                     Experience Band
                   </label>
                   <input
                     type="text"
                     value={profile.experience_level}
                     onChange={(e) => update({ experience_level: e.target.value })}
-                    className="w-full bg-[#0B0F17] border border-slate-800 rounded-md px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+                    className="w-full bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md px-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-medium text-slate-400 mb-1 block">
+                  <label className="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1 block">
                     Full-Time Years
                   </label>
                   <input
@@ -856,15 +910,15 @@ ${locRule}`;
                     onChange={(e) =>
                       update({ experience_years: Math.max(0, parseInt(e.target.value) || 0) })
                     }
-                    className="w-full bg-[#0B0F17] border border-slate-800 rounded-md px-3 py-2 text-xs font-mono tabular-nums text-slate-100 focus:outline-none focus:border-emerald-500"
+                    className="w-full bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
                   />
                 </div>
               </div>
             </div>
 
-            <div className="bg-[#111827] border border-slate-800 rounded-lg p-6 space-y-5">
-              <h2 className="text-sm font-display font-semibold text-white border-b border-slate-800 pb-3">
-                02. Target Roles, Hubs & Salary Floors
+            <div className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-6 space-y-5">
+              <h2 className="text-sm font-display font-semibold text-slate-900 dark:text-white border-b border-slate-200 dark:border-slate-800 pb-3">
+                02. Target Roles, Hubs &amp; Salary Floors
               </h2>
               <ArrayEditor
                 label="Target Role Titles (40-Pt Role Pillar)"
@@ -880,18 +934,18 @@ ${locRule}`;
               />
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="text-xs font-medium text-slate-400 mb-1 block">
+                  <label className="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1 block">
                     India Salary Floor (₹ LPA)
                   </label>
                   <input
                     type="number"
                     value={profile.min_salary_lpa}
                     onChange={(e) => update({ min_salary_lpa: parseInt(e.target.value) || 0 })}
-                    className="w-full bg-[#0B0F17] border border-slate-800 rounded-md px-3 py-2 text-xs font-mono tabular-nums text-slate-100 focus:outline-none focus:border-emerald-500"
+                    className="w-full bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-medium text-slate-400 mb-1 block">
+                  <label className="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1 block">
                     Global Salary Floor ($ USD/yr)
                   </label>
                   <input
@@ -900,21 +954,42 @@ ${locRule}`;
                     onChange={(e) =>
                       update({ min_salary_usd_annual: parseInt(e.target.value) || 0 })
                     }
-                    className="w-full bg-[#0B0F17] border border-slate-800 rounded-md px-3 py-2 text-xs font-mono tabular-nums text-slate-100 focus:outline-none focus:border-emerald-500"
+                    className="w-full bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
                   />
                 </div>
               </div>
+              <ArrayEditor
+                label="Preferred Relocation Regions (4. Comp/Geo Pillar)"
+                items={profile.relocation_preference?.preferred_regions || []}
+                onChange={(v) =>
+                  update({
+                    relocation_preference: {
+                      willing: profile.open_to_relocation,
+                      requirements: profile.relocation_preference?.requirements || [],
+                      avoid: profile.relocation_preference?.avoid || [],
+                      preferred_regions: v,
+                    },
+                  })
+                }
+                placeholder="e.g. UAE, Singapore, Remote, Europe"
+              />
+              <ArrayEditor
+                label="Working Languages"
+                items={profile.languages || []}
+                onChange={(v) => update({ languages: v })}
+                placeholder="e.g. English"
+              />
             </div>
 
-            <div className="bg-[#111827] border border-slate-800 rounded-lg p-6 space-y-5">
-              <h2 className="text-sm font-display font-semibold text-white border-b border-slate-800 pb-3">
-                03. Proof Metrics & Skills
+            <div className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-6 space-y-5">
+              <h2 className="text-sm font-display font-semibold text-slate-900 dark:text-white border-b border-slate-200 dark:border-slate-800 pb-3">
+                03. Proof Metrics &amp; Skills
               </h2>
               <ArrayEditor
                 label="Quantified Proof Metrics"
                 items={profile.key_metrics}
                 onChange={(v) => update({ key_metrics: v })}
-                placeholder="e.g. ~425% organic search growth at Smatr AI"
+                placeholder="e.g. Scaled organic search traffic by 310% in 6 months"
               />
               <ArrayEditor
                 label="Hard & Domain Skills (30-Pt Skill Pillar)"
@@ -924,9 +999,9 @@ ${locRule}`;
               />
             </div>
 
-            <div className="bg-[#111827] border border-slate-800 rounded-lg p-6 space-y-5">
-              <h2 className="text-sm font-display font-semibold text-white border-b border-slate-800 pb-3">
-                04. FreeHire Direct-ATS Company Slugs
+            <div className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-6 space-y-5">
+              <h2 className="text-sm font-display font-semibold text-slate-900 dark:text-white border-b border-slate-200 dark:border-slate-800 pb-3">
+                04. Direct-ATS Company Slugs (Greenhouse · Lever · Ashby)
               </h2>
               <ArrayEditor
                 label="Greenhouse Boards"
@@ -951,9 +1026,9 @@ ${locRule}`;
             </div>
           </div>
 
-          <div className="lg:col-span-5 lg:sticky lg:top-20 bg-[#111827] border border-slate-800 rounded-lg p-6 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="text-sm font-display font-semibold text-white">
+          <div className="lg:col-span-5 lg:sticky lg:top-20 bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
+              <h3 className="text-sm font-display font-semibold text-slate-900 dark:text-white">
                 Compiled Rubric Context
               </h3>
               <button
@@ -963,11 +1038,11 @@ ${locRule}`;
                   setCopiedPrompt(true);
                   setTimeout(() => setCopiedPrompt(false), 1800);
                 }}
-                className="px-2.5 py-1 rounded text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 inline-flex items-center gap-1.5 cursor-pointer"
+                className="px-2.5 py-1 rounded text-xs bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 inline-flex items-center gap-1.5 cursor-pointer"
               >
                 {copiedPrompt ? (
                   <>
-                    <Check className="h-3 w-3 text-emerald-400" /> Copied
+                    <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" /> Copied
                   </>
                 ) : (
                   <>
@@ -977,11 +1052,31 @@ ${locRule}`;
               </button>
             </div>
 
-            <pre className="bg-[#0B0F17] border border-slate-800 rounded-md p-4 text-[11px] font-mono text-slate-300 whitespace-pre-wrap leading-relaxed overflow-x-auto">
+            <pre className="bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md p-4 text-[11px] font-mono text-slate-700 dark:text-slate-300 whitespace-pre-wrap leading-relaxed overflow-x-auto">
               {compiledPromptPreview}
             </pre>
 
-            <p className="text-xs text-slate-400">
+            {derivedTargets && (
+              <div className="bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md p-3.5 space-y-2 text-[11px] font-mono">
+                <div className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                  Derived Live Scraper Targets
+                </div>
+                <div className="text-slate-700 dark:text-slate-300">
+                  <span className="text-slate-500 dark:text-slate-400">Internshala Slugs:</span>{' '}
+                  {derivedTargets.internshalaSlugs.join(', ')}
+                </div>
+                <div className="text-slate-700 dark:text-slate-300">
+                  <span className="text-slate-500 dark:text-slate-400">RemoteOK Tags:</span>{' '}
+                  {derivedTargets.remoteOkTags.join(', ')}
+                </div>
+                <div className="text-slate-700 dark:text-slate-300">
+                  <span className="text-slate-500 dark:text-slate-400">Remotive Keywords:</span>{' '}
+                  {derivedTargets.remotiveKeywords.join(' · ')}
+                </div>
+              </div>
+            )}
+
+            <p className="text-xs text-slate-500 dark:text-slate-400">
               Used by <span className="font-mono">scripts/scout.js</span> and{' '}
               <span className="font-mono">/api/evaluate</span>.
             </p>

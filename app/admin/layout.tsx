@@ -2,9 +2,11 @@
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Terminal, Radar, LogOut, User, Settings, ArrowUpRight } from 'lucide-react';
+import { Terminal, Radar, LogOut, User, Settings, ArrowUpRight, Command } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import ThemeToggle from '@/components/ThemeToggle';
+import CommandPalette from '@/components/CommandPalette';
+import { siteConfig } from '@/config/site';
 
 const NAV_ITEMS = [
   { href: '/admin/tracker', label: 'Pipeline Tracker', shortLabel: 'Tracker', icon: Radar },
@@ -15,8 +17,9 @@ const NAV_ITEMS = [
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const [brandName, setBrandName] = useState('CareerOS');
+  const [brandName, setBrandName] = useState(siteConfig.name);
   const [ownerName, setOwnerName] = useState('Active Owner');
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   useEffect(() => {
     fetch('/api/profile?public=true')
@@ -41,21 +44,24 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   };
 
   return (
-    <div className="flex min-h-screen w-full bg-[#0B0F17] text-[#F8FAFC] font-sans">
-      <aside className="fixed inset-y-0 left-0 z-20 hidden w-60 flex-col border-r border-slate-800/90 bg-[#0B0F17] sm:flex">
-        <div className="flex h-14 shrink-0 items-center justify-between px-5 border-b border-slate-800/90">
+    <div className="flex min-h-screen w-full bg-slate-50 dark:bg-[#0B0F17] text-slate-900 dark:text-[#F8FAFC] font-sans">
+      <aside className="fixed inset-y-0 left-0 z-20 hidden w-60 flex-col border-r border-slate-200 dark:border-slate-800/90 bg-white dark:bg-[#0B0F17] sm:flex">
+        <div className="flex h-14 shrink-0 items-center justify-between px-5 border-b border-slate-200 dark:border-slate-800/90">
           <Link
             href="/"
-            className="text-base font-display font-bold tracking-tight text-white whitespace-nowrap shrink-0"
+            className="text-base font-display font-bold tracking-tight text-slate-900 dark:text-white whitespace-nowrap shrink-0"
           >
             {brandName}
           </Link>
-          <span className="text-[11px] font-mono text-emerald-400">v2.5</span>
         </div>
 
-        <div className="px-4 py-2.5 border-b border-slate-800/70 bg-[#111827]/60">
-          <div className="text-[10px] font-mono text-slate-400">Instance Owner</div>
-          <div className="text-xs font-medium text-white truncate mt-0.5">{ownerName}</div>
+        <div className="px-4 py-2.5 border-b border-slate-200 dark:border-slate-800/70 bg-slate-50 dark:bg-[#111827]/60">
+          <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
+            Instance Owner
+          </div>
+          <div className="text-xs font-medium text-slate-900 dark:text-white truncate mt-0.5">
+            {ownerName}
+          </div>
         </div>
 
         <nav className="flex flex-1 flex-col gap-1 p-3">
@@ -68,28 +74,32 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                 href={item.href}
                 className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
                   isActive
-                    ? 'bg-slate-800/90 text-white border border-slate-700/80'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900'
+                    ? 'bg-slate-100 dark:bg-slate-800/90 text-slate-900 dark:text-white border border-slate-200 dark:border-slate-700/80'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100/70 dark:hover:bg-slate-900'
                 }`}
               >
-                <Icon className={`h-4 w-4 shrink-0 ${isActive ? 'text-emerald-400' : ''}`} />
+                <Icon
+                  className={`h-4 w-4 shrink-0 ${
+                    isActive ? 'text-emerald-600 dark:text-emerald-400' : ''
+                  }`}
+                />
                 <span>{item.label}</span>
               </Link>
             );
           })}
         </nav>
 
-        <div className="p-3 border-t border-slate-800/90 space-y-1.5">
+        <div className="p-3 border-t border-slate-200 dark:border-slate-800/90 space-y-1.5">
           <Link
             href="/#evaluator"
-            className="flex items-center justify-between rounded-lg px-3 py-2 text-xs text-slate-400 hover:text-slate-100 hover:bg-slate-900 transition-colors whitespace-nowrap shrink-0"
+            className="flex items-center justify-between rounded-lg px-3 py-2 text-xs text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors whitespace-nowrap shrink-0"
           >
             <span>Live Role Evaluator</span>
             <ArrowUpRight className="h-3.5 w-3.5" />
           </Link>
           <Button
             variant="ghost"
-            className="w-full justify-start text-slate-400 hover:text-rose-300 hover:bg-rose-950/30 text-xs h-8 px-3 whitespace-nowrap shrink-0"
+            className="w-full justify-start text-slate-600 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-950/30 text-xs h-8 px-3 whitespace-nowrap shrink-0"
             onClick={handleLogout}
           >
             <LogOut className="mr-2 h-3.5 w-3.5" />
@@ -99,31 +109,48 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       </aside>
 
       <div className="flex flex-1 flex-col sm:pl-60 min-w-0">
-        <header className="sticky top-0 z-20 flex h-14 items-center justify-between gap-4 border-b border-slate-800/90 bg-[#0B0F17]/90 px-4 sm:px-6 backdrop-blur-md">
-          <div className="flex items-center gap-2 text-xs text-slate-400 min-w-0 truncate">
-            <Link href="/" className="hover:text-slate-200 transition-colors shrink-0 font-semibold text-white">
+        <header className="sticky top-0 z-20 flex h-14 items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800/90 bg-white/90 dark:bg-[#0B0F17]/90 px-4 sm:px-6 backdrop-blur-md">
+          <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400 min-w-0 truncate">
+            <Link
+              href="/"
+              className="hover:text-slate-900 dark:hover:text-slate-200 transition-colors shrink-0 font-semibold text-slate-900 dark:text-white"
+            >
               {brandName}
             </Link>
             <span aria-hidden="true">/</span>
-            <span className="text-slate-400 hidden sm:inline shrink-0">{ownerName}</span>
+            <span className="text-slate-500 dark:text-slate-400 hidden sm:inline shrink-0">
+              {ownerName}
+            </span>
             <span aria-hidden="true" className="hidden sm:inline">
               /
             </span>
-            <span className="font-medium text-emerald-400 truncate">{currentModule}</span>
+            <span className="font-medium text-emerald-600 dark:text-emerald-400 truncate">
+              {currentModule}
+            </span>
           </div>
 
           <div className="flex items-center gap-2.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setPaletteOpen(true)}
+              aria-label="Open command palette"
+              className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#111827] hover:border-slate-300 dark:hover:border-slate-700 text-xs font-mono text-slate-700 dark:text-slate-300 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <Command className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+              <span>K</span>
+            </button>
             <ThemeToggle />
             <Link
               href="/"
-              className="px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded-lg transition-colors whitespace-nowrap shrink-0"
+              className="px-3 py-1.5 text-xs font-medium text-slate-800 dark:text-slate-200 bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg transition-colors whitespace-nowrap shrink-0"
             >
               Public Workbench
             </Link>
           </div>
         </header>
+        <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
 
-        <nav className="sm:hidden fixed bottom-0 left-0 right-0 z-30 bg-[#0B0F17]/95 border-t border-slate-800 flex items-center justify-around py-1.5 backdrop-blur-md">
+        <nav className="sm:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/95 dark:bg-[#0B0F17]/95 border-t border-slate-200 dark:border-slate-800 flex items-center justify-around py-1.5 backdrop-blur-md">
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const isActive = pathname === item.href;
@@ -132,7 +159,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                 key={item.href}
                 href={item.href}
                 className={`flex flex-col items-center gap-0.5 px-3 py-1 rounded-lg transition-colors whitespace-nowrap shrink-0 ${
-                  isActive ? 'text-emerald-400 font-medium' : 'text-slate-400'
+                  isActive
+                    ? 'text-emerald-600 dark:text-emerald-400 font-medium'
+                    : 'text-slate-500 dark:text-slate-400'
                 }`}
               >
                 <Icon className="h-4 w-4" />
@@ -143,14 +172,14 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           <button
             type="button"
             onClick={handleLogout}
-            className="flex flex-col items-center gap-0.5 px-3 py-1 text-slate-400 hover:text-rose-400 whitespace-nowrap shrink-0"
+            className="flex flex-col items-center gap-0.5 px-3 py-1 text-slate-500 dark:text-slate-400 hover:text-rose-500 dark:hover:text-rose-400 whitespace-nowrap shrink-0 cursor-pointer"
           >
             <LogOut className="h-4 w-4" />
             <span className="text-[10px]">Lock</span>
           </button>
         </nav>
 
-        <main className="flex-1 overflow-x-hidden bg-[#0B0F17]">{children}</main>
+        <main className="flex-1 overflow-x-hidden bg-slate-50 dark:bg-[#0B0F17]">{children}</main>
       </div>
     </div>
   );

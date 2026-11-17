@@ -1,7 +1,9 @@
 import zlib from 'zlib';
 import Groq from 'groq-sdk';
+import { ThinkingLevel } from '@google/genai';
 import { getGeminiClient } from './llm';
 import { CandidateProfile, DEFAULT_ATS_COMPANIES } from './profile';
+import { parseLooseJSON } from './utils';
 
 export interface ParsedResumeParameters {
   name: string;
@@ -109,6 +111,65 @@ const KNOWN_CITIES = [
   'Remote',
 ];
 
+const KNOWN_LANGUAGES = [
+  'English',
+  'Hindi',
+  'Telugu',
+  'Tamil',
+  'Kannada',
+  'Spanish',
+  'French',
+  'German',
+  'Arabic',
+  'Mandarin',
+];
+
+const MONTH_MAP: Record<string, number> = {
+  jan: 0,
+  january: 0,
+  feb: 1,
+  february: 1,
+  mar: 2,
+  march: 2,
+  apr: 3,
+  april: 3,
+  may: 4,
+  jun: 5,
+  june: 5,
+  jul: 6,
+  july: 6,
+  aug: 7,
+  august: 7,
+  sep: 8,
+  sept: 8,
+  september: 8,
+  oct: 9,
+  october: 9,
+  nov: 10,
+  november: 10,
+  dec: 11,
+  december: 11,
+};
+
+function recommendAtsBoardsForTrack(roles: string[]) {
+  const joined = roles.join(' ').toLowerCase();
+  if (/(data scientist|machine learning|analytics engineer|mlops)/.test(joined)) {
+    return {
+      greenhouse: ['databricks', 'scaleai', 'dbt-labs', 'stripe', 'razorpay'],
+      lever: ['mistral', 'cred', 'palantir'],
+      ashby: ['posthog', 'langchain', 'linear', 'supabase'],
+    };
+  }
+  if (/(software|full-stack|frontend|backend|devops|ai application)/.test(joined)) {
+    return {
+      greenhouse: ['vercel', 'stripe', 'anthropic', 'cloudflare', 'razorpay'],
+      lever: ['plaid', 'mistral', 'palantir'],
+      ashby: ['linear', 'supabase', 'posthog', 'langchain'],
+    };
+  }
+  return DEFAULT_ATS_COMPANIES;
+}
+
 /**
  * Deterministic binary PDF text stream extractor.
  * Decompresses /FlateDecode streams using Node's native zlib and extracts text from BT..ET blocks
@@ -132,7 +193,6 @@ export function extractTextFromPdfBuffer(buffer: Buffer): string {
   const decodeHexToken = (hex: string): string => {
     const clean = hex.replace(/\s+/g, '');
     if (clean.startsWith('FEFF') || clean.startsWith('feff')) {
-      // UTF-16BE
       let out = '';
       for (let i = 4; i + 3 < clean.length; i += 4) {
         const code = parseInt(clean.slice(i, i + 4), 16);
@@ -150,34 +210,72 @@ export function extractTextFromPdfBuffer(buffer: Buffer): string {
   };
 
   const parseContentStream = (streamText: string) => {
-    // Extract TJ arrays: [(text) -20 (more)] TJ
-    const tjArrayRegex = /\[([\s\S]*?)\]\s*TJ/g;
-    let match: RegExpExecArray | null;
-    while ((match = tjArrayRegex.exec(streamText)) !== null) {
-      const inner = match[1];
-      let line = '';
-      const tokenRegex = /\((?:\\.|[^\\)])*\)|<[0-9A-Fa-f\s]+>/g;
-      let tok: RegExpExecArray | null;
-      while ((tok = tokenRegex.exec(inner)) !== null) {
-        const t = tok[0];
-        if (t.startsWith('(')) {
-          line += decodePdfLiteral(t.slice(1, -1));
-        } else if (t.startsWith('<')) {
-          line += decodeHexToken(t.slice(1, -1));
+    const blocks = streamText.match(/BT[\s\S]*?ET/g) || [streamText];
+
+    for (const block of blocks) {
+      let currentLine = '';
+      const flushLine = () => {
+        const clean = currentLine.replace(/\s+/g, ' ').trim();
+        if (clean) extractedChunks.push(clean);
+        currentLine = '';
+      };
+
+      const opRegex =
+        /\[([\s\S]*?)\]\s*TJ|\(((?:\\.|[^\\)])*)\)\s*(?:Tj|'|")|<([0-9A-Fa-f\s]+)>\s*(?:Tj|'|")|(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+T[dDm*]|\bT\*/g;
+      let op: RegExpExecArray | null;
+      while ((op = opRegex.exec(block)) !== null) {
+        if (op[1] !== undefined) {
+          const inner = op[1];
+          const tokenRegex = /\((?:\\.|[^\\)])*\)|<[0-9A-Fa-f\s]+>|-?\d+(?:\.\d+)?/g;
+          let tok: RegExpExecArray | null;
+          let arrayText = '';
+          while ((tok = tokenRegex.exec(inner)) !== null) {
+            const t = tok[0];
+            if (t.startsWith('(')) {
+              arrayText += decodePdfLiteral(t.slice(1, -1));
+            } else if (t.startsWith('<')) {
+              arrayText += decodeHexToken(t.slice(1, -1));
+            } else {
+              const kern = parseFloat(t);
+              if (Number.isFinite(kern) && kern < -120 && !arrayText.endsWith(' ')) {
+                arrayText += ' ';
+              }
+            }
+          }
+          if (arrayText) {
+            currentLine +=
+              (currentLine && !currentLine.endsWith(' ') && !arrayText.startsWith(' ') ? ' ' : '') +
+              arrayText;
+          }
+        } else if (op[2] !== undefined) {
+          const decoded = decodePdfLiteral(op[2]);
+          if (decoded) {
+            currentLine +=
+              (currentLine && !currentLine.endsWith(' ') && !decoded.startsWith(' ') ? ' ' : '') +
+              decoded;
+          }
+        } else if (op[3] !== undefined) {
+          const decoded = decodeHexToken(op[3]);
+          if (decoded) {
+            currentLine +=
+              (currentLine && !currentLine.endsWith(' ') && !decoded.startsWith(' ') ? ' ' : '') +
+              decoded;
+          }
+        } else if (op[4] !== undefined && op[5] !== undefined) {
+          const dy = Math.abs(parseFloat(op[5]));
+          if (Number.isFinite(dy) && dy > 2) {
+            flushLine();
+          } else if (currentLine && !currentLine.endsWith(' ')) {
+            currentLine += ' ';
+          }
+        } else {
+          flushLine();
         }
       }
-      if (line.trim()) extractedChunks.push(line.trim());
-    }
-
-    // Extract single (text) Tj
-    const tjSingleRegex = /\(((?:\\.|[^\\)])*)\)\s*(?:Tj|'|")/g;
-    while ((match = tjSingleRegex.exec(streamText)) !== null) {
-      const decoded = decodePdfLiteral(match[1]).trim();
-      if (decoded) extractedChunks.push(decoded);
+      flushLine();
     }
   };
 
-  // Locate stream ... endstream blocks
   const streamRegex = /stream[\r\n]+([\s\S]*?)[\r\n]+endstream/g;
   let streamMatch: RegExpExecArray | null;
   while ((streamMatch = streamRegex.exec(rawLatin1)) !== null) {
@@ -190,13 +288,11 @@ export function extractTextFromPdfBuffer(buffer: Buffer): string {
         const inflatedRaw = zlib.inflateRawSync(rawStreamBytes).toString('latin1');
         parseContentStream(inflatedRaw);
       } catch {
-        // Uncompressed stream
         parseContentStream(streamMatch[1]);
       }
     }
   }
 
-  // Fallback: scan readable ASCII runs if custom font encoding obscured stream tokens
   if (extractedChunks.join(' ').trim().length < 80) {
     parseContentStream(rawLatin1);
   }
@@ -240,8 +336,7 @@ export async function fetchGoogleDriveResume(driveUrl: string): Promise<{
     );
   }
 
-  // Check if Google Docs URL: docs.google.com/document/d/{ID}
-  const docsMatch = trimmed.match(/docs\.google\.com\/document\/d\/([a-zA-Z0-9_-]+)/);
+  const docsMatch = trimmed.match(/docs\.google\.com\/document\/(?:u\/\d+\/)?d\/([a-zA-Z0-9_-]+)/);
   if (docsMatch) {
     const docId = docsMatch[1];
     const exportUrl = `https://docs.google.com/document/d/${docId}/export?format=txt`;
@@ -258,9 +353,8 @@ export async function fetchGoogleDriveResume(driveUrl: string): Promise<{
     return { text, mimeType: 'text/plain', resolvedUrl: exportUrl };
   }
 
-  // Check if Google Drive file URL: drive.google.com/file/d/{ID} or ?id={ID}
   const driveFileMatch =
-    trimmed.match(/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/) ||
+    trimmed.match(/drive\.google\.com\/file\/(?:u\/\d+\/)?d\/([a-zA-Z0-9_-]+)/) ||
     trimmed.match(/[?&]id=([a-zA-Z0-9_-]+)/);
 
   if (!driveFileMatch) {
@@ -269,9 +363,10 @@ export async function fetchGoogleDriveResume(driveUrl: string): Promise<{
     );
   }
 
-  const targetUrl = `https://drive.google.com/uc?export=download&id=${driveFileMatch[1]}`;
+  const fileId = driveFileMatch[1];
+  let targetUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
 
-  const res = await fetch(targetUrl, {
+  let res = await fetch(targetUrl, {
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; OpenScoutResumeParser/3.0)' },
     signal: AbortSignal.timeout(10000),
   });
@@ -282,20 +377,56 @@ export async function fetchGoogleDriveResume(driveUrl: string): Promise<{
     );
   }
 
-  const contentType = (res.headers.get('content-type') || '').toLowerCase();
-  const arrayBuffer = await res.arrayBuffer();
+  let contentType = (res.headers.get('content-type') || '').toLowerCase();
+  let arrayBuffer = await res.arrayBuffer();
   if (arrayBuffer.byteLength > 8 * 1024 * 1024) {
     throw new Error('Resume file exceeds the 8 MB maximum size limit.');
   }
-  const buffer = Buffer.from(arrayBuffer);
+  let buffer = Buffer.from(arrayBuffer);
 
-  // Check if buffer starts with %PDF
+  if (
+    contentType.includes('text/html') &&
+    buffer.slice(0, 4).toString('ascii') !== '%PDF'
+  ) {
+    const htmlPreview = buffer.toString('utf8');
+    if (
+      /accounts\.google\.com|ServiceLogin|Sign in/i.test(htmlPreview) &&
+      !/uc-download-link|download-form/i.test(htmlPreview)
+    ) {
+      throw new Error(
+        'Google Drive link requires authentication. Set sharing to "Anyone with the link can view".'
+      );
+    }
+
+    if (/uc-download-link|confirm=|virus scan|download-form/i.test(htmlPreview)) {
+      const retryUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
+      const retryRes = await fetch(retryUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; OpenScoutResumeParser/3.0)' },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (retryRes.ok) {
+        const retryBuf = Buffer.from(await retryRes.arrayBuffer());
+        if (retryBuf.byteLength <= 8 * 1024 * 1024) {
+          res = retryRes;
+          contentType = (retryRes.headers.get('content-type') || '').toLowerCase();
+          buffer = retryBuf;
+          targetUrl = retryUrl;
+        }
+      }
+    }
+  }
+
   if (buffer.slice(0, 4).toString('ascii') === '%PDF' || contentType.includes('application/pdf')) {
     return { buffer, mimeType: 'application/pdf', resolvedUrl: targetUrl };
   }
 
   const rawText = buffer.toString('utf8');
   if (contentType.includes('text/html') || /<html|<body/i.test(rawText)) {
+    if (/accounts\.google\.com|Google Drive - Sign in|Virus scan warning/i.test(rawText)) {
+      throw new Error(
+        'Unable to bypass Google Drive HTML interstitial. Upload the PDF directly or paste resume text.'
+      );
+    }
     const stripped = rawText
       .replace(/<script[\s\S]*?<\/script>/gi, ' ')
       .replace(/<style[\s\S]*?<\/style>/gi, ' ')
@@ -312,7 +443,7 @@ export async function fetchGoogleDriveResume(driveUrl: string): Promise<{
 }
 
 /**
- * Deterministic AST & Heuristic Resume Analyzer
+ * Deterministic AST & Heuristic Resume Analyzer with month-precision chronological intervals
  */
 export function deterministicParseResumeText(
   rawText: string,
@@ -352,7 +483,7 @@ export function deterministicParseResumeText(
     urlMatches.find((u) => !u.includes('linkedin.com')) || urlMatches[0] || fallbackProfile.portfolio;
   const portfolio = portfolioRaw.startsWith('http') ? portfolioRaw : `https://${portfolioRaw}`;
 
-  // 4. Extract Candidate Name (first non-header, non-email line with 2-4 capitalized words)
+  // 4. Extract Candidate Name
   let name = fallbackProfile.name;
   for (const line of lines.slice(0, 8)) {
     const cleanLine = line.replace(/[|#*_•]/g, '').trim();
@@ -371,7 +502,7 @@ export function deterministicParseResumeText(
     }
   }
 
-  // 5. Chronological Experience Years Calculation
+  // 5. Month-Precision Chronological Experience Calculator (ignores education & internship-only lines)
   let experienceYears = 0;
   const explicitYearsMatch = cleanText.match(/(\d{1,2})\+?\s*years?\s+of\s+(?:full[- ]time\s+)?experience/i);
   if (explicitYearsMatch) {
@@ -379,20 +510,99 @@ export function deterministicParseResumeText(
   } else if (/\b(fresher|entry[- ]level|new grad|final year|student|0 years)\b/i.test(cleanText)) {
     experienceYears = 0;
   } else {
-    // Count full-time role date ranges outside education
-    const currentYear = new Date().getFullYear();
-    const yearRanges = [...cleanText.matchAll(/\b(20\d{2})\s*[-–—to]+\s*(20\d{2}|present|current|now)\b/gi)];
-    let totalYears = 0;
-    for (const m of yearRanges) {
-      const start = parseInt(m[1], 10);
-      const end = /present|current|now/i.test(m[2]) ? currentYear : parseInt(m[2], 10);
-      const span = Math.max(0, end - start);
-      // Ignore 4-year university degree spans
-      if (span >= 0 && span <= 3) {
-        totalYears += span;
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentTotalMonth = currentYear * 12 + now.getMonth();
+    const monthIntervals: Array<[number, number]> = [];
+    let currentSection = 'HEADER';
+
+    for (const line of lines) {
+      const strippedSection = line.replace(/[:|-]/g, '').trim();
+      if (/^(experience|work experience|employment|work history|career)$/i.test(strippedSection)) {
+        currentSection = 'EXPERIENCE';
+        continue;
+      }
+      if (
+        /^(education|academic background|academics|projects|skills|certifications|awards|internships?)$/i.test(
+          strippedSection
+        )
+      ) {
+        currentSection = 'OTHER';
+        continue;
+      }
+
+      const isEducationOrInternLine =
+        /\b(b\.?tech|b\.?e|b\.?sc|m\.?tech|mba|bachelor|master|university|college|institute|school|cgpa|gpa|degree|intern|internship|trainee|apprentice)\b/i.test(
+          line
+        );
+      if (isEducationOrInternLine || currentSection === 'OTHER') continue;
+
+      // Month-year range e.g. "Dec 2023 - Jan 2024" or "Feb 2022 – Present"
+      const monthRangeRegex =
+        /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+((?:19|20)\d{2})\s*[-–—to]+\s*(?:(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+((?:19|20)\d{2})|(present|current|now))\b/gi;
+
+      let matchedMonthRange = false;
+      for (const m of line.matchAll(monthRangeRegex)) {
+        matchedMonthRange = true;
+        const startM = MONTH_MAP[m[1].toLowerCase()] ?? 0;
+        const startY = parseInt(m[2], 10);
+        const startTotal = startY * 12 + startM;
+        let endTotal: number;
+        if (m[5]) {
+          endTotal = currentTotalMonth;
+        } else {
+          const endM = MONTH_MAP[m[3].toLowerCase()] ?? 11;
+          const endY = parseInt(m[4], 10);
+          endTotal = endY * 12 + endM;
+        }
+        if (endTotal >= startTotal && startY >= 1985 && endTotal <= currentTotalMonth + 12) {
+          monthIntervals.push([startTotal, endTotal + 1]);
+        }
+      }
+
+      // Numeric MM/YYYY range e.g. "06/2022 - 08/2024"
+      if (!matchedMonthRange) {
+        const numMonthRange =
+          /\b(0?[1-9]|1[0-2])\/((?:19|20)\d{2})\s*[-–—to]+\s*(?:(0?[1-9]|1[0-2])\/((?:19|20)\d{2})|(present|current|now))\b/gi;
+        for (const m of line.matchAll(numMonthRange)) {
+          matchedMonthRange = true;
+          const startTotal = parseInt(m[2], 10) * 12 + (parseInt(m[1], 10) - 1);
+          const endTotal = m[5]
+            ? currentTotalMonth
+            : parseInt(m[4], 10) * 12 + (parseInt(m[3], 10) - 1);
+          if (endTotal >= startTotal) {
+            monthIntervals.push([startTotal, endTotal + 1]);
+          }
+        }
+      }
+
+      // Year-only fallback e.g. "2020 - 2024"
+      if (!matchedMonthRange) {
+        const yearRanges = [
+          ...line.matchAll(/\b((?:19|20)\d{2})\s*[-–—to]+\s*((?:19|20)\d{2}|present|current|now)\b/gi),
+        ];
+        for (const m of yearRanges) {
+          const start = parseInt(m[1], 10);
+          const end = /present|current|now/i.test(m[2]) ? currentYear : parseInt(m[2], 10);
+          if (end >= start && start >= 1985 && end <= currentYear + 1) {
+            monthIntervals.push([start * 12, end * 12]);
+          }
+        }
       }
     }
-    experienceYears = Math.min(15, totalYears);
+
+    monthIntervals.sort((a, b) => a[0] - b[0]);
+    const merged: Array<[number, number]> = [];
+    for (const iv of monthIntervals) {
+      if (merged.length === 0 || iv[0] > merged[merged.length - 1][1]) {
+        merged.push([...iv] as [number, number]);
+      } else {
+        merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], iv[1]);
+      }
+    }
+    const totalMonths = merged.reduce((sum, [s, e]) => sum + Math.max(0, e - s), 0);
+    // Count >= 9 months as 1 yr, < 6 months as 0 full-time years (prevents Dec 2023 - Jan 2024 becoming 1 yr)
+    experienceYears = Math.min(25, Math.floor(totalMonths / 12) + (totalMonths % 12 >= 9 ? 1 : 0));
   }
 
   const experienceLevel =
@@ -425,7 +635,7 @@ export function deterministicParseResumeText(
   );
   const skills = detectedSkills.length >= 3 ? detectedSkills : fallbackProfile.skills;
 
-  // 8. Extract Quantified Proof Metrics (lines containing %, $, ₹, x, k+, numbers + impact verbs)
+  // 8. Extract Quantified Proof Metrics
   const metricCandidates: string[] = [];
   const impactQuantRegex =
     /(?:~?\d[\d,.]*\s*(?:%|x|\+|k\b|m\b|lpa|arr|dau|mau|users|visits|alumni|views|roas|hours|ms\b))|(?:(?:\$|₹)\s*\d[\d,.]*)/i;
@@ -438,7 +648,8 @@ export function deterministicParseResumeText(
       cleanedBullet.length >= 24 &&
       cleanedBullet.length <= 145 &&
       impactQuantRegex.test(cleanedBullet) &&
-      (actionVerbRegex.test(cleanedBullet) || /growth|traffic|latency|conversion|revenue|database|accuracy|auc/i.test(cleanedBullet)) &&
+      (actionVerbRegex.test(cleanedBullet) ||
+        /growth|traffic|latency|conversion|revenue|database|accuracy|auc/i.test(cleanedBullet)) &&
       !/\b(cgpa|gpa|percentage|class xii|high school|10th|12th)\b/i.test(cleanedBullet)
     ) {
       metricCandidates.push(cleanedBullet);
@@ -450,7 +661,7 @@ export function deterministicParseResumeText(
       ? Array.from(new Set(metricCandidates)).slice(0, 6)
       : fallbackProfile.key_metrics;
 
-  // 9. Target Cities & Compensation Floor Calibration
+  // 9. Target Cities, Languages, Relocation & Recommended ATS Boards
   const detectedCities = KNOWN_CITIES.filter((city) =>
     new RegExp(`\\b${city}\\b`, 'i').test(cleanText)
   );
@@ -459,6 +670,14 @@ export function deterministicParseResumeText(
   }
   const target_cities =
     detectedCities.length > 0 ? detectedCities.slice(0, 4) : fallbackProfile.target_cities;
+
+  const detectedLanguages = KNOWN_LANGUAGES.filter((lang) =>
+    new RegExp(`\\b${lang}\\b`, 'i').test(cleanText)
+  );
+  const languages =
+    detectedLanguages.length > 0
+      ? detectedLanguages.map((l) => (l === 'English' ? 'English (fluent)' : l))
+      : fallbackProfile.languages || ['English (fluent)'];
 
   const isTechOrAi = target_roles.some((r) => /Engineer|Scientist/i.test(r));
   const min_salary_lpa =
@@ -473,6 +692,8 @@ export function deterministicParseResumeText(
         ? 55000
         : 30000
       : Math.min(180000, 50000 + experienceYears * 20000);
+
+  const recommendedAts = recommendAtsBoardsForTrack(target_roles);
 
   const confidence = Math.min(
     98,
@@ -496,11 +717,11 @@ export function deterministicParseResumeText(
       skills,
       key_metrics,
       target_cities,
-      open_to_relocation: true,
+      open_to_relocation: !/not open to relocation|no relocation/i.test(cleanText),
       min_salary_lpa,
       min_salary_usd_annual,
-      languages: fallbackProfile.languages || ['English (fluent)'],
-      ats_companies: fallbackProfile.ats_companies || DEFAULT_ATS_COMPANIES,
+      languages,
+      ats_companies: recommendedAts,
     },
     sections: sections.length > 0 ? sections : ['GENERAL_PROFILE'],
     confidence,
@@ -521,7 +742,6 @@ export async function parseResumeInput(options: {
   let extractedText = options.rawText || '';
   let pdfBuffer = options.pdfBuffer;
 
-  // Step 1: If Google Drive URL, fetch & resolve
   if (options.sourceChannel === 'google_drive' && options.driveUrl) {
     const drivePayload = await fetchGoogleDriveResume(options.driveUrl);
     if (drivePayload.buffer) {
@@ -531,7 +751,6 @@ export async function parseResumeInput(options: {
     }
   }
 
-  // Step 2: If we have a PDF buffer, run deterministic PDF text stream extraction first
   if (pdfBuffer && !extractedText) {
     try {
       extractedText = extractTextFromPdfBuffer(pdfBuffer);
@@ -540,22 +759,31 @@ export async function parseResumeInput(options: {
     }
   }
 
-  // Step 3: Run deterministic AST parser as our rock-solid baseline
+  const hasReadableText = extractedText.trim().length >= 40;
+  if (!hasReadableText && (!pdfBuffer || !getGeminiClient())) {
+    throw new Error(
+      pdfBuffer
+        ? 'Could not extract selectable text from this PDF (likely a scanned image or compressed font stream). Configure GEMINI_API_KEY for multimodal vision parsing or use the Paste Text tab.'
+        : 'Insufficient readable resume text extracted. Please paste your full resume text or upload a text-selectable PDF.'
+    );
+  }
+
   const baselineResult = deterministicParseResumeText(
-    extractedText || `${options.currentProfile.name}\n${options.currentProfile.skills.join(', ')}`,
+    hasReadableText ? extractedText : '',
     options.currentProfile
   );
 
   const schemaInstruction = `You are a rigid, deterministic Resume/CV Parameter Extraction Engine.
-Extract structured candidate targeting parameters from the provided resume.
+Extract structured candidate targeting parameters ONLY from the provided resume. Never invent skills, metrics, or jobs not grounded in the document.
 Rules:
-1. "experience_years": integer full-time years (0 if fresher/student/intern-only).
+1. "experience_years": integer full-time years (0 if fresher/student/intern-only; do NOT count internships or education spans as full-time years).
 2. "experience_level": e.g., "Fresher / Entry Level", "Early Career (1-2 yrs)", "Mid-Level (3-5 yrs)".
 3. "target_roles": 4 to 8 specific job titles the candidate is best qualified to apply for based on their work history, projects, and skills.
 4. "skills": 6 to 15 concrete technical, product, analytics, or domain skills explicitly evidenced in the resume (no soft-skill fluff).
-5. "key_metrics": 3 to 6 quantified achievement statements with exact numbers/percentages/scale from the resume (e.g., "~425% organic search growth at Smatr AI").
+5. "key_metrics": 3 to 6 quantified achievement statements with exact numbers/percentages/scale from the resume.
 6. "target_cities": preferred cities or hubs mentioned (plus "Remote" if applicable).
-7. "min_salary_lpa" (India ₹ LPA integer) and "min_salary_usd_annual" (USD integer) calibrated to their seniority.
+7. "languages": languages mentioned in the resume.
+8. "min_salary_lpa" (India ₹ LPA integer) and "min_salary_usd_annual" (USD integer) calibrated to their seniority.
 
 Return ONLY valid JSON with these exact keys:
 {
@@ -568,12 +796,18 @@ Return ONLY valid JSON with these exact keys:
   "skills": string[],
   "key_metrics": string[],
   "target_cities": string[],
+  "languages": string[],
   "min_salary_lpa": number,
   "min_salary_usd_annual": number,
   "extracted_summary": string
 }`;
 
   const mergeWithBaseline = (llmData: Record<string, unknown>, engineUsed: string): ResumeParseResponse => {
+    const roles =
+      Array.isArray(llmData.target_roles) && llmData.target_roles.length > 0
+        ? llmData.target_roles.map(String)
+        : baselineResult.parsed.target_roles;
+
     const merged: ParsedResumeParameters = {
       name:
         typeof llmData.name === 'string' && llmData.name.trim().length > 1
@@ -595,10 +829,7 @@ Return ONLY valid JSON with these exact keys:
         typeof llmData.experience_level === 'string' && llmData.experience_level.trim()
           ? llmData.experience_level.trim()
           : baselineResult.parsed.experience_level,
-      target_roles:
-        Array.isArray(llmData.target_roles) && llmData.target_roles.length > 0
-          ? llmData.target_roles.map(String)
-          : baselineResult.parsed.target_roles,
+      target_roles: roles,
       skills:
         Array.isArray(llmData.skills) && llmData.skills.length > 0
           ? llmData.skills.map(String)
@@ -611,7 +842,7 @@ Return ONLY valid JSON with these exact keys:
         Array.isArray(llmData.target_cities) && llmData.target_cities.length > 0
           ? llmData.target_cities.map(String)
           : baselineResult.parsed.target_cities,
-      open_to_relocation: true,
+      open_to_relocation: baselineResult.parsed.open_to_relocation,
       min_salary_lpa:
         typeof llmData.min_salary_lpa === 'number' && llmData.min_salary_lpa > 0
           ? llmData.min_salary_lpa
@@ -620,9 +851,24 @@ Return ONLY valid JSON with these exact keys:
         typeof llmData.min_salary_usd_annual === 'number' && llmData.min_salary_usd_annual > 0
           ? llmData.min_salary_usd_annual
           : baselineResult.parsed.min_salary_usd_annual,
-      languages: baselineResult.parsed.languages,
-      ats_companies: baselineResult.parsed.ats_companies,
+      languages:
+        Array.isArray(llmData.languages) && llmData.languages.length > 0
+          ? llmData.languages.map(String)
+          : baselineResult.parsed.languages,
+      ats_companies: recommendAtsBoardsForTrack(roles),
     };
+
+    const dynamicConfidence = Math.min(
+      98,
+      Math.round(
+        40 +
+          (typeof llmData.name === 'string' && llmData.name.trim().length > 1 ? 10 : 0) +
+          (typeof llmData.email === 'string' && llmData.email.includes('@') ? 10 : 0) +
+          Math.min(15, (Array.isArray(llmData.target_roles) ? llmData.target_roles.length : 0) * 3) +
+          Math.min(15, (Array.isArray(llmData.skills) ? llmData.skills.length : 0) * 2) +
+          Math.min(10, (Array.isArray(llmData.key_metrics) ? llmData.key_metrics.length : 0) * 3)
+      )
+    );
 
     const preview =
       extractedText.trim().slice(0, 500) ||
@@ -635,14 +881,23 @@ Return ONLY valid JSON with these exact keys:
         engine_used: engineUsed,
         char_count: Math.max(extractedText.length, pdfBuffer ? pdfBuffer.length : 0),
         sections_detected: baselineResult.sections,
-        confidence_score: Math.max(baselineResult.confidence, 94),
+        confidence_score: Math.max(baselineResult.confidence, dynamicConfidence),
         extracted_text_preview: preview,
         warnings,
       },
     };
   };
 
-  // Step 4A: Try Gemini 2.5 Flash (supports direct native PDF inlineData OR extracted text)
+  const withTimeout = <T,>(p: Promise<T>, ms: number, label: string): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout>;
+    return Promise.race([
+      p,
+      new Promise<never>((_, rej) => {
+        timer = setTimeout(() => rej(new Error(`${label} timed out after ${ms}ms`)), ms);
+      }),
+    ]).finally(() => clearTimeout(timer!));
+  };
+
   const ai = getGeminiClient();
   if (ai) {
     try {
@@ -659,21 +914,25 @@ Return ONLY valid JSON with these exact keys:
         text: `${schemaInstruction}\n\nRESUME TEXT CONTENT:\n${extractedText.slice(0, 12000)}`,
       });
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: { parts },
-        config: {
-          responseMimeType: 'application/json',
-          temperature: 0.1,
-        },
-      });
-      const parsedJson = JSON.parse(response.text || '{}');
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: { parts },
+          config: {
+            responseMimeType: 'application/json',
+            thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
+          },
+        }),
+        14000,
+        'Gemini resume parser'
+      );
+      const parsedJson = parseLooseJSON<Record<string, unknown>>(response.text || '{}');
       if (parsedJson && (parsedJson.name || parsedJson.target_roles)) {
         return mergeWithBaseline(
           parsedJson,
           pdfBuffer
-            ? 'Gemini 2.5 Flash Multimodal PDF + Deterministic AST'
-            : 'Gemini 2.5 Flash + Deterministic AST'
+            ? 'Gemini 4 Hydrogen Multimodal PDF + Deterministic AST'
+            : 'Gemini 4 Hydrogen + Deterministic AST'
         );
       }
     } catch (err) {
@@ -681,41 +940,18 @@ Return ONLY valid JSON with these exact keys:
     }
   }
 
-  // Step 4B: Try Groq Llama 3.3 70B if text is available
+  if (!hasReadableText) {
+    throw new Error(
+      'Unable to read text from this scanned PDF (multimodal pass unavailable). Paste your resume text directly in the Paste Text tab.'
+    );
+  }
+
   if (extractedText.trim().length > 30 && process.env.GROQ_API_KEY && !process.env.GROQ_API_KEY.startsWith('xai-')) {
     try {
       const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-      const completion = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-          {
-            role: 'user',
-            content: `${schemaInstruction}\n\nRESUME TEXT:\n${extractedText.slice(0, 10000)}`,
-          },
-        ],
-        response_format: { type: 'json_object' },
-        temperature: 0.1,
-      });
-      const parsedJson = JSON.parse(completion.choices[0]?.message?.content || '{}');
-      if (parsedJson && (parsedJson.name || parsedJson.target_roles)) {
-        return mergeWithBaseline(parsedJson, 'Groq Llama 3.3 70B + Deterministic AST');
-      }
-    } catch (err) {
-      warnings.push(`Groq pass skipped: ${(err as Error).message}`);
-    }
-  }
-
-  // Step 4C: Try OpenRouter Free Tier if configured
-  if (extractedText.trim().length > 30 && process.env.OPENROUTER_API_KEY) {
-    try {
-      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: 'meta-llama/llama-3.3-70b-instruct:free',
+      const completion = await withTimeout(
+        groq.chat.completions.create({
+          model: 'llama-3.3-70b-versatile',
           messages: [
             {
               role: 'user',
@@ -725,29 +961,66 @@ Return ONLY valid JSON with these exact keys:
           response_format: { type: 'json_object' },
           temperature: 0.1,
         }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const raw = (data.choices?.[0]?.message?.content || '{}')
-          .replace(/^```json\s*/i, '')
-          .replace(/```\s*$/, '')
-          .trim();
-        const parsedJson = JSON.parse(raw);
-        if (parsedJson && (parsedJson.name || parsedJson.target_roles)) {
-          return mergeWithBaseline(parsedJson, 'OpenRouter Llama 3.3 70B (:free) + Deterministic AST');
-        }
+        12000,
+        'Groq resume parser'
+      );
+      const parsedJson = parseLooseJSON<Record<string, unknown>>(completion.choices[0]?.message?.content || '{}');
+      if (parsedJson && (parsedJson.name || parsedJson.target_roles)) {
+        return mergeWithBaseline(parsedJson, 'Groq Llama 3.3 70B + Deterministic AST');
       }
     } catch (err) {
-      warnings.push(`OpenRouter pass skipped: ${(err as Error).message}`);
+      warnings.push(`Groq pass skipped: ${(err as Error).message}`);
     }
   }
 
-  // Step 5: Deterministic AST Engine Result
+  if (extractedText.trim().length > 30 && process.env.OPENROUTER_API_KEY) {
+    for (const model of [
+      'meta-llama/llama-3.3-70b-instruct:free',
+      'google/gemma-3-27b-it:free',
+      'openrouter/free',
+    ]) {
+      try {
+        const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+            'HTTP-Referer': process.env.APP_URL || 'https://kaisifos.local',
+            'X-Title': 'KaisifOS Resume Parser',
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              {
+                role: 'user',
+                content: `${schemaInstruction}\n\nRESUME TEXT:\n${extractedText.slice(0, 10000)}`,
+              },
+            ],
+            response_format: { type: 'json_object' },
+            temperature: 0.1,
+          }),
+          signal: AbortSignal.timeout(12000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const parsedJson = parseLooseJSON<Record<string, unknown>>(
+            data.choices?.[0]?.message?.content || '{}'
+          );
+          if (parsedJson && (parsedJson.name || parsedJson.target_roles)) {
+            return mergeWithBaseline(parsedJson, `OpenRouter ${model} + Deterministic AST`);
+          }
+        }
+      } catch (err) {
+        warnings.push(`OpenRouter (${model}) pass skipped: ${(err as Error).message}`);
+      }
+    }
+  }
+
   return {
     parsed: baselineResult.parsed,
     diagnostics: {
       source_channel: options.sourceChannel,
-      engine_used: 'Deterministic AST & Quantified Regex Engine v3.0',
+      engine_used: 'Deterministic AST & Month-Precision Engine v3.1',
       char_count: Math.max(extractedText.length, pdfBuffer ? pdfBuffer.length : 0),
       sections_detected: baselineResult.sections,
       confidence_score: baselineResult.confidence,

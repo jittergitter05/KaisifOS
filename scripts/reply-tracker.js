@@ -59,6 +59,17 @@ async function sendDiscordAlert(content) {
   }
 }
 
+function escapeRegExp(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function isCompanyMentioned(text, company) {
+  if (!text || !company) return false;
+  const clean = company.trim();
+  if (clean.length < 2) return false;
+  return new RegExp(`(?:^|[^a-z0-9])${escapeRegExp(clean)}(?:$|[^a-z0-9])`, 'i').test(text);
+}
+
 async function main() {
   try {
     let auth;
@@ -87,18 +98,28 @@ async function main() {
     const { pendingRows, lowerCompanies } = groupCompanies(rows);
     if (pendingRows.length === 0) return;
     
-    let listRes;
+    const messages = [];
+    let pageToken;
+    let pages = 0;
     try {
-       listRes = await gmail.users.messages.list({
-        auth,
-        userId: 'me',
-        q: 'in:inbox newer_than:2d',
-      });
+      do {
+        const listRes = await gmail.users.messages.list({
+          auth,
+          userId: 'me',
+          q: 'in:inbox newer_than:2d',
+          maxResults: 100,
+          pageToken,
+        });
+        if (Array.isArray(listRes.data.messages)) {
+          messages.push(...listRes.data.messages);
+        }
+        pageToken = listRes.data.nextPageToken;
+        pages++;
+      } while (pageToken && pages < 5);
     } catch (gerr) {
         throw new Error(`Gmail API Error: ${gerr.message}`);
     }
 
-    const messages = listRes.data.messages || [];
     const matchedIndices = new Set();
     const hits = [];
 
@@ -111,16 +132,15 @@ async function main() {
           metadataHeaders: ['From', 'Subject', 'Date']
        });
        
-       const headers = msgData.data.payload.headers;
+       const headers = msgData.data.payload.headers || [];
        const from = headers.find(h => h.name === 'From')?.value || '';
        const subject = headers.find(h => h.name === 'Subject')?.value || '';
        const dateStr = headers.find(h => h.name === 'Date')?.value || '';
        
-       const lowerFrom = from.toLowerCase();
-       const lowerSubj = subject.toLowerCase();
-       
        for (const [companyLowerCase, indices] of lowerCompanies.entries()) {
-          const matchFound = lowerFrom.includes(companyLowerCase) || lowerSubj.includes(companyLowerCase);
+          const matchFound =
+            isCompanyMentioned(from, companyLowerCase) ||
+            isCompanyMentioned(subject, companyLowerCase);
           if (matchFound) {
              for (const rowIndex of indices) {
                 if (!matchedIndices.has(rowIndex)) {
