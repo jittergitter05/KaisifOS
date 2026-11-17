@@ -4,6 +4,11 @@ import { google } from 'googleapis';
 import Groq from 'groq-sdk';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import {
+  decodeAndStripHtml,
+  extractRequiredYearsStrict,
+  evaluateHardEligibility,
+} from '../lib/eligibility.js';
 
 dotenv.config();
 
@@ -11,16 +16,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
-export const stripHtmlTags = (input) => {
-  if (!input) return '';
-  let output = input;
-  let previous;
-  do {
-    previous = output;
-    output = output.replace(/<[^>]*>/g, '');
-  } while (output !== previous);
-  return output;
-};
+export const stripHtmlTags = (input) => decodeAndStripHtml(input);
 
 /**
  * Dynamically derives Internshala slugs, RemoteOK tags, and Remotive search terms
@@ -91,17 +87,17 @@ export function deriveDynamicSearchParams(profile) {
 
 // ─── PROMPT GENERATOR ────────────────────────────────────────────────────────
 
-function extractHighSignalJdForScout(rawDesc, maxLen = 1400) {
-  const clean = String(rawDesc || '').trim();
+function extractHighSignalJdForScout(rawDesc, maxLen = 3200) {
+  const clean = decodeAndStripHtml(String(rawDesc || '')).trim();
   if (clean.length <= maxLen) return clean;
-  const intro = clean.slice(0, 500);
+  const intro = clean.slice(0, 600);
   const chunks = clean
-    .slice(500)
+    .slice(600)
     .split(/\n+|(?<=[.!?])\s+/)
     .map((c) => c.trim())
     .filter((c) => c.length > 15);
   const priority = chunks.filter((c) =>
-    /\b(require|qualification|must|experience|years?|yrs?|senior|junior|entry|fresher|salary|compensation|lpa|ctc|\$\d|visa|sponsor|relocation|remote|skills?)\b/i.test(c)
+    /\b(require|qualification|must|experience|years?|yrs?|senior|junior|entry|fresher|salary|compensation|lpa|ctc|\$\d|visa|sponsor|sponsorship|opt|stem|authorization|authorized|citizen|reside|resident|metro|bay\s*area|new\s*york|nyc|seattle|san\s*francisco|hyderabad|india|401\(?k\)?|e-?verify|w-?2|pst|est|cet|travel|in-person|relocation|remote|skills?)\b/i.test(c)
   );
   const picked = [];
   let len = intro.length;
@@ -114,7 +110,7 @@ function extractHighSignalJdForScout(rawDesc, maxLen = 1400) {
 }
 
 export function buildPrompt(job, profile) {
-  const desc = extractHighSignalJdForScout(job.description || '', 1400);
+  const desc = extractHighSignalJdForScout(job.description || '', 3200);
   const location = job.location || 'Not specified';
   const salaryInfo = job.salary_min
     ? `Min salary: ${job.salary_min} ${job.salary_max ? `- ${job.salary_max}` : ''}`
@@ -130,15 +126,15 @@ export function buildPrompt(job, profile) {
   if (willRelocate) {
     locationRule = `4. Comp & Location (15 pts): Candidate is open to relocation globally (especially ${profile.relocation_preference?.preferred_regions?.join(', ')}). Min salary ₹${profile.min_salary_lpa} LPA India or $${profile.min_salary_usd_annual || 30000} USD abroad. Give full 15/15 for remote or relo/visa-supported roles meeting salary floor; 0–5 if visa is forbidden or below floor.`;
   } else {
-    locationRule = `4. Comp & Location (15 pts): MUST be located in ${targetCities} (on-site/hybrid) or fully remote and meet ₹${profile.min_salary_lpa} LPA / $${profile.min_salary_usd_annual || 30000} USD. Give 0–4/15 for other locations or below floor.`;
+    locationRule = `4. Comp & Location (15 pts): MUST be located in ${targetCities} (on-site/hybrid) or genuinely unrestricted India/Worldwide remote and meet ₹${profile.min_salary_lpa} LPA / $${profile.min_salary_usd_annual || 30000} USD. Give <=2/15 comp_geo AND <=32 total if US/UK/EU/CA work authorization, no sponsorship, no STEM OPT, or remote preference/quarterly travel for NYC/Seattle/SF Bay Area/non-target hubs appears anywhere in the JD.`;
   }
 
   // Experience logic
   let expRule = '';
   let hardExpRule = '';
   if (isFresher) {
-    expRule = `3. Seniority & Experience match (15 pts): Candidate is a FRESHER (0 full-time years). Full marks only if the role is entry-level, junior, associate, or open to freshers. Score <=5/15 if it requires 3+ years or Senior/Director titles.`;
-    hardExpRule = `- DO NOT score above 48 total if the role explicitly requires 2+ years of experience.`;
+    expRule = `3. Seniority & Experience match (15 pts): Candidate is a FRESHER (0 full-time years). Full marks only if the role is entry-level, junior, associate, or open to freshers. Score <=5/15 if it requires 2+ years or Senior/Lead/Director titles.`;
+    hardExpRule = `- DO NOT score above 48 total if the role explicitly requires 2+ years of experience (<=32 total if US/EU metro-locked or no sponsorship).`;
   } else {
     expRule = `3. Seniority & Experience match (15 pts): Candidate has ${expYears} years of experience. Score based on how well this matches the role's requirements.`;
     hardExpRule = `- DO NOT score above 48 total if the role requires significantly more experience than ${expYears} years.`;
@@ -172,10 +168,12 @@ ${locationRule}
 
 HARD RULES:
 ${hardExpRule}
-- DO score below 40 for: clearly unrelated domain (law, medicine, facilities, unrelated trades), or irrelevant seniority.
+- DO score below 32 for: non-India work authorization / no sponsorship / STEM OPT blockers, remote roles prioritizing NYC/Seattle/SF/US/EU metros, or irrelevant seniority.
 
 Return exactly:
 {
+  "requires_non_india_work_auth_or_no_sponsorship": false,
+  "remote_restricted_to_non_target_region": false,
   "match_reasons": ["reason 1 (xx/40 Role)", "reason 2 (xx/30 Skill)", "reason 3 (xx/15 Seniority · xx/15 Comp/Geo)"],
   "gap": "one line on the biggest risk or weakness for this specific role",
   "score": <integer 0-100 matching sum of 4 pillars>,
@@ -210,10 +208,19 @@ function sanitizeSheetCell(val, maxLen = 2000) {
 }
 
 export function scoreJobDeterministic(job, profile) {
-  const fullText = `${job.title || ''} ${job.description || ''} ${job.location || ''}`.toLowerCase();
+  const cleanDescription = decodeAndStripHtml(job.description || '');
+  const fullText = `${job.title || ''} ${cleanDescription} ${job.location || ''}`.toLowerCase();
   const titleLower = (job.title || '').toLowerCase();
   const roles = profile.target_roles || [];
   const skills = profile.skills || [];
+  const eligibility = evaluateHardEligibility(
+    {
+      title: job.title,
+      location: job.location,
+      description: cleanDescription,
+    },
+    profile
+  );
 
   let roleScore = 8;
   const exactMatched = roles.filter((r) => hasWholeToken(titleLower, r.toLowerCase()));
@@ -259,25 +266,11 @@ export function scoreJobDeterministic(job, profile) {
       : Math.min(30, Math.max(8, Math.round(8 + Math.min(1, matchedSkills.length / skillDenom) * 22)));
 
   const candidateYears = profile.experience_years ?? 0;
-  const nonReqYearsRegex =
-    /\b\d{1,2}\+?\s*years?\s+(?:in\s+business|of\s+history|old|ago|strong|legacy|founded|operating|market\s+presence)\b/gi;
-  let requiredYears = null;
-  for (const rawSentence of fullText.split(/[\n.!?;]+/)) {
-    const cleanedSentence = rawSentence.replace(nonReqYearsRegex, '').trim();
-    if (!cleanedSentence) continue;
-    const yearsMatches = [
-      ...cleanedSentence.matchAll(/\b(\d{1,2})\s*(?:[-–to]+\s*(\d{1,2}))?\s*\+?\s*(?:years?|yrs?)\b/gi),
-    ];
-    for (const m of yearsMatches) {
-      const minY = parseInt(m[1], 10);
-      if (Number.isFinite(minY) && minY <= 25) {
-        requiredYears = requiredYears === null ? minY : Math.max(requiredYears, minY);
-      }
-    }
-  }
+  const requiredYears = eligibility.flags.requiredYears ?? extractRequiredYearsStrict(fullText);
 
   let seniorityScore = 13;
   if (
+    eligibility.flags.seniorityBlocked ||
     /\b(director|vp|vice president|principal|head of|chief|staff)\b/i.test(titleLower) ||
     (/\b(senior|sr\.?|lead)\b/i.test(titleLower) && candidateYears < 2) ||
     (requiredYears !== null && requiredYears >= candidateYears + 3)
@@ -295,77 +288,95 @@ export function scoreJobDeterministic(job, profile) {
   }
 
   const locLower = (job.location || '').toLowerCase();
-  const isTargetLoc =
-    (profile.target_cities || []).some((c) => hasWholeToken(locLower, c.toLowerCase())) ||
-    /\b(remote|worldwide|bengaluru|bangalore|hyderabad|dubai|singapore|london|global)\b/i.test(locLower);
-  const forbidsVisa = /no visa|no sponsorship|without sponsorship|us citizens only/i.test(fullText);
+  const isTargetLoc = eligibility.flags.matchesTargetHub || eligibility.flags.isIndiaAccessibleRemote;
+  const isPreferredRegion =
+    Boolean(profile.open_to_relocation) &&
+    (profile.relocation_preference?.preferred_regions || []).some((r) =>
+      hasWholeToken(locLower, r.toLowerCase())
+    );
 
   const nonCompContextRegex =
     /\b(funding|raised|seed\s+round|series\s+[a-f]|valuation|revenue|arr|mrr|pricing|plan|subscription|tier|customers|users|downloads|volume|market\s+cap|backed\s+by)\b/i;
 
-  let compGeoScore = forbidsVisa && !isTargetLoc ? 5 : isTargetLoc ? 14 : profile.open_to_relocation ? 12 : 7;
-  if (job.salary_min && Number(job.salary_min) > 0) {
-    const minUsd = profile.min_salary_usd_annual || 30000;
-    const annual = Number(job.salary_min) < 500 ? Number(job.salary_min) * 1000 : Number(job.salary_min);
-    compGeoScore = Math.min(15, Math.max(2, annual >= minUsd ? compGeoScore + 1 : compGeoScore - 4));
-  } else {
-    const lpaDesc = fullText.match(/(\d+(?:\.\d+)?)\s*(?:[-–to]+\s*(\d+(?:\.\d+)?))?\s*lpa\b/i);
-    if (lpaDesc) {
-      const low = parseFloat(lpaDesc[1]);
-      const high = lpaDesc[2] ? parseFloat(lpaDesc[2]) : low;
-      const lpa = (low + high) / 2;
-      compGeoScore = Math.min(15, Math.max(2, lpa >= (profile.min_salary_lpa || 8) ? compGeoScore + 1 : compGeoScore - 4));
+  let compGeoScore =
+    eligibility.flags.workAuthBlocked || eligibility.flags.geoBlocked
+      ? 2
+      : isTargetLoc
+      ? 14
+      : isPreferredRegion
+      ? 13
+      : profile.open_to_relocation
+      ? 12
+      : 6;
+
+  if (!eligibility.flags.workAuthBlocked && !eligibility.flags.geoBlocked) {
+    if (job.salary_min && Number(job.salary_min) > 0) {
+      const minUsd = profile.min_salary_usd_annual || 30000;
+      const annual = Number(job.salary_min) < 500 ? Number(job.salary_min) * 1000 : Number(job.salary_min);
+      compGeoScore = Math.min(15, Math.max(2, annual >= minUsd ? compGeoScore + 1 : compGeoScore - 4));
     } else {
-      let appliedSalarySignal = false;
-      for (const inrDesc of fullText.matchAll(
-        /(?:₹|inr\s*|rs\.?\s*)(\d+(?:,\d{2,3})*(?:\.\d+)?)\s*(k|lakh|lakhs|cr|crore|m|million)?\s*(\/\s*(?:mo|month|mth)|per\s+month)?/gi
-      )) {
-        const unit = (inrDesc[2] || '').toLowerCase();
-        if (unit === 'cr' || unit === 'crore' || unit === 'm' || unit === 'million') continue;
-        const idx = inrDesc.index ?? 0;
-        const snippet = fullText.slice(Math.max(0, idx - 42), Math.min(fullText.length, idx + inrDesc[0].length + 42));
-        if (nonCompContextRegex.test(snippet)) continue;
-
-        let val = parseFloat(inrDesc[1].replace(/,/g, ''));
-        if (unit === 'k') val *= 1000;
-        else if (unit.startsWith('lakh')) val *= 100000;
-        const annualInr = inrDesc[3] ? val * 12 : val;
-        const lpa = annualInr >= 100000 ? annualInr / 100000 : inrDesc[3] ? (val * 12) / 100000 : val;
-        if (lpa >= 1 && lpa <= 200) {
-          compGeoScore = Math.min(15, Math.max(2, lpa >= (profile.min_salary_lpa || 8) ? compGeoScore + 1 : compGeoScore - 4));
-          appliedSalarySignal = true;
-          break;
-        }
-      }
-
-      if (!appliedSalarySignal) {
-        for (const fxDesc of fullText.matchAll(
-          /(?:(\$|usd\s*)|(€|eur\s*)|(£|gbp\s*))(\d+(?:,\d{3})*(?:\.\d+)?)\s*(k|m|b|million|billion)?\s*(\/\s*(?:hr|hour|mo|month)|per\s+(?:hour|month))?/gi
+      const lpaDesc = fullText.match(/(\d+(?:\.\d+)?)\s*(?:[-–to]+\s*(\d+(?:\.\d+)?))?\s*lpa\b/i);
+      if (lpaDesc) {
+        const low = parseFloat(lpaDesc[1]);
+        const high = lpaDesc[2] ? parseFloat(lpaDesc[2]) : low;
+        const lpa = (low + high) / 2;
+        compGeoScore = Math.min(15, Math.max(2, lpa >= (profile.min_salary_lpa || 8) ? compGeoScore + 1 : compGeoScore - 4));
+      } else {
+        let appliedSalarySignal = false;
+        for (const inrDesc of fullText.matchAll(
+          /(?:₹|inr\s*|rs\.?\s*)(\d+(?:,\d{2,3})*(?:\.\d+)?)\s*(k|lakh|lakhs|cr|crore|m|million)?\s*(\/\s*(?:mo|month|mth)|per\s+month)?/gi
         )) {
-          const mag = (fxDesc[5] || '').toLowerCase();
-          if (mag === 'm' || mag === 'b' || mag === 'million' || mag === 'billion') continue;
-          const idx = fxDesc.index ?? 0;
-          const snippet = fullText.slice(Math.max(0, idx - 42), Math.min(fullText.length, idx + fxDesc[0].length + 42));
+          const unit = (inrDesc[2] || '').toLowerCase();
+          if (unit === 'cr' || unit === 'crore' || unit === 'm' || unit === 'million') continue;
+          const idx = inrDesc.index ?? 0;
+          const snippet = fullText.slice(Math.max(0, idx - 42), Math.min(fullText.length, idx + inrDesc[0].length + 42));
           if (nonCompContextRegex.test(snippet)) continue;
 
-          const fx = fxDesc[3] ? 1.26 : fxDesc[2] ? 1.08 : 1;
-          const n = parseFloat(fxDesc[4].replace(/,/g, ''));
-          const hasK = mag === 'k';
-          const cadence = (fxDesc[6] || '').toLowerCase();
-          const annualUsd = /hr|hour/.test(cadence)
-            ? n * (hasK ? 1000 : 1) * 2080 * fx
-            : /mo|month/.test(cadence)
-            ? (hasK || n < 100 ? n * 1000 : n) * 12 * fx
-            : (hasK || n < 500 ? n * 1000 : n) * fx;
-          compGeoScore = Math.min(15, Math.max(2, annualUsd >= (profile.min_salary_usd_annual || 30000) ? compGeoScore + 1 : compGeoScore - 4));
-          break;
+          let val = parseFloat(inrDesc[1].replace(/,/g, ''));
+          if (unit === 'k') val *= 1000;
+          else if (unit.startsWith('lakh')) val *= 100000;
+          const annualInr = inrDesc[3] ? val * 12 : val;
+          const lpa = annualInr >= 100000 ? annualInr / 100000 : inrDesc[3] ? (val * 12) / 100000 : val;
+          if (lpa >= 1 && lpa <= 200) {
+            compGeoScore = Math.min(15, Math.max(2, lpa >= (profile.min_salary_lpa || 8) ? compGeoScore + 1 : compGeoScore - 4));
+            appliedSalarySignal = true;
+            break;
+          }
+        }
+
+        if (!appliedSalarySignal) {
+          for (const fxDesc of fullText.matchAll(
+            /(?:(\$|usd\s*)|(€|eur\s*)|(£|gbp\s*))(\d+(?:,\d{3})*(?:\.\d+)?)\s*(k|m|b|million|billion)?\s*(\/\s*(?:hr|hour|mo|month)|per\s+(?:hour|month))?/gi
+          )) {
+            const mag = (fxDesc[5] || '').toLowerCase();
+            if (mag === 'm' || mag === 'b' || mag === 'million' || mag === 'billion') continue;
+            const idx = fxDesc.index ?? 0;
+            const snippet = fullText.slice(Math.max(0, idx - 42), Math.min(fullText.length, idx + fxDesc[0].length + 42));
+            if (nonCompContextRegex.test(snippet)) continue;
+
+            const fx = fxDesc[3] ? 1.26 : fxDesc[2] ? 1.08 : 1;
+            const n = parseFloat(fxDesc[4].replace(/,/g, ''));
+            const hasK = mag === 'k';
+            const cadence = (fxDesc[6] || '').toLowerCase();
+            const annualUsd = /hr|hour/.test(cadence)
+              ? n * (hasK ? 1000 : 1) * 2080 * fx
+              : /mo|month/.test(cadence)
+              ? (hasK || n < 100 ? n * 1000 : n) * 12 * fx
+              : (hasK || n < 500 ? n * 1000 : n) * fx;
+            compGeoScore = Math.min(15, Math.max(2, annualUsd >= (profile.min_salary_usd_annual || 30000) ? compGeoScore + 1 : compGeoScore - 4));
+            break;
+          }
         }
       }
     }
   }
 
   const raw = Math.min(98, Math.max(12, roleScore + skillScore + seniorityScore + compGeoScore));
-  const finalScore = seniorityScore <= 5 ? Math.min(48, raw) : raw;
+  const finalScore = !eligibility.eligible
+    ? Math.min(32, raw)
+    : seniorityScore <= 5
+    ? Math.min(48, raw)
+    : raw;
 
   const m1 = profile.key_metrics?.[0] || 'verified product & growth metrics';
   const m2 = profile.key_metrics?.[1] || 'end-to-end execution velocity';
@@ -373,11 +384,12 @@ export function scoreJobDeterministic(job, profile) {
 
   return {
     score: finalScore,
+    eligible: eligibility.eligible,
     subscores: {
       role_match: roleScore,
       skill_match: skillScore,
       seniority_match: seniorityScore,
-      comp_geo_match: compGeoScore,
+      comp_geo_match: compGeoMatchFallback(compGeoScore),
     },
     match_reasons: [
       `Direct alignment with ${matchedRoles[0] || roles[0] || 'Target Role'} (${roleScore}/40 Role)`,
@@ -386,17 +398,25 @@ export function scoreJobDeterministic(job, profile) {
         : `Low direct skill keyword overlap (${skillScore}/30 Skill)`,
       `Seniority (${seniorityScore}/15 Seniority) & Location/Comp (${compGeoScore}/15 Comp/Geo) for ${job.location || 'Remote'}`,
     ],
-    gap:
-      seniorityScore <= 7
-        ? `Role specifies multi-year experience; offset immediately with ${m2}.`
-        : `Lead screening conversation with ${m1} and hands-on system execution.`,
+    gap: !eligibility.eligible
+      ? eligibility.reasons[0]
+      : seniorityScore <= 7
+      ? `Role specifies multi-year experience; offset immediately with ${m2}.`
+      : `Lead screening conversation with ${m1} and hands-on system execution.`,
     dm_draft: `Hi ${companyName} team — I saw the ${job.title} opening and wanted to reach out directly. In my recent work, I delivered ${m1} and ${m2}. I'd welcome the chance to bring that exact execution velocity to ${companyName}.`,
     resume_angle: `Lead summary with "${m2}" and "${m1}"`,
-    relocation_note: job.has_relocation
-      ? 'Explicit relocation/visa support detected in job description'
-      : 'Standard location/remote terms apply',
-    engine_used: 'Deterministic 4-Pillar Rubric v3.0',
+    relocation_note:
+      eligibility.flags.workAuthBlocked || eligibility.flags.geoBlocked
+        ? eligibility.reasons[0]
+        : job.has_relocation
+        ? 'Explicit relocation/visa support detected in job description'
+        : 'Standard location/remote terms apply',
+    engine_used: 'Deterministic 4-Pillar Rubric v3.2',
   };
+}
+
+function compGeoMatchFallback(val) {
+  return Math.min(15, Math.max(0, Math.round(Number(val) || 0)));
 }
 
 // ─── AUTH & GOOGLE SHEETS OPS (100% PROTOCOL PRESERVED) ──────────────────────
@@ -544,9 +564,9 @@ export async function fetchInternshalaJobs(profile) {
   const { internshalaSlugs } = deriveDynamicSearchParams(profile);
   let cities =
     profile?.target_cities
-      ?.map((c) => c.toLowerCase().replace('bengaluru', 'bangalore'))
-      .filter((c) => c !== 'remote') || [];
-  if (cities.length === 0) cities = ['bangalore', 'hyderabad'];
+      ?.map((c) => c.toLowerCase().replace('bengaluru', 'bangalore').trim())
+      .filter((c) => c && c !== 'remote') || [];
+  if (cities.length === 0) cities = ['hyderabad'];
 
   const headers = {
     'User-Agent':
@@ -593,7 +613,7 @@ export async function fetchInternshalaJobs(profile) {
                   id,
                   title,
                   company: { display_name: company },
-                  description: desc.substring(0, 800),
+                  description: desc.substring(0, 12000),
                   redirect_url: link,
                   location: city,
                 });
@@ -671,7 +691,7 @@ export async function fetchRemoteOKJobs(profile) {
             item.description || `${item.position} at ${item.company}. Remote role.`
           )
             .trim()
-            .substring(0, 800),
+            .substring(0, 12000),
           redirect_url: item.url || `https://remoteok.com/l/${item.slug}`,
           location: item.location || 'Remote / Worldwide',
           salary_min: item.salary_min || null,
@@ -716,7 +736,7 @@ export async function fetchRemotiveJobs(profile) {
           id: `remotive_${item.id}`,
           title: item.title,
           company: { display_name: item.company_name || 'Unknown' },
-          description: description.substring(0, 800),
+          description: description.substring(0, 12000),
           redirect_url: item.url || '',
           location: item.candidate_required_location || 'Remote / Worldwide',
           has_relocation: hasRelocation,
@@ -745,7 +765,7 @@ export async function fetchRemotiveJobs(profile) {
           id: `remotive_${item.id}`,
           title: item.title,
           company: { display_name: item.company_name || 'Unknown' },
-          description: description.substring(0, 800),
+          description: description.substring(0, 12000),
           redirect_url: item.url || '',
           location: item.candidate_required_location || 'Remote / Worldwide',
           has_relocation: hasRelocation,
@@ -803,7 +823,7 @@ export async function fetchFreeHireAtsJobs(profile) {
             id: `freehire_${item.id || fallbackSlug}`,
             title: item.title || item.position,
             company: { display_name: item.company || 'FreeHire Partner' },
-            description: stripHtmlTags(item.description || '').substring(0, 800),
+            description: stripHtmlTags(item.description || '').substring(0, 12000),
             redirect_url: item.url || item.apply_url || '',
             location: item.location || 'Remote',
             has_relocation: /relocation|visa/i.test(item.description || ''),
@@ -832,7 +852,7 @@ export async function fetchFreeHireAtsJobs(profile) {
             id: `greenhouse_${slug}_${item.id}`,
             title: item.title,
             company: { display_name: slug.charAt(0).toUpperCase() + slug.slice(1) },
-            description: desc.substring(0, 800) || `${item.title} at ${slug}`,
+            description: desc.substring(0, 12000) || `${item.title} at ${slug}`,
             redirect_url: item.absolute_url || `https://boards.greenhouse.io/${slug}`,
             location: item.location?.name || 'Remote / Hybrid',
             has_relocation: /relocation|visa|sponsorship/i.test(desc),
@@ -860,7 +880,7 @@ export async function fetchFreeHireAtsJobs(profile) {
             id: `lever_${slug}_${item.id}`,
             title: item.text,
             company: { display_name: slug.charAt(0).toUpperCase() + slug.slice(1) },
-            description: desc.substring(0, 800) || `${item.text} at ${slug}`,
+            description: desc.substring(0, 12000) || `${item.text} at ${slug}`,
             redirect_url: item.hostedUrl || item.applyUrl || '',
             location: item.categories?.location || 'Remote / Hybrid',
             has_relocation: /relocation|visa|sponsorship/i.test(desc),
@@ -887,7 +907,7 @@ export async function fetchFreeHireAtsJobs(profile) {
             id: `ashby_${slug}_${item.id}`,
             title: item.title,
             company: { display_name: slug.charAt(0).toUpperCase() + slug.slice(1) },
-            description: desc.substring(0, 800) || `${item.title} at ${slug}`,
+            description: desc.substring(0, 12000) || `${item.title} at ${slug}`,
             redirect_url: item.jobUrl || item.applyUrl || '',
             location: item.location || 'Remote',
             has_relocation: /relocation|visa|sponsorship/i.test(desc),
@@ -897,7 +917,7 @@ export async function fetchFreeHireAtsJobs(profile) {
     })
   );
 
-  // 4E. Workable Public Widget API
+  // 4E. Workable Public Widget API + v3 detail fetch
   const workableBoards = (atsConfig.workable || []).slice(0, 12);
   await Promise.allSettled(
     workableBoards.map(async (slug) => {
@@ -913,27 +933,47 @@ export async function fetchFreeHireAtsJobs(profile) {
           const loc =
             [item.city, item.country].filter(Boolean).join(', ') ||
             (item.telecommuting ? 'Remote' : 'Flexible');
+          const shortcode = item.shortcode || item.id;
           const applyUrl =
             item.url ||
             item.application_url ||
-            `https://apply.workable.com/${encodeURIComponent(slug)}/j/${item.shortcode || item.id}/`;
+            `https://apply.workable.com/${encodeURIComponent(slug)}/j/${shortcode}/`;
+          let fullDesc = '';
+          if (shortcode) {
+            try {
+              const detailRes = await fetch(
+                `https://apply.workable.com/api/v3/accounts/${encodeURIComponent(slug)}/jobs/${encodeURIComponent(String(shortcode))}`,
+                { signal: AbortSignal.timeout(4500) }
+              );
+              if (detailRes.ok) {
+                const detail = await detailRes.json();
+                fullDesc = decodeAndStripHtml(
+                  [detail.description, detail.requirements, detail.benefits].filter(Boolean).join(' ')
+                );
+              }
+            } catch (_) {}
+          }
+          const finalDesc = (
+            fullDesc ||
+            `${item.title} (${item.department || 'General'}) at ${companyName}. ${
+              item.telecommuting ? 'Remote eligible.' : ''
+            }`
+          ).substring(0, 12000);
           jobs.push({
-            id: `workable_${slug}_${item.shortcode || item.id}`,
+            id: `workable_${slug}_${shortcode}`,
             title: item.title,
             company: { display_name: companyName },
-            description: `${item.title} (${item.department || 'General'}) at ${companyName}. ${
-              item.telecommuting ? 'Remote eligible.' : ''
-            }`,
+            description: finalDesc,
             redirect_url: applyUrl,
             location: loc,
-            has_relocation: /relocation|visa|remote/i.test(loc),
+            has_relocation: /relocation|visa\s*sponsor|sponsorship/i.test(finalDesc),
           });
         }
       } catch (_) {}
     })
   );
 
-  // 4F. SmartRecruiters Public Postings API
+  // 4F. SmartRecruiters Public Postings API + detail fetch
   const srBoards = (atsConfig.smartrecruiters || []).slice(0, 12);
   await Promise.allSettled(
     srBoards.map(async (slug) => {
@@ -946,20 +986,46 @@ export async function fetchFreeHireAtsJobs(profile) {
         const data = await res.json();
         for (const item of (data.content || []).slice(0, 8)) {
           const companyName = item.company?.name || slug;
+          const companyIdentifier = item.company?.identifier || slug;
           const loc =
             [item.location?.city, item.location?.country].filter(Boolean).join(', ') ||
             (item.location?.remote ? 'Remote' : 'Hybrid');
           const applyUrl = `https://jobs.smartrecruiters.com/${encodeURIComponent(
-            item.company?.identifier || slug
+            companyIdentifier
           )}/${item.id}`;
+          let fullDesc = '';
+          try {
+            const detailRes = await fetch(
+              `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(companyIdentifier)}/postings/${encodeURIComponent(String(item.id))}`,
+              { signal: AbortSignal.timeout(4500) }
+            );
+            if (detailRes.ok) {
+              const detail = await detailRes.json();
+              const sections = detail?.jobAd?.sections || {};
+              fullDesc = decodeAndStripHtml(
+                [
+                  sections.companyDescription?.text,
+                  sections.jobDescription?.text,
+                  sections.qualifications?.text,
+                  sections.additionalInformation?.text,
+                ]
+                  .filter(Boolean)
+                  .join(' ')
+              );
+            }
+          } catch (_) {}
+          const finalDesc = (
+            fullDesc ||
+            `${item.name} in ${item.department?.label || 'Product & Tech'} at ${companyName}. Location: ${loc}.`
+          ).substring(0, 12000);
           jobs.push({
             id: `smartrecruiters_${slug}_${item.id}`,
             title: item.name,
             company: { display_name: companyName },
-            description: `${item.name} in ${item.department?.label || 'Product & Tech'} at ${companyName}. Location: ${loc}.`,
+            description: finalDesc,
             redirect_url: applyUrl,
             location: loc,
-            has_relocation: Boolean(item.location?.remote),
+            has_relocation: /relocation|visa\s*sponsor|sponsorship/i.test(finalDesc),
           });
         }
       } catch (_) {}
@@ -988,7 +1054,7 @@ export async function fetchFreeHireAtsJobs(profile) {
             id: `recruitee_${cleanSlug}_${item.id}`,
             title: item.title,
             company: { display_name: item.company_name || cleanSlug },
-            description: desc.substring(0, 800) || `${item.title} at ${cleanSlug}`,
+            description: desc.substring(0, 12000) || `${item.title} at ${cleanSlug}`,
             redirect_url: applyUrl,
             location: item.location || (item.remote ? 'Remote' : 'Hybrid'),
             has_relocation: /relocation|visa|sponsorship/i.test(desc),
@@ -1070,7 +1136,7 @@ export async function fetchFreeHireAtsJobs(profile) {
                 id: `career_${slug}`,
                 title: String(item.title),
                 company: { display_name: item.hiringOrganization?.name || companyTitle },
-                description: desc.substring(0, 800),
+                description: desc.substring(0, 12000),
                 redirect_url: applyUrl,
                 location: item.jobLocation?.address?.addressLocality || 'Direct Career Portal',
                 has_relocation: /relocation|visa|sponsorship|remote/i.test(desc),
@@ -1136,7 +1202,7 @@ export async function fetchFreeHireAtsJobs(profile) {
           id: `arbeitnow_${item.slug || fallbackSlug}`,
           title: item.title,
           company: { display_name: item.company_name || 'Unknown' },
-          description: desc.substring(0, 800),
+          description: desc.substring(0, 12000),
           redirect_url: item.url || '',
           location: item.location || (item.remote ? 'Remote' : 'Europe / Global'),
           has_relocation: Boolean(item.visa_sponsorship) || /relocation|visa/i.test(desc),
@@ -1170,7 +1236,7 @@ export async function fetchHimalayasJobs() {
         id: `himalayas_${item.guid || item.slug || fallbackSlug}`,
         title: item.title || '',
         company: { display_name: item.companyName || 'Unknown' },
-        description: desc.substring(0, 800),
+        description: desc.substring(0, 12000),
         redirect_url: item.applicationLink || item.guid || '',
         salary_min: item.minSalary || null,
         salary_max: item.maxSalary || null,
@@ -1228,7 +1294,7 @@ export async function fetchJSearchJobs(profile) {
           id: `jsearch_${item.job_id}`,
           title: item.job_title,
           company: { display_name: item.employer_name || 'Unknown' },
-          description: cleanDesc.substring(0, 800),
+          description: cleanDesc.substring(0, 12000),
           redirect_url: item.job_apply_link || '',
           salary_min: item.job_min_salary || null,
           salary_max: item.job_max_salary || null,
@@ -1545,11 +1611,32 @@ export async function scoreJobWithOpenRouter(job, profile, apiKey, hooks = {}) {
 
 export async function scoreJob(job, profile, groq, baselineOverride = null) {
   const baseline = baselineOverride || scoreJobDeterministic(job, profile);
+  const eligibility = evaluateHardEligibility(
+    {
+      title: job.title,
+      location: job.location,
+      description: decodeAndStripHtml(job.description || ''),
+    },
+    profile
+  );
   const enforceGuardrail = (res, engineUsed) => {
     const clampedScore = Math.min(100, Math.max(0, Math.round(Number(res.score) || 0)));
-    const safeScore =
-      baseline.subscores?.seniority_match <= 5 ? Math.min(48, clampedScore) : clampedScore;
-    return { ...baseline, ...res, score: safeScore, engine_used: res.engine_used || engineUsed };
+    const llmGeoBlocked =
+      res.requires_non_india_work_auth_or_no_sponsorship === true ||
+      res.remote_restricted_to_non_target_region === true;
+    const hardBlocked = !eligibility.eligible || llmGeoBlocked;
+    const safeScore = hardBlocked
+      ? Math.min(32, clampedScore)
+      : baseline.subscores?.seniority_match <= 5
+      ? Math.min(48, clampedScore)
+      : clampedScore;
+    return {
+      ...baseline,
+      ...res,
+      gap: !eligibility.eligible ? eligibility.reasons[0] : res.gap || baseline.gap,
+      score: safeScore,
+      engine_used: res.engine_used || engineUsed,
+    };
   };
 
   // 1. Provider 1: Google Gemini Free Tier
@@ -1797,12 +1884,13 @@ async function main() {
 
     for (const job of newJobs) {
       const title = job.title || '';
-      const descSnippet = (job.description || '').slice(0, 500);
+      const cleanDesc = decodeAndStripHtml(job.description || '');
+      job.description = cleanDesc.substring(0, 12000);
       const matchesRole = whitelistRegex.test(title);
       const hitsSeniorTitle =
         expYears <= 1 &&
         (titleSeniorityRegex.test(title) || (expYears === 0 && fresherLeadRegex.test(title)));
-      const hitsBlacklist = expYears <= 1 && descBlacklistRegex.test(`${title} ${descSnippet}`);
+      const hitsBlacklist = expYears <= 1 && descBlacklistRegex.test(`${title} ${cleanDesc}`);
 
       if (!matchesRole || hitsSeniorTitle || hitsBlacklist) {
         rejectedNonMatchIds.push(String(job.id));
@@ -1811,40 +1899,73 @@ async function main() {
       }
     }
 
-    // Deterministic Pre-Triage: eliminate obvious seniority caps (<=48) or weak fits (<56) in 0ms
+    // Enrich thin/stub JDs (e.g. Career Page anchors, Internshala HTML cards) before running strict eligibility gate
+    let enrichQuota = 14;
+    await Promise.allSettled(
+      prunedJobs.slice(0, 20).map(async (job) => {
+        if ((job.description || '').length >= 260 || !job.redirect_url || enrichQuota <= 0) return;
+        try {
+          const parsed = new URL(job.redirect_url);
+          const host = parsed.hostname.toLowerCase();
+          const isPrivate =
+            host === 'localhost' ||
+            host === '127.0.0.1' ||
+            host === '::1' ||
+            host === '169.254.169.254' ||
+            host === 'metadata.google.internal' ||
+            host.startsWith('10.') ||
+            host.startsWith('192.168.') ||
+            /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
+          if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || isPrivate) return;
+          enrichQuota -= 1;
+          const res = await fetch(parsed.toString(), {
+            headers: { 'User-Agent': 'KaisifOS-CareerCrawler/1.0 (+https://github.com)' },
+            signal: AbortSignal.timeout(5500),
+          });
+          if (!res.ok) return;
+          const html = await res.text();
+          const mainMatch = html.match(/<(?:main|article)[^>]*>([\s\S]*?)<\/(?:main|article)>/i);
+          const extracted = decodeAndStripHtml(mainMatch ? mainMatch[1] : html);
+          if (extracted.length > job.description.length) {
+            job.description = extracted.substring(0, 12000);
+          }
+        } catch (_) {}
+      })
+    );
+
+    // Deterministic Pre-Triage + Strict Geo/Work-Auth/Fresher Gate:
     const preScored = prunedJobs.map((job) => ({
       job,
+      eligibility: evaluateHardEligibility(
+        { title: job.title, location: job.location, description: job.description },
+        profile
+      ),
       baseline: scoreJobDeterministic(job, profile),
     }));
 
     const llmEligible = [];
     for (const item of preScored) {
-      if (item.baseline.subscores?.seniority_match <= 5 || item.baseline.score < 56) {
+      if (
+        !item.eligibility.eligible ||
+        item.baseline.subscores?.seniority_match <= 5 ||
+        item.baseline.subscores?.comp_geo_match <= 2 ||
+        item.baseline.score < 56
+      ) {
         rejectedNonMatchIds.push(String(item.job.id));
       } else {
         llmEligible.push(item);
       }
     }
 
-    // Fallback safety floor: if strict triage left <5 roles, keep top non-seniority-blocked roles
-    if (llmEligible.length < 5) {
-      const eligibleSet = new Set(llmEligible.map((i) => String(i.job.id)));
-      const backup = preScored
-        .filter((i) => !eligibleSet.has(String(i.job.id)) && i.baseline.subscores?.seniority_match > 5)
-        .sort((a, b) => b.baseline.score - a.baseline.score)
-        .slice(0, 5 - llmEligible.length);
-      for (const b of backup) {
-        const idx = rejectedNonMatchIds.indexOf(String(b.job.id));
-        if (idx !== -1) rejectedNonMatchIds.splice(idx, 1);
-        llmEligible.push(b);
-      }
-    }
-
-    llmEligible.sort((a, b) => b.baseline.score - a.baseline.score);
+    llmEligible.sort((a, b) => {
+      const aHub = a.eligibility.flags.matchesTargetHub ? 15 : 0;
+      const bHub = b.eligibility.flags.matchesTargetHub ? 15 : 0;
+      return bHub + b.baseline.score - (aHub + a.baseline.score);
+    });
 
     const jobsToScore = llmEligible.slice(0, 25);
     console.log(
-      `[Pre-Triage] Rejected ${rejectedNonMatchIds.length} non-matching/senior roles deterministically; queued ${jobsToScore.length}/${llmEligible.length} plausible candidates for LLM scoring.`
+      `[Pre-Triage] Rejected ${rejectedNonMatchIds.length} ineligible/non-matching/US-locked/senior roles; queued ${jobsToScore.length}/${llmEligible.length} verified Hyderabad/remote fresher candidates for LLM scoring.`
     );
 
     const scoredMatches = [];

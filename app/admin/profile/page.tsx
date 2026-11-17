@@ -984,8 +984,40 @@ ${locRule}`;
                 label="Target Hubs"
                 items={profile.target_cities}
                 onChange={(v) => update({ target_cities: v })}
-                placeholder="e.g. Bengaluru"
+                placeholder="e.g. Hyderabad"
               />
+              <div className="flex items-start justify-between gap-4 rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#0B0F17] p-3.5">
+                <div>
+                  <p className="text-xs font-medium text-slate-900 dark:text-slate-100">
+                    Strict Target Hubs Only (Reject Foreign / US-Only Remote)
+                  </p>
+                  <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
+                    When enabled, the scout strictly accepts your Target Hubs (plus unrestricted India/global remote) and rejects roles with US/EU metro preferences, quarterly non-target travel, or no visa sponsorship.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextRelo = !profile.open_to_relocation;
+                    update({
+                      open_to_relocation: nextRelo,
+                      relocation_preference: {
+                        willing: nextRelo,
+                        requirements: profile.relocation_preference?.requirements || [],
+                        avoid: profile.relocation_preference?.avoid || [],
+                        preferred_regions: profile.relocation_preference?.preferred_regions || [],
+                      },
+                    });
+                  }}
+                  className={`shrink-0 px-3 py-1.5 rounded text-xs font-medium border transition-colors ${
+                    !profile.open_to_relocation
+                      ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/40'
+                      : 'bg-slate-200/70 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-700'
+                  }`}
+                >
+                  {!profile.open_to_relocation ? 'Strict Hubs Active' : 'Relocation Open'}
+                </button>
+              </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1 block">

@@ -736,8 +736,124 @@ Skills: SQL, Python, GTM Strategy`;
         global.fetch = prevFetch;
       }
     });
+
+    it('decodes Greenhouse HTML entities before stripping tags and preserves bottom-of-JD visa clauses', async () => {
+      const { decodeAndStripHtml } = await import('../lib/eligibility.js');
+      const { extractHighSignalJdContext } = await import('../lib/utils');
+
+      const entityHtml =
+        '&lt;p&gt;Associate Product Manager in &lt;strong&gt;Hyderabad&lt;/strong&gt;.&lt;/p&gt; &lt;script&gt;alert(1)&lt;/script&gt; ';
+      expect(decodeAndStripHtml(entityHtml)).toBe('Associate Product Manager in Hyderabad.');
+
+      const longFiller = 'Collaborate across engineering and design squads to iterate rapidly. '.repeat(65);
+      const bottomClause =
+        'We strongly prefer candidates who do not require current or future employer sponsorship or participation (including STEM OPT) to maintain US work authorization.';
+      const excerpt = extractHighSignalJdContext(`${longFiller}\n${bottomClause}`, 3500);
+      expect(excerpt).toContain('STEM OPT');
+      expect(excerpt).toContain('sponsorship');
+    });
+
+    it('strictly blocks fake-remote NYC/Seattle/SF metro roles and bottom-of-JD STEM OPT / US-auth requirements', async () => {
+      const { evaluateHardEligibility } = await import('../lib/eligibility.js');
+      const { deterministicEvaluateJob } = await import('../lib/llm');
+
+      const strictHydProfile = {
+        ...validProfile,
+        target_cities: ['Hyderabad'],
+        open_to_relocation: false,
+        experience_years: 0,
+        experience_level: 'Fresher (0 yrs)',
+      };
+
+      const filler = 'Lead product launches, experimentation, and growth funnels using SEO, GA4, and Python EDA. '.repeat(45);
+
+      // Case 1: Remote claiming NYC / Seattle / SF Bay Area preference + quarterly travel
+      const fakeRemoteMetroJob = {
+        title: 'Associate Product Manager',
+        company: 'MetroBiasAI',
+        location: 'Remote',
+        salary: '$120,000',
+        description: `${filler} This role is fully remote, and we have a strong preference for candidates based in the New York City, Seattle, or San Francisco Bay Area metros. Much of the team you'll work with most closely is concentrated in those areas, and we'll prioritize applicants who live there. You should also be able to travel for in-person collaboration roughly once per quarter.`,
+      };
+      const metroElig = evaluateHardEligibility(fakeRemoteMetroJob, strictHydProfile);
+      expect(metroElig.eligible).toBe(false);
+      expect(metroElig.flags.geoBlocked).toBe(true);
+
+      const metroEval = deterministicEvaluateJob(fakeRemoteMetroJob, strictHydProfile);
+      expect(metroEval.subscores.comp_geo_match).toBeLessThanOrEqual(2);
+      expect(metroEval.score).toBeLessThanOrEqual(32);
+
+      const metroScoutEval = scoreJobDeterministic(
+        { ...fakeRemoteMetroJob, company: { display_name: 'MetroBiasAI' } },
+        strictHydProfile
+      );
+      expect(metroScoutEval.score).toBeLessThanOrEqual(32);
+
+      // Case 2: Late-JD STEM OPT / no US sponsorship clause past char 3000
+      const stemOptJob = {
+        title: 'Product Marketing Manager',
+        company: 'USAuthCorp',
+        location: 'Remote',
+        salary: '$110,000',
+        description: `${filler} We strongly prefer candidates who do not require current or future employer sponsorship or participation (including STEM OPT) to maintain US work authorization.`,
+      };
+      const authElig = evaluateHardEligibility(stemOptJob, strictHydProfile);
+      expect(authElig.eligible).toBe(false);
+      expect(authElig.flags.workAuthBlocked).toBe(true);
+
+      const authEval = deterministicEvaluateJob(stemOptJob, strictHydProfile);
+      expect(authEval.subscores.comp_geo_match).toBeLessThanOrEqual(2);
+      expect(authEval.score).toBeLessThanOrEqual(32);
+
+      const authScoutEval = scoreJobDeterministic(
+        { ...stemOptJob, company: { display_name: 'USAuthCorp' } },
+        strictHydProfile
+      );
+      expect(authScoutEval.score).toBeLessThanOrEqual(32);
+
+      // Case 3: Physical Bengaluru role & 3+ yr role blocked for strict Hyderabad + Fresher
+      const blrJob = {
+        title: 'Associate Product Manager',
+        company: 'BLRCo',
+        location: 'Bengaluru, India',
+        description: 'Associate Product Manager working on SEO, GA4, and Python EDA.',
+      };
+      expect(evaluateHardEligibility(blrJob, strictHydProfile).eligible).toBe(false);
+      expect(deterministicEvaluateJob(blrJob, strictHydProfile).score).toBeLessThanOrEqual(32);
+
+      const twoYrRole = {
+        title: 'Associate Product Manager',
+        company: 'HydCorp',
+        location: 'Hyderabad, India',
+        description: 'Requires at least 2+ years of product management experience.',
+      };
+      expect(evaluateHardEligibility(twoYrRole, strictHydProfile).flags.seniorityBlocked).toBe(true);
+      expect(deterministicEvaluateJob(twoYrRole, strictHydProfile).score).toBeLessThanOrEqual(32);
+
+      // Case 4: Genuine Hyderabad Fresher role & true India/Worldwide Remote role score cleanly >= 85
+      const validHydJob = {
+        title: 'Associate Product Manager',
+        company: 'HyderabadTech',
+        location: 'Hyderabad, Telangana',
+        salary: '12 LPA',
+        description: 'Entry-level Associate Product Manager in Hyderabad. Skills: Python EDA, SEO, GA4, Product Marketing.',
+      };
+      expect(evaluateHardEligibility(validHydJob, strictHydProfile).eligible).toBe(true);
+      expect(deterministicEvaluateJob(validHydJob, strictHydProfile).score).toBeGreaterThanOrEqual(85);
+
+      const validGlobalRemoteJob = {
+        title: 'Growth Marketing Analyst',
+        company: 'AsyncGlobal',
+        location: 'Remote / Worldwide',
+        salary: '$65,000',
+        description: 'Work from anywhere in the world (India remote welcome). Entry-level 0-1 years role using Python EDA, SEO, and GA4.',
+      };
+      expect(evaluateHardEligibility(validGlobalRemoteJob, strictHydProfile).eligible).toBe(true);
+      expect(deterministicEvaluateJob(validGlobalRemoteJob, strictHydProfile).score).toBeGreaterThanOrEqual(85);
+    });
   });
 });
+
 
 
 

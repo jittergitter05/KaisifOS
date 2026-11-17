@@ -1,4 +1,5 @@
 import { validateSafePublicUrl } from './utils';
+import { decodeAndStripHtml } from './eligibility';
 
 export interface ScrapedCareerJob {
   id: string;
@@ -20,15 +21,7 @@ export interface CareerFetchResult {
 const MAX_BOARDS_PER_SOURCE = 12;
 
 function stripHtml(html: string): string {
-  if (!html) return '';
-  return html
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return decodeAndStripHtml(html);
 }
 
 function slugToTitleCase(slug: string): string {
@@ -176,7 +169,7 @@ export function extractJsonLdJobPostings(
           company,
           location,
           salary,
-          description: stripHtml(String(item.description || `${title} at ${company}`)).substring(0, 1200),
+          description: stripHtml(String(item.description || `${title} at ${company}`)).substring(0, 12000),
           url: resolvedUrl,
           source: 'Company Career Page',
         });
@@ -261,29 +254,57 @@ export async function fetchWorkableBoards(boards: string[]): Promise<CareerFetch
         }
         const data = await res.json();
         const companyName = String(data.name || slugToTitleCase(board));
-        for (const job of (data.jobs || []).slice(0, 8)) {
-          const loc =
-            [job.city, job.country].filter(Boolean).join(', ') ||
-            (job.telecommuting ? 'Remote' : 'Flexible');
-          const applyUrl =
-            job.url ||
-            job.application_url ||
-            `https://apply.workable.com/${encodeURIComponent(board)}/j/${job.shortcode || job.id}/`;
-          results.push({
-            id: `workable_${board}_${job.shortcode || job.id}`,
-            title: String(job.title || ''),
-            company: companyName,
-            location: loc,
-            salary: 'Direct ATS Band',
-            description: stripHtml(
-              `${job.title} (${job.department || 'General'}) at ${companyName}. ${
-                job.telecommuting ? 'Remote eligible.' : ''
-              }`
-            ),
-            url: String(applyUrl),
-            source: 'Workable',
-          });
-        }
+        const rawList = (data.jobs || []).slice(0, 8);
+        await Promise.all(
+          rawList.map(async (job: any) => {
+            const loc =
+              [job.city, job.country].filter(Boolean).join(', ') ||
+              (job.telecommuting ? 'Remote' : 'Flexible');
+            const shortcode = job.shortcode || job.id;
+            const applyUrl =
+              job.url ||
+              job.application_url ||
+              `https://apply.workable.com/${encodeURIComponent(board)}/j/${shortcode}/`;
+
+            let fullDesc = '';
+            if (shortcode) {
+              try {
+                const detailRes = await fetch(
+                  `https://apply.workable.com/api/v3/accounts/${encodeURIComponent(board)}/jobs/${encodeURIComponent(String(shortcode))}`,
+                  { signal: AbortSignal.timeout(4500) }
+                );
+                if (detailRes.ok) {
+                  const detail = await detailRes.json();
+                  fullDesc = stripHtml(
+                    [detail.description, detail.requirements, detail.benefits]
+                      .filter(Boolean)
+                      .join(' ')
+                  );
+                }
+              } catch {
+                // Keep widget summary fallback
+              }
+            }
+
+            results.push({
+              id: `workable_${board}_${shortcode}`,
+              title: String(job.title || ''),
+              company: companyName,
+              location: loc,
+              salary: 'Direct ATS Band',
+              description: (
+                fullDesc ||
+                stripHtml(
+                  `${job.title} (${job.department || 'General'}) at ${companyName}. ${
+                    job.telecommuting ? 'Remote eligible.' : ''
+                  }`
+                )
+              ).substring(0, 12000),
+              url: String(applyUrl),
+              source: 'Workable',
+            });
+          })
+        );
       } catch (err) {
         failedBoards.push(`${board} (${(err as Error).message.slice(0, 24)})`);
       }
@@ -311,25 +332,57 @@ export async function fetchSmartRecruitersBoards(boards: string[]): Promise<Care
           return;
         }
         const data = await res.json();
-        for (const job of (data.content || []).slice(0, 8)) {
-          const companyName = String(job.company?.name || slugToTitleCase(board));
-          const loc =
-            [job.location?.city, job.location?.country].filter(Boolean).join(', ') ||
-            (job.location?.remote ? 'Remote' : 'Hybrid / On-site');
-          const applyUrl = `https://jobs.smartrecruiters.com/${encodeURIComponent(
-            job.company?.identifier || board
-          )}/${job.id}`;
-          results.push({
-            id: `smartrecruiters_${board}_${job.id}`,
-            title: String(job.name || ''),
-            company: companyName,
-            location: loc,
-            salary: 'Direct ATS Band',
-            description: `${job.name} in ${job.department?.label || 'Product & Tech'} at ${companyName}. Location: ${loc}.`,
-            url: applyUrl,
-            source: 'SmartRecruiters',
-          });
-        }
+        const rawList = (data.content || []).slice(0, 8);
+        await Promise.all(
+          rawList.map(async (job: any) => {
+            const companyName = String(job.company?.name || slugToTitleCase(board));
+            const loc =
+              [job.location?.city, job.location?.country].filter(Boolean).join(', ') ||
+              (job.location?.remote ? 'Remote' : 'Hybrid / On-site');
+            const companyIdentifier = job.company?.identifier || board;
+            const applyUrl = `https://jobs.smartrecruiters.com/${encodeURIComponent(
+              companyIdentifier
+            )}/${job.id}`;
+
+            let fullDesc = '';
+            try {
+              const detailRes = await fetch(
+                `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(companyIdentifier)}/postings/${encodeURIComponent(String(job.id))}`,
+                { signal: AbortSignal.timeout(4500) }
+              );
+              if (detailRes.ok) {
+                const detail = await detailRes.json();
+                const sections = detail?.jobAd?.sections || {};
+                fullDesc = stripHtml(
+                  [
+                    sections.companyDescription?.text,
+                    sections.jobDescription?.text,
+                    sections.qualifications?.text,
+                    sections.additionalInformation?.text,
+                  ]
+                    .filter(Boolean)
+                    .join(' ')
+                );
+              }
+            } catch {
+              // Keep metadata fallback
+            }
+
+            results.push({
+              id: `smartrecruiters_${board}_${job.id}`,
+              title: String(job.name || ''),
+              company: companyName,
+              location: loc,
+              salary: 'Direct ATS Band',
+              description: (
+                fullDesc ||
+                `${job.name} in ${job.department?.label || 'Product & Tech'} at ${companyName}. Location: ${loc}.`
+              ).substring(0, 12000),
+              url: applyUrl,
+              source: 'SmartRecruiters',
+            });
+          })
+        );
       } catch (err) {
         failedBoards.push(`${board} (${(err as Error).message.slice(0, 24)})`);
       }
@@ -375,7 +428,10 @@ export async function fetchRecruiteeBoards(boards: string[]): Promise<CareerFetc
                   job.max_salary ? ` - ${job.max_salary}` : ''
                 }`.trim()
               : 'Direct ATS Band',
-            description: stripHtml(job.description || `${job.title} at ${companyName}`).substring(0, 1200),
+            description: stripHtml(
+              [job.description, job.requirements].filter(Boolean).join(' ') ||
+                `${job.title} at ${companyName}`
+            ).substring(0, 12000),
             url: String(applyUrl),
             source: 'Recruitee',
           });
@@ -446,3 +502,60 @@ export async function fetchCompanyCareerPages(careerUrls: string[]): Promise<Car
 
   return { jobs: results, failedBoards, truncatedBoards };
 }
+
+/**
+ * Enriches candidate jobs that only carry short stub descriptions (e.g. career anchors or feed summaries)
+ * by fetching their SSRF-validated public apply/detail page HTML and extracting Schema.org JSON-LD or main text.
+ */
+export async function enrichThinJobDescriptions<T extends { description: string; url: string; company: string }>(
+  jobs: T[],
+  maxFetches = 10
+): Promise<T[]> {
+  let remaining = maxFetches;
+  await Promise.all(
+    jobs.map(async (job) => {
+      if ((job.description || '').trim().length >= 260) return;
+      if (remaining <= 0) return;
+      const check = validateSafePublicUrl(job.url, { allowLocalDev: false });
+      if (!check.ok || !check.url) return;
+      remaining -= 1;
+
+      try {
+        const res = await fetch(check.url.toString(), {
+          headers: {
+            'User-Agent': 'KaisifOS-CareerCrawler/1.0 (+https://github.com)',
+            Accept: 'text/html,application/xhtml+xml',
+          },
+          signal: AbortSignal.timeout(5500),
+        });
+        if (!res.ok) return;
+        const ctype = (res.headers.get('content-type') || '').toLowerCase();
+        if (ctype.includes('json')) {
+          const jData = await res.json().catch(() => null);
+          const candidateDesc = decodeAndStripHtml(
+            jData?.descriptionPlain || jData?.descriptionHtml || jData?.description || jData?.content || ''
+          );
+          if (candidateDesc.length > job.description.length) {
+            job.description = candidateDesc.substring(0, 12000);
+          }
+          return;
+        }
+        const html = await res.text();
+        const ld = extractJsonLdJobPostings(html, check.url.toString(), job.company);
+        if (ld.length > 0 && ld[0].description.length > job.description.length) {
+          job.description = ld[0].description.substring(0, 12000);
+          return;
+        }
+        const mainMatch = html.match(/<(?:main|article)[^>]*>([\s\S]*?)<\/(?:main|article)>/i);
+        const extracted = decodeAndStripHtml(mainMatch ? mainMatch[1] : html);
+        if (extracted.length > job.description.length) {
+          job.description = extracted.substring(0, 12000);
+        }
+      } catch {
+        // Keep existing stub silently
+      }
+    })
+  );
+  return jobs;
+}
+

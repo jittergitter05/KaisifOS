@@ -9,7 +9,9 @@ import {
   fetchWorkableBoards,
   fetchSmartRecruitersBoards,
   fetchRecruiteeBoards,
+  enrichThinJobDescriptions,
 } from './career-scraper';
+import { decodeAndStripHtml, evaluateHardEligibility } from './eligibility';
 import { deterministicEvaluateJob, evaluateRoleWithLLM } from './llm';
 import {
   appendCloudSeenJobIds,
@@ -73,13 +75,7 @@ const MAX_ATS_BOARDS_PER_PROVIDER = 12;
 const SWEEP_DEADLINE_MS = 42000;
 
 function stripHtml(html: string): string {
-  if (!html) return '';
-  return html
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return decodeAndStripHtml(html);
 }
 
 interface BoardFetchResult {
@@ -147,7 +143,7 @@ async function fetchRemoteOK(tags: string[]): Promise<RawScoutedJob[]> {
       salary: item.salary_min
         ? `$${item.salary_min} - $${item.salary_max || item.salary_min}`
         : 'Not listed',
-      description: stripHtml(item.description || '').substring(0, 1200),
+      description: stripHtml(item.description || '').substring(0, 12000),
       url: item.url || `https://remoteok.com/l/${item.slug}`,
       source: 'RemoteOK',
     }));
@@ -176,7 +172,7 @@ async function fetchRemotive(categories: string[], keywords: string[]): Promise<
             company: String(item.company_name || 'Unknown'),
             location: String(item.candidate_required_location || 'Remote / Worldwide'),
             salary: String(item.salary || 'Not listed'),
-            description: stripHtml(item.description || '').substring(0, 1200),
+            description: stripHtml(item.description || '').substring(0, 12000),
             url: String(item.url || ''),
             source: 'Remotive',
           });
@@ -205,7 +201,7 @@ async function fetchRemotive(categories: string[], keywords: string[]): Promise<
             company: String(item.company_name || 'Unknown'),
             location: String(item.candidate_required_location || 'Remote / Worldwide'),
             salary: String(item.salary || 'Not listed'),
-            description: stripHtml(item.description || '').substring(0, 1200),
+            description: stripHtml(item.description || '').substring(0, 12000),
             url: String(item.url || ''),
             source: 'Remotive',
           });
@@ -246,7 +242,7 @@ async function fetchHimalayas(): Promise<RawScoutedJob[]> {
       company: String(item.companyName || 'Unknown'),
       location: locs,
       salary: salStr,
-      description: stripHtml(item.description || item.excerpt || '').substring(0, 1200),
+      description: stripHtml(item.description || item.excerpt || '').substring(0, 12000),
       url: String(item.applicationLink || item.guid || ''),
       source: 'Himalayas',
     };
@@ -270,7 +266,7 @@ async function fetchArbeitnow(): Promise<RawScoutedJob[]> {
       company: String(item.company_name || 'Unknown'),
       location: `${item.location || 'Europe'}${item.remote ? ' (Remote / Visa Friendly)' : ''}`,
       salary: 'Standard EU Package',
-      description: stripHtml(item.description || '').substring(0, 1200),
+      description: stripHtml(item.description || '').substring(0, 12000),
       url: String(item.url || ''),
       source: 'Arbeitnow',
     };
@@ -289,7 +285,7 @@ async function fetchTheMuse(): Promise<RawScoutedJob[]> {
     company: String(item.company?.name || 'Unknown'),
     location: (item.locations || []).map((l: any) => l.name).join(', ') || 'Flexible / Remote',
     salary: 'Competitive',
-    description: stripHtml(item.contents || '').substring(0, 1200),
+    description: stripHtml(item.contents || '').substring(0, 12000),
     url: String(item.refs?.landing_page || ''),
     source: 'TheMuse',
   }));
@@ -322,7 +318,7 @@ async function fetchFreeHireOptionalApi(): Promise<RawScoutedJob[]> {
       company: String(item.company || 'FreeHire Partner'),
       location: String(item.location || 'Remote'),
       salary: String(item.salary || 'Not listed'),
-      description: stripHtml(item.description || '').substring(0, 1200),
+      description: stripHtml(item.description || '').substring(0, 12000),
       url: String(item.url || item.apply_url || ''),
       source: 'FreeHire API',
     };
@@ -347,14 +343,14 @@ async function fetchGreenhouseBoards(boards: string[]): Promise<BoardFetchResult
           return;
         }
         const data = await res.json();
-        for (const job of (data.jobs || []).slice(0, 6)) {
+        for (const job of (data.jobs || []).slice(0, 12)) {
           results.push({
             id: `greenhouse_${board}_${job.id}`,
             title: String(job.title || ''),
             company: board.charAt(0).toUpperCase() + board.slice(1),
             location: String(job.location?.name || 'Remote / Hybrid'),
             salary: 'Direct ATS Band',
-            description: stripHtml(job.content || `${job.title} at ${board}`).substring(0, 1200),
+            description: stripHtml(job.content || `${job.title} at ${board}`).substring(0, 12000),
             url: String(job.absolute_url || ''),
             source: 'Greenhouse',
           });
@@ -387,7 +383,7 @@ async function fetchLeverBoards(boards: string[]): Promise<BoardFetchResult> {
         }
         const data = await res.json();
         if (!Array.isArray(data)) return;
-        for (const job of data.slice(0, 5)) {
+        for (const job of data.slice(0, 10)) {
           results.push({
             id: `lever_${board}_${job.id}`,
             title: String(job.text || ''),
@@ -396,7 +392,7 @@ async function fetchLeverBoards(boards: string[]): Promise<BoardFetchResult> {
             salary: job.salaryRange
               ? `${job.salaryRange.min} - ${job.salaryRange.max} ${job.salaryRange.currency || 'USD'}`
               : 'Direct ATS Band',
-            description: stripHtml(job.descriptionPlain || job.description || '').substring(0, 1200),
+            description: stripHtml(job.descriptionPlain || job.description || '').substring(0, 12000),
             url: String(job.hostedUrl || ''),
             source: 'Lever',
           });
@@ -428,14 +424,14 @@ async function fetchAshbyBoards(boards: string[]): Promise<BoardFetchResult> {
           return;
         }
         const data = await res.json();
-        for (const job of (data.jobs || []).slice(0, 6)) {
+        for (const job of (data.jobs || []).slice(0, 12)) {
           results.push({
             id: `ashby_${board}_${job.id}`,
             title: String(job.title || ''),
             company: board.charAt(0).toUpperCase() + board.slice(1),
             location: String(job.location || 'Remote / Hybrid'),
             salary: 'Direct ATS Band',
-            description: stripHtml(job.descriptionHtml || `${job.title} at ${board}`).substring(0, 1200),
+            description: stripHtml(job.descriptionHtml || `${job.title} at ${board}`).substring(0, 12000),
             url: String(job.jobUrl || ''),
             source: 'Ashby',
           });
@@ -447,6 +443,107 @@ async function fetchAshbyBoards(boards: string[]): Promise<BoardFetchResult> {
   );
 
   return { jobs: results, failedBoards, truncatedBoards };
+}
+
+async function fetchInternshalaHyderabad(profile: CandidateProfile): Promise<RawScoutedJob[]> {
+  const jobs: RawScoutedJob[] = [];
+  const { internshalaSlugs } = deriveDynamicSearchParams(profile);
+  const rawCities = (profile.target_cities || [])
+    .map((c) => c.toLowerCase().replace('bengaluru', 'bangalore').trim())
+    .filter((c) => c && c !== 'remote');
+  const cities = rawCities.length > 0 ? rawCities : ['hyderabad'];
+  const seen = new Set<string>();
+
+  for (const category of internshalaSlugs.slice(0, 3)) {
+    for (const city of cities.slice(0, 2)) {
+      try {
+        const res = await fetch(`https://internshala.com/jobs/${category}-jobs/${city}-city/`, {
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+          signal: AbortSignal.timeout(7000),
+        });
+        if (!res.ok) continue;
+        const html = await res.text();
+        const nextMatch = html.match(
+          /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/
+        );
+        if (nextMatch) {
+          try {
+            const d = JSON.parse(nextMatch[1]);
+            const list =
+              d?.props?.pageProps?.jobs ||
+              d?.props?.pageProps?.data?.jobs ||
+              d?.props?.pageProps?.listings ||
+              [];
+            for (const item of list.slice(0, 10)) {
+              const title = String(item.profile || item.title || item.job_title || '').trim();
+              if (!title) continue;
+              const company = String(
+                item.company_name || item.employer_name || item.company || 'Unknown'
+              ).trim();
+              const id = `internshala_${item.id || item.job_id || `${category}_${city}_${company}_${title}`.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 48)}`;
+              if (seen.has(id)) continue;
+              seen.add(id);
+              const rawDesc = decodeAndStripHtml(
+                item.description || item.job_description || `${title} at ${company} in ${city}.`
+              );
+              jobs.push({
+                id,
+                title,
+                company,
+                location: String(item.location || city),
+                salary: String(item.salary || item.ctc || 'Not listed'),
+                description: rawDesc.substring(0, 12000),
+                url: item.url
+                  ? item.url.startsWith('http')
+                    ? item.url
+                    : `https://internshala.com${item.url}`
+                  : `https://internshala.com/jobs/${category}-jobs/${city}-city/`,
+                source: 'Internshala',
+              });
+            }
+            continue;
+          } catch {
+            // Fall through to HTML parsing
+          }
+        }
+
+        const parts = html.split('class="company generic_company');
+        for (let i = 1; i < parts.length && i <= 8; i++) {
+          const p = parts[i];
+          const hrefMatch = p.match(/class="job-title-href"[^>]*href="([^"]+)"[^>]*>\s*([^<]+)/);
+          if (!hrefMatch) continue;
+          const href = hrefMatch[1];
+          const title = decodeAndStripHtml(hrefMatch[2] || '').trim();
+          const company =
+            decodeAndStripHtml(
+              p.match(/class="company-name">\s*(?:<[^>]+>\s*)*([^<\n]+)/)?.[1] || ''
+            ).trim() || 'Unknown';
+          const rawId = href.match(/(\d+)$/)?.[1] || `${category}_${city}_${i}`;
+          const id = `internshala_${rawId}`;
+          if (title.length <= 3 || seen.has(id)) continue;
+          seen.add(id);
+          jobs.push({
+            id,
+            title,
+            company,
+            location: city,
+            salary: 'Not listed',
+            description: `${title} role at ${company}, ${city}. Via Internshala.`,
+            url: href.startsWith('http') ? href : `https://internshala.com${href}`,
+            source: 'Internshala',
+          });
+        }
+      } catch {
+        // Non-fatal per-city Internshala fetch error
+      }
+    }
+  }
+
+  return jobs;
 }
 
 /**
@@ -510,6 +607,7 @@ export async function executeLiveScoutRun(options?: {
   const cloudConfigured = isCloudSheetsConfigured();
 
   const [
+    internshalaJobs,
     careerPages,
     greenhouse,
     ashby,
@@ -526,6 +624,7 @@ export async function executeLiveScoutRun(options?: {
     ledgerData,
     seenJobIds,
   ] = await Promise.all([
+    timedFetch('Internshala', () => fetchInternshalaHyderabad(profile), sourceHealth),
     timedFetch('Company Career Pages', () => fetchCompanyCareerPages(careerUrls), sourceHealth),
     timedFetch('Greenhouse', () => fetchGreenhouseBoards(ghBoards), sourceHealth),
     timedFetch('Ashby', () => fetchAshbyBoards(ashbyBoards), sourceHealth),
@@ -557,6 +656,7 @@ export async function executeLiveScoutRun(options?: {
   }
 
   const rawCombined: RawScoutedJob[] = [
+    ...internshalaJobs,
     ...careerPages,
     ...freeHire,
     ...greenhouse,
@@ -606,19 +706,6 @@ export async function executeLiveScoutRun(options?: {
   }
 
   const candidateYears = profile.experience_years ?? 0;
-  const seniorBlockerRegex =
-    /\b(director|vp|vice president|principal|head of|chief|staff engineer)\b|\b([5-9]|1\d)\+?\s*years?\b/i;
-  const eligibilityFiltered =
-    candidateYears <= 1
-      ? unseen.filter(
-          (j) =>
-            !seniorBlockerRegex.test(j.title) &&
-            !(candidateYears === 0 && /\b(senior|sr\.?)\b/i.test(j.title))
-        )
-      : unseen;
-
-  const poolToRank = eligibilityFiltered.length > 0 ? eligibilityFiltered : unseen;
-
   const genericWords = new Set([
     'manager',
     'associate',
@@ -646,13 +733,66 @@ export async function executeLiveScoutRun(options?: {
       0
     );
 
-  const ranked = [...poolToRank].sort((a, b) => {
-    const aScore =
-      countTokenHits(a.title, roleTokens) * 3 + countTokenHits(a.description, roleTokens);
-    const bScore =
-      countTokenHits(b.title, roleTokens) * 3 + countTokenHits(b.description, roleTokens);
-    return bScore - aScore;
-  });
+  // Quick title-seniority pre-filter before network enrichment so we only fetch full JDs for plausible fresher roles
+  const titleSeniorBlockerRegex =
+    /\b(director|vp|vice president|principal|head of|chief|staff)\b/i;
+  const prelimToEnrich = [...unseen]
+    .filter((j) => {
+      if (candidateYears > 1) return true;
+      if (titleSeniorBlockerRegex.test(j.title)) return false;
+      if (candidateYears === 0 && /\b(senior|sr\.?)\b/i.test(j.title)) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      const targetCities = (profile.target_cities || []).map((c) => c.toLowerCase());
+      const aHubBoost = targetCities.some((c) => a.location.toLowerCase().includes(c)) ? 20 : 0;
+      const bHubBoost = targetCities.some((c) => b.location.toLowerCase().includes(c)) ? 20 : 0;
+      const aScore =
+        aHubBoost + countTokenHits(a.title, roleTokens) * 3 + countTokenHits(a.description, roleTokens);
+      const bScore =
+        bHubBoost + countTokenHits(b.title, roleTokens) * 3 + countTokenHits(b.description, roleTokens);
+      return bScore - aScore;
+    });
+
+  // Enrich thin/stub descriptions (career anchors, Internshala cards, etc.) before strict eligibility gating
+  if (Date.now() - sweepStartMs < SWEEP_DEADLINE_MS - 12000) {
+    await enrichThinJobDescriptions(prelimToEnrich.slice(0, 16), 10);
+  }
+
+  const rejectedIneligibleIds: string[] = [];
+  const eligibleCandidates: Array<{ job: RawScoutedJob; matchesTargetHub: boolean }> = [];
+
+  for (const j of unseen) {
+    const eligibility = evaluateHardEligibility(j, profile);
+    if (!eligibility.eligible) {
+      rejectedIneligibleIds.push(j.id);
+      continue;
+    }
+    eligibleCandidates.push({
+      job: j,
+      matchesTargetHub: eligibility.flags.matchesTargetHub,
+    });
+  }
+
+  if (unseen.length > 0 && eligibleCandidates.length === 0) {
+    warnings.push(
+      `All ${unseen.length} unseen postings were filtered out by strict ${(profile.target_cities || ['Hyderabad']).join('/')} & ${profile.experience_level} eligibility gates (US work-auth, STEM OPT, non-target metro remote, or senior experience requirements).`
+    );
+  }
+
+  const ranked = [...eligibleCandidates]
+    .sort((a, b) => {
+      const aScore =
+        (a.matchesTargetHub ? 25 : 0) +
+        countTokenHits(a.job.title, roleTokens) * 4 +
+        countTokenHits(a.job.description, roleTokens);
+      const bScore =
+        (b.matchesTargetHub ? 25 : 0) +
+        countTokenHits(b.job.title, roleTokens) * 4 +
+        countTokenHits(b.job.description, roleTokens);
+      return bScore - aScore;
+    })
+    .map((item) => item.job);
 
   const candidatesToScore = ranked.slice(0, maxToEvaluate);
   const committedJobs: ScoutRunSummary['committed_jobs'] = [];
@@ -778,12 +918,13 @@ export async function executeLiveScoutRun(options?: {
     }
   }
 
-  // Persist seen IDs so rejected < minScore jobs aren't re-evaluated in the next sweep
-  if (newlyEvaluatedIds.length > 0) {
-    appendLocalSeenJobIds(newlyEvaluatedIds);
+  // Persist seen IDs (both LLM-scored and eligibility-blocked) so rejected roles aren't re-evaluated in the next sweep
+  const allSeenToPersist = Array.from(new Set([...newlyEvaluatedIds, ...rejectedIneligibleIds]));
+  if (allSeenToPersist.length > 0) {
+    appendLocalSeenJobIds(allSeenToPersist);
     if (cloudConfigured) {
       try {
-        await appendCloudSeenJobIds(newlyEvaluatedIds);
+        await appendCloudSeenJobIds(allSeenToPersist);
       } catch {
         // Non-fatal
       }
@@ -791,6 +932,7 @@ export async function executeLiveScoutRun(options?: {
   }
 
   const sourcesQueried = [
+    'Internshala Jobs',
     'Company Career Pages',
     'Greenhouse Direct ATS',
     'Ashby Direct ATS',

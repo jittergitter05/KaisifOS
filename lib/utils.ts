@@ -421,11 +421,11 @@ export function deriveJobPillarBreakdown(job: { score: number; reasons?: string 
  * Extracts intro context plus high-signal requirements, experience, compensation,
  * and visa/location segments so LLM evaluation does not miss bottom-of-JD constraints.
  */
-export function extractHighSignalJdContext(description: string, maxLen = 2200): string {
+export function extractHighSignalJdContext(description: string, maxLen = 3500): string {
   const clean = (description || '').replace(/\s+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
   if (clean.length <= maxLen) return clean;
 
-  const introBudget = Math.min(650, Math.floor(maxLen * 0.32));
+  const introBudget = Math.min(800, Math.floor(maxLen * 0.28));
   const intro = clean.slice(0, introBudget);
   const rest = clean.slice(introBudget);
 
@@ -435,7 +435,7 @@ export function extractHighSignalJdContext(description: string, maxLen = 2200): 
     .filter((c) => c.length > 15);
 
   const highSignalRegex =
-    /\b(require|qualification|must have|experience|years?|yrs?|senior|junior|entry|fresher|salary|compensation|lpa|ctc|ote|equity|\$\d|₹\d|€\d|£\d|visa|sponsor|relocation|remote|hybrid|location|responsibilities|stack|skills?|bonus|stipend|package)\b/i;
+    /\b(require|qualification|must have|experience|years?|yrs?|senior|junior|entry|fresher|salary|compensation|lpa|ctc|ote|equity|\$\d|₹\d|€\d|£\d|visa|sponsor|sponsorship|opt|stem|authorization|authorized|citizen|reside|resident|metro|bay area|new york|nyc|seattle|san francisco|hyderabad|india|401k|401\(?k\)?|e-?verify|w-?2|pst|est|cet|travel|in-person|relocation|remote|hybrid|location|responsibilities|stack|skills?|bonus|stipend|package)\b/i;
 
   const priority = chunks.filter((c) => highSignalRegex.test(c));
   const selected: string[] = [];

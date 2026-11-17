@@ -34,9 +34,9 @@ export async function POST(req: NextRequest) {
     const job = {
       title: String(body.title || 'Associate Product Marketing Manager').trim().slice(0, 200),
       company: String(body.company || 'Raycast').trim().slice(0, 160),
-      location: String(body.location || 'Bengaluru / Remote').trim().slice(0, 160),
+      location: String(body.location || 'Hyderabad / Remote').trim().slice(0, 160),
       salary: String(body.salary || '₹12 LPA / $45,000 USD').trim().slice(0, 120),
-      description: String(body.description || '').trim().slice(0, 8000),
+      description: String(body.description || '').trim().slice(0, 12000),
     };
 
     const profile = await getCandidateProfileAsync();

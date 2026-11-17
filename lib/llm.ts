@@ -2,6 +2,11 @@ import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import Groq from 'groq-sdk';
 import { CandidateProfile } from './profile';
 import {
+  decodeAndStripHtml,
+  evaluateHardEligibility,
+  extractRequiredYearsStrict,
+} from './eligibility';
+import {
   extractHighSignalJdContext,
   parseLooseJSON,
   SKILL_SYNONYMS,
@@ -405,30 +410,7 @@ export async function generateStructuredJSONWithLLM<T = Record<string, unknown>>
  * non-requirement company age ("20 years in business", "15 years ago", etc.).
  */
 export function extractRequiredYearsFromText(fullText: string): number | null {
-  const nonReqYearsRegex =
-    /\b\d{1,2}\+?\s*years?\s+(?:in\s+business|of\s+history|old|ago|strong|legacy|founded|operating|market\s+presence)\b/gi;
-
-  const sentences = fullText.split(/[\n.!?;]+/);
-  let requiredYears: number | null = null;
-
-  for (const rawSentence of sentences) {
-    const s = rawSentence.trim();
-    if (!s) continue;
-    const cleaned = s.replace(nonReqYearsRegex, '');
-    const yearsMatches = [
-      ...cleaned.matchAll(
-        /(?:minimum|at\s+least|requires?|requiring|with|having)?\s*\b(\d{1,2})\s*(?:[-–to]+\s*(\d{1,2}))?\s*\+?\s*(?:years?|yrs?)\b/gi
-      ),
-    ];
-    for (const m of yearsMatches) {
-      const minY = parseInt(m[1], 10);
-      if (Number.isFinite(minY) && minY <= 25) {
-        requiredYears = requiredYears === null ? minY : Math.max(requiredYears, minY);
-      }
-    }
-  }
-
-  return requiredYears;
+  return extractRequiredYearsStrict(fullText);
 }
 
 /**
@@ -532,9 +514,18 @@ export function deterministicEvaluateJob(
   },
   profile: CandidateProfile
 ): JobEvaluationResult {
+  const cleanDescription = decodeAndStripHtml(job.description || '');
   const fullText =
-    `${job.title} ${job.description || ''} ${job.reasons || ''} ${job.location || ''} ${job.salary || ''}`.toLowerCase();
+    `${job.title} ${cleanDescription} ${job.reasons || ''} ${job.location || ''} ${job.salary || ''}`.toLowerCase();
   const titleLower = (job.title || '').toLowerCase();
+  const eligibility = evaluateHardEligibility(
+    {
+      title: job.title,
+      location: job.location,
+      description: cleanDescription,
+    },
+    profile
+  );
 
   // 1. Pillar 1: Role Affinity (0 - 40 pts) with synonym recognition
   let roleMatch = 8;
@@ -595,7 +586,7 @@ export function deterministicEvaluateJob(
   // 3. Pillar 3: Seniority & Experience Alignment (0 - 15 pts)
   const candidateYears = profile.experience_years ?? 0;
   const isFresher = candidateYears === 0;
-  const requiredYears = extractRequiredYearsFromText(fullText);
+  const requiredYears = eligibility.flags.requiredYears;
 
   const isExecutiveTitle =
     /\b(director|vp|vice president|principal|head of|chief|staff)\b/i.test(titleLower);
@@ -603,6 +594,7 @@ export function deterministicEvaluateJob(
 
   let seniorityMatch = 13;
   if (
+    eligibility.flags.seniorityBlocked ||
     isExecutiveTitle ||
     (isSeniorOrLeadTitle && candidateYears < 2) ||
     (requiredYears !== null && requiredYears >= candidateYears + 3)
@@ -625,39 +617,40 @@ export function deterministicEvaluateJob(
 
   // 4. Pillar 4: Location, Relocation & Compensation Fit (0 - 15 pts)
   const locLower = (job.location || '').toLowerCase();
-  const isTargetCity =
-    (profile.target_cities || []).some((c) => hasWholeToken(locLower, c.toLowerCase())) ||
-    /\b(bangalore|bengaluru|hyderabad|remote|worldwide|global|anywhere)\b/i.test(locLower);
+  const isTargetCity = eligibility.flags.matchesTargetHub;
+  const isIndiaAccessibleRemote = eligibility.flags.isIndiaAccessibleRemote;
   const isPreferredRegion =
+    Boolean(profile.open_to_relocation) &&
     (profile.relocation_preference?.preferred_regions || []).some((r) =>
       hasWholeToken(locLower, r.toLowerCase())
-    ) || /\b(dubai|uae|singapore|london|uk|europe|berlin|amsterdam)\b/i.test(locLower);
-
-  const forbidsVisa =
-    /no visa|no sponsorship|without sponsorship|us citizens only|must be authorized to work without/i.test(
-      fullText
     );
-  const hasReloSignal = /relocation|visa\s*sponsor|accommodation|housing|flight|sponsorship/i.test(
-    fullText
-  );
+
+  const hasReloSignal =
+    !eligibility.flags.workAuthBlocked &&
+    /relocation|visa\s*sponsor|accommodation|housing|flight|sponsorship/i.test(fullText);
 
   const salaryFitScore = evaluateSalaryFloorSignal(
     job.salary || '',
-    job.description || '',
+    cleanDescription,
     profile.min_salary_lpa || 8,
     profile.min_salary_usd_annual || 30000
   );
 
-  let compGeoMatch = 10;
-  if (forbidsVisa && !isTargetCity) {
-    compGeoMatch = 5;
-  } else if (isTargetCity || isPreferredRegion) {
+  let compGeoMatch = 7;
+  if (eligibility.flags.workAuthBlocked || eligibility.flags.geoBlocked) {
+    compGeoMatch = 2;
+  } else if (isTargetCity || isIndiaAccessibleRemote) {
     compGeoMatch = 13;
+  } else if (isPreferredRegion) {
+    compGeoMatch = 12;
   } else if (profile.open_to_relocation) {
     compGeoMatch = 11;
   }
-  if (hasReloSignal) compGeoMatch += 1;
-  compGeoMatch = Math.min(15, Math.max(2, compGeoMatch + salaryFitScore));
+  if (hasReloSignal && compGeoMatch > 2) compGeoMatch += 1;
+  compGeoMatch =
+    eligibility.flags.workAuthBlocked || eligibility.flags.geoBlocked
+      ? 2
+      : Math.min(15, Math.max(2, compGeoMatch + salaryFitScore));
 
   const canonicalSkills = [
     'SQL',
@@ -695,7 +688,11 @@ export function deterministicEvaluateJob(
     99,
     Math.max(12, roleMatch + skillMatch + seniorityMatch + compGeoMatch)
   );
-  const finalScore = seniorityMatch <= 5 ? Math.min(48, rawTotal) : rawTotal;
+  const finalScore = !eligibility.eligible
+    ? Math.min(32, rawTotal)
+    : seniorityMatch <= 5
+    ? Math.min(48, rawTotal)
+    : rawTotal;
 
   const topMetric = profile.key_metrics?.[0] || 'measurable product & growth impact';
   const secondMetric = profile.key_metrics?.[1] || 'end-to-end execution across core KPIs';
@@ -708,7 +705,9 @@ export function deterministicEvaluateJob(
   const peerBuilderDm = `Hey ${companyLabel} builders — saw the ${job.title} role. I recently shipped work resulting in ${topMetric} (${skillsStr}). Excited about what you're building and would welcome a quick chat.`;
 
   const confidenceLevel: DefendabilityAudit['confidence_level'] =
-    matchedSkills.length >= 3 && roleMatch >= 31
+    !eligibility.eligible
+      ? 'LOW'
+      : matchedSkills.length >= 3 && roleMatch >= 31
       ? 'HIGH'
       : matchedSkills.length >= 1 && roleMatch >= 22
       ? 'MEDIUM'
@@ -740,12 +739,13 @@ export function deterministicEvaluateJob(
           : `Seniority stretch or tenure mismatch (${seniorityMatch}/15 Seniority)`
       } · Location/Comp (${compGeoMatch}/15 Comp/Geo)`,
     ],
-    gap:
-      seniorityMatch <= 7
-        ? `Role lists multi-year tenure expectations; mitigate by leading immediately with ${secondMetric}.`
-        : salaryFitScore < 0
-        ? `Listed compensation falls below target floor; verify band before investing screening effort.`
-        : `Highlight quantitative funnel & systems ownership (${displaySkills.slice(0, 2).join(' + ')}) during screening.`,
+    gap: !eligibility.eligible
+      ? eligibility.reasons[0]
+      : seniorityMatch <= 7
+      ? `Role lists multi-year tenure expectations; mitigate by leading immediately with ${secondMetric}.`
+      : salaryFitScore < 0
+      ? `Listed compensation falls below target floor; verify band before investing screening effort.`
+      : `Highlight quantitative funnel & systems ownership (${displaySkills.slice(0, 2).join(' + ')}) during screening.`,
     dm_draft: warmFounderDm,
     outreach_tones: {
       warm_founder: warmFounderDm,
@@ -755,17 +755,26 @@ export function deterministicEvaluateJob(
     cold_email_subject: `${job.title} @ ${job.company} — ${topMetric}`,
     cold_email_body: `Hi ${job.company} team,\n\nI am ${profile.name}, reaching out regarding the ${job.title} role.\n\nSelected highlights from my recent work:\n• ${topMetric}\n• ${secondMetric}\n• Core stack: ${displaySkills.slice(0, 4).join(', ')}\n\nPortfolio & case studies: ${profile.portfolio}\n\nBest regards,\n${profile.name}`,
     resume_angle: `Lead summary with "${secondMetric}" and "${topMetric}", emphasizing ${skillsStr}`,
-    relocation_note: hasReloSignal
-      ? 'Explicit visa/relocation or housing support detected in specification'
-      : isTargetCity
-      ? 'Located in primary target hub / Remote — zero relocation friction'
-      : 'Standard cross-hub role — confirm relocation or remote flexibility in initial screen',
+    relocation_note:
+      eligibility.flags.workAuthBlocked || eligibility.flags.geoBlocked
+        ? eligibility.reasons[0]
+        : hasReloSignal
+        ? 'Explicit visa/relocation or housing support detected in specification'
+        : isTargetCity
+        ? `Located in primary target hub (${(profile.target_cities || []).join(', ')}) — zero relocation friction`
+        : isIndiaAccessibleRemote
+        ? 'Verified India / global remote eligibility with zero location restrictions'
+        : 'Outside target hubs — confirm location flexibility in initial screen',
     defendability: {
       verified_claims: [topMetric, ...matchedSkills.slice(0, 4)],
       inferred_transfers:
         matchedRoles.length > 0 ? [`Transferable execution into ${matchedRoles[0]}`] : [],
       unverified_gaps:
-        missingSkills.length > 0 ? missingSkills.slice(0, 3) : ['No unverified profile claims'],
+        !eligibility.eligible
+          ? eligibility.reasons.slice(0, 3)
+          : missingSkills.length > 0
+          ? missingSkills.slice(0, 3)
+          : ['No unverified profile claims'],
       confidence_level: confidenceLevel,
     },
     engine_used: 'Deterministic 4-Pillar Rubric v3.2',
@@ -809,8 +818,15 @@ export async function evaluateJobWithFreeChain(
   job: { title: string; company: string; location: string; salary: string; description: string },
   profile: CandidateProfile
 ): Promise<JobEvaluationResult> {
-  const baseline = deterministicEvaluateJob(job, profile);
-  const jdExcerpt = extractHighSignalJdContext(job.description, 2400);
+  const cleanDescription = decodeAndStripHtml(job.description || '');
+  const cleanedJob = { ...job, description: cleanDescription };
+  const eligibility = evaluateHardEligibility(cleanedJob, profile);
+  const baseline = deterministicEvaluateJob(cleanedJob, profile);
+  const jdExcerpt = extractHighSignalJdContext(cleanDescription, 3500);
+
+  const strictGeoInstruction = profile.open_to_relocation
+    ? `Candidate is open to relocation to ${profile.relocation_preference?.preferred_regions?.join(', ') || 'global hubs'} if sponsorship/relocation is viable; still penalize US/EU roles stating no sponsorship or STEM OPT exclusion.`
+    : `STRICT LOCATION RULE: Candidate requires ${profile.target_cities.join(', ')} or genuinely unrestricted India/Worldwide Remote. Assign comp_geo_match <= 2 and cap total score <= 32 if the JD requires US/UK/EU/CA work authorization, states no visa sponsorship / no STEM OPT, or states remote preference/residency/quarterly travel for NYC, Seattle, SF Bay Area, or non-target hubs.`;
 
   const prompt = `You are a technical recruiting intelligence system evaluating a job opening for ${profile.name}.
 Return ONLY valid JSON matching the exact schema below. No markdown fences.
@@ -839,13 +855,15 @@ ${jdExcerpt}
 4-PILLAR SCORING RUBRIC (Total 0-100 = sum of 4 pillars):
 - role_match (0-40): Alignment with target roles
 - skill_match (0-30): Overlap with candidate skills & proof metrics
-- seniority_match (0-15): Fit for ${profile.experience_level} (${profile.experience_years} yrs). Score <=5 if 3+ yrs or Senior/Director required for a 0-year candidate (caps total score at 48).
-- comp_geo_match (0-15): Target city, remote, relocation support, and salary floor fit.
+- seniority_match (0-15): Fit for ${profile.experience_level} (${profile.experience_years} yrs). Score <=5 if 2+ yrs or Senior/Lead/Director required for a 0-year candidate (caps total score at <=32/48).
+- comp_geo_match (0-15): ${strictGeoInstruction}
 
 Return JSON with exact evidence-first key order:
 {
   "required_experience_years_detected": number | null,
   "is_senior_or_lead_role": boolean,
+  "requires_non_india_work_auth_or_no_sponsorship": boolean,
+  "remote_restricted_to_non_target_region": boolean,
   "salary_detected": string,
   "location_or_visa_constraint": string,
   "matched_skills": string[],
@@ -907,7 +925,7 @@ Return JSON with exact evidence-first key order:
       0,
       15
     );
-    const comp_geo_match = clampNum(
+    let comp_geo_match = clampNum(
       rawSubs.comp_geo_match,
       baseline.subscores.comp_geo_match,
       0,
@@ -922,29 +940,39 @@ Return JSON with exact evidence-first key order:
     const candidateYears = profile.experience_years ?? 0;
     const llmFlaggedSeniorityBlocker =
       (parsed.is_senior_or_lead_role === true && candidateYears < 2) ||
-      (detectedReqYears !== null && detectedReqYears >= candidateYears + 3);
+      (detectedReqYears !== null && detectedReqYears >= (candidateYears === 0 ? 2 : candidateYears + 2));
+
+    const llmFlaggedGeoOrWorkAuthBlocker =
+      parsed.requires_non_india_work_auth_or_no_sponsorship === true ||
+      parsed.remote_restricted_to_non_target_region === true;
 
     if (baseline.subscores.seniority_match <= 5) {
       seniority_match = Math.min(seniority_match, baseline.subscores.seniority_match);
     } else if (llmFlaggedSeniorityBlocker) {
-      seniority_match = Math.min(seniority_match, 5);
+      seniority_match = Math.min(seniority_match, 3);
+    }
+
+    if (eligibility.flags.workAuthBlocked || eligibility.flags.geoBlocked || llmFlaggedGeoOrWorkAuthBlocker) {
+      comp_geo_match = Math.min(comp_geo_match, 2);
     }
 
     const subscoreSum = Math.min(
       100,
       Math.max(0, role_match + skill_match + seniority_match + comp_geo_match)
     );
-    const reconciledScore =
-      seniority_match <= 5 || baseline.subscores.seniority_match <= 5 || llmFlaggedSeniorityBlocker
-        ? Math.min(48, subscoreSum)
-        : subscoreSum;
+    const hardDisqualified = !eligibility.eligible || llmFlaggedGeoOrWorkAuthBlocker;
+    const reconciledScore = hardDisqualified
+      ? Math.min(32, subscoreSum)
+      : seniority_match <= 5 || baseline.subscores.seniority_match <= 5 || llmFlaggedSeniorityBlocker
+      ? Math.min(48, subscoreSum)
+      : subscoreSum;
 
     // Anti-hallucination verification on matched_skills against candidate profile AND job text
     const rawMatched = strArrOr(parsed.matched_skills, baseline.matched_skills).slice(0, 8);
     const verifiedMatched: string[] = [];
     const ungroundedTransfers: string[] = [];
     const profileCorpus = `${(profile.skills || []).join(' ')} ${(profile.key_metrics || []).join(' ')}`.toLowerCase();
-    const jobCorpus = `${job.title} ${job.description}`.toLowerCase();
+    const jobCorpus = `${job.title} ${cleanDescription}`.toLowerCase();
 
     for (const sk of rawMatched) {
       const inProfile =
@@ -978,6 +1006,12 @@ Return JSON with exact evidence-first key order:
       baseline.match_reasons
     );
 
+    const effectiveGap = !eligibility.eligible
+      ? eligibility.reasons[0]
+      : llmFlaggedGeoOrWorkAuthBlocker
+      ? strOr(parsed.location_or_visa_constraint, 'Blocked: Non-target geo or work-authorization restriction detected')
+      : strOr(parsed.gap, baseline.gap);
+
     return {
       score: reconciledScore,
       subscores: {
@@ -1001,7 +1035,7 @@ Return JSON with exact evidence-first key order:
         ])
       ).slice(0, 4),
       match_reasons: matchReasons,
-      gap: strOr(parsed.gap, baseline.gap),
+      gap: effectiveGap,
       dm_draft: strOr(parsed.dm_draft, warmFounder),
       outreach_tones: {
         warm_founder: warmFounder,
@@ -1011,7 +1045,10 @@ Return JSON with exact evidence-first key order:
       cold_email_subject: strOr(parsed.cold_email_subject, baseline.cold_email_subject),
       cold_email_body: strOr(parsed.cold_email_body, baseline.cold_email_body),
       resume_angle: strOr(parsed.resume_angle, baseline.resume_angle),
-      relocation_note: strOr(parsed.relocation_note, baseline.relocation_note),
+      relocation_note:
+        eligibility.flags.workAuthBlocked || eligibility.flags.geoBlocked
+          ? eligibility.reasons[0]
+          : strOr(parsed.relocation_note, baseline.relocation_note),
       defendability: {
         verified_claims: strArrOr(
           rawDef.verified_claims,

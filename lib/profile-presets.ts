@@ -61,7 +61,7 @@ export const PROFILE_PRESET_METADATA: ProfilePresetMetadata[] = [
   {
     key: 'pm_growth',
     label: 'Product & Growth',
-    desc: 'APM, PMM & Growth · Bengaluru / Global Relo',
+    desc: 'APM, PMM & Growth · Hyderabad / Fresher-Only',
   },
   {
     key: 'swe_ai',
@@ -95,17 +95,21 @@ export const FORK_PROFILE_TEMPLATES: Record<string, CandidateProfile> = {
       'Growth Marketing Analyst',
       'Marketing Operations Analyst',
     ],
-    target_cities: ['Hyderabad', 'Bengaluru'],
-    open_to_relocation: true,
+    target_cities: ['Hyderabad'],
+    open_to_relocation: false,
     relocation_preference: {
-      willing: true,
+      willing: false,
       requirements: [
-        'relocation package OR accommodation provided OR housing allowance',
-        'visa sponsorship if outside India',
-        'competitive salary for location (min $30k USD equivalent abroad OR ₹8 LPA India)',
+        'Hyderabad on-site/hybrid OR explicitly India-accessible remote with zero US residency/sponsorship blocks',
+        'Fresher / Entry-Level (0–1 years experience)',
+        'Minimum ₹8 LPA India or $30k USD equivalent abroad',
       ],
-      preferred_regions: ['UAE', 'Singapore', 'UK', 'Europe', 'Southeast Asia', 'India'],
-      avoid: ['unpaid', 'self-sponsored visa only with no support'],
+      preferred_regions: ['Hyderabad', 'India Remote'],
+      avoid: [
+        'unpaid',
+        'US-only / NYC / SF / Seattle metro preference',
+        'requires US work authorization / no STEM OPT / no sponsorship',
+      ],
     },
     min_salary_lpa: 8,
     min_salary_usd_annual: 30000,

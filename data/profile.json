@@ -13,28 +13,24 @@
     "Marketing Operations Analyst"
   ],
   "target_cities": [
-    "Hyderabad",
-    "Bengaluru"
+    "Hyderabad"
   ],
-  "open_to_relocation": true,
+  "open_to_relocation": false,
   "relocation_preference": {
-    "willing": true,
+    "willing": false,
     "requirements": [
-      "relocation package OR accommodation provided OR housing allowance",
-      "visa sponsorship if outside India",
-      "competitive salary for location (min $30k USD equivalent abroad OR ₹8 LPA India)"
+      "Hyderabad on-site/hybrid OR explicitly India-accessible / worldwide remote with zero US-only residency or sponsorship barriers",
+      "Fresher / Entry-Level (0–1 years experience)",
+      "Minimum ₹8 LPA India or $30k USD equivalent abroad"
     ],
     "preferred_regions": [
-      "UAE",
-      "Singapore",
-      "UK",
-      "Europe",
-      "Southeast Asia",
-      "India"
+      "Hyderabad",
+      "India Remote"
     ],
     "avoid": [
       "unpaid",
-      "self-sponsored visa only with no support"
+      "US-only / NYC / SF / Seattle metro preference",
+      "requires US work authorization / no STEM OPT / no sponsorship"
     ]
   },
   "min_salary_lpa": 8,
