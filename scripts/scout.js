@@ -14,6 +14,7 @@ import {
 import {
   isNeonPostgresConfigured,
   getNeonCanonicalStateMap,
+  getNeonJobsPendingLlmRetry,
   upsertNeonCanonicalJob,
   readNeonCandidateProfile,
   writeNeonCandidateProfile,
@@ -495,18 +496,26 @@ async function loadProfileForCli(sheets, auth, fallbackPath) {
 
   if (isNeonPostgresConfigured()) {
     try {
-      const neonRes = await readNeonCandidateProfile();
-      if (neonRes?.profile && typeof neonRes.profile === 'object') {
-        const merged = { ...localProfile, ...neonRes.profile };
-        if (localProfile.open_to_relocation === false) {
-          merged.open_to_relocation = false;
-          if (merged.relocation_preference) merged.relocation_preference.willing = false;
-        }
-        console.log('[Scout] Loaded active candidate profile from Neon Postgres candidate_profiles.');
+      const neonProfile = await readNeonCandidateProfile();
+      if (
+        neonProfile &&
+        typeof neonProfile === 'object' &&
+        Array.isArray(neonProfile.target_roles) &&
+        neonProfile.target_roles.length > 0
+      ) {
+        const merged = {
+          ...localProfile,
+          ...neonProfile,
+          ats_companies: {
+            ...localProfile.ats_companies,
+            ...(neonProfile.ats_companies || {}),
+          },
+        };
+        console.log('[Scout] Loaded active candidate profile from Neon Postgres kaisifos_profile.');
         return merged;
       } else {
         await writeNeonCandidateProfile(localProfile);
-        console.log('[Scout] Seeded Neon Postgres candidate_profiles from local data/profile.json.');
+        console.log('[Scout] Seeded Neon Postgres kaisifos_profile from local data/profile.json.');
         return localProfile;
       }
     } catch (err) {
@@ -614,82 +623,107 @@ export async function fetchInternshalaJobs(profile) {
     'Accept-Language': 'en-US,en;q=0.9',
   };
 
+  const seen = new Set();
+  const targets = [];
   for (const category of internshalaSlugs.slice(0, 4)) {
     for (const city of cities.slice(0, 2)) {
-      try {
-        const url = `https://internshala.com/jobs/${category}-jobs/${city}-city/`;
-        const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
-        if (!res.ok) {
-          await delay(800);
-          continue;
-        }
-        const html = await res.text();
+      targets.push({
+        url: `https://internshala.com/jobs/${category}-jobs/${city}-city/`,
+        label: `${category}/${city}`,
+        defaultLoc: city,
+      });
+    }
+  }
+  if (internshalaSlugs[0]) {
+    targets.push({
+      url: `https://internshala.com/jobs/work-from-home-${internshalaSlugs[0]}-jobs/`,
+      label: `wfh/${internshalaSlugs[0]}`,
+      defaultLoc: 'India Remote (WFH)',
+    });
+  }
 
-        const nextMatch = html.match(
-          /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/
-        );
-        if (nextMatch) {
-          try {
-            const d = JSON.parse(nextMatch[1]);
-            const list =
-              d?.props?.pageProps?.jobs ||
-              d?.props?.pageProps?.data?.jobs ||
-              d?.props?.pageProps?.listings ||
-              [];
-            for (const job of list.slice(0, 8)) {
-              const title = job.profile || job.title || job.job_title || '';
-              const company = job.company_name || job.employer_name || job.company || 'Unknown';
-              const fallbackId = `${category}_${company}_${title}`.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 48);
-              const id = `internshala_${job.id || job.job_id || fallbackId}`;
-              const desc = stripHtmlTags(
-                job.description || job.job_description || `${title} at ${company} in ${city}.`
-              ).trim();
-              const link = job.url
-                ? `https://internshala.com${job.url}`
-                : `https://internshala.com/jobs/${category}-jobs/`;
-              if (title) {
-                jobs.push({
-                  id,
-                  title,
-                  company: { display_name: company },
-                  description: desc.substring(0, 12000),
-                  redirect_url: link,
-                  location: city,
-                });
-              }
-            }
-            await delay(800);
-            continue;
-          } catch (_) {}
-        }
+  for (const target of targets) {
+    try {
+      const res = await fetch(target.url, { headers, signal: AbortSignal.timeout(8000) });
+      if (!res.ok) {
+        console.warn(`[Internshala] HTTP ${res.status} for ${target.label}`);
+        await delay(600);
+        continue;
+      }
+      const html = await res.text();
 
-        const parts = html.split('class="company generic_company');
-        for (let i = 1; i < parts.length && i <= 8; i++) {
-          const p = parts[i];
-          const hrefMatch = p.match(/class="job-title-href"[^>]*href="([^"]+)"[^>]*>\s*([^<]+)/);
-          if (!hrefMatch) continue;
-          const href = hrefMatch[1];
-          const title = hrefMatch[2].trim();
-          const company =
-            p.match(/class="company-name">\s*(?:<[^>]+>\s*)*([^<\n]+)/)?.[1]?.trim() || 'Unknown';
-          const rawId = href.match(/(\d+)$/)?.[1] || `${category}_${city}_${i}`;
-          if (title.length > 3) {
+      const nextMatch = html.match(
+        /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/
+      );
+      if (nextMatch) {
+        try {
+          const d = JSON.parse(nextMatch[1]);
+          const list =
+            d?.props?.pageProps?.jobs ||
+            d?.props?.pageProps?.data?.jobs ||
+            d?.props?.pageProps?.listings ||
+            [];
+          for (const job of list.slice(0, 8)) {
+            const title = job.profile || job.title || job.job_title || '';
+            const company = job.company_name || job.employer_name || job.company || 'Unknown';
+            const fallbackId = `${target.label}_${company}_${title}`
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, '_')
+              .slice(0, 48);
+            const id = `internshala_${job.id || job.job_id || fallbackId}`;
+            if (!title || seen.has(id)) continue;
+            seen.add(id);
+            const desc = stripHtmlTags(
+              job.description || job.job_description || `${title} at ${company} (${target.defaultLoc}).`
+            ).trim();
+            const link = job.url
+              ? job.url.startsWith('http')
+                ? job.url
+                : `https://internshala.com${job.url}`
+              : target.url;
             jobs.push({
-              id: `internshala_${rawId}`,
+              id,
               title,
               company: { display_name: company },
-              description: `${title} role at ${company}, ${city}. Via Internshala.`,
-              redirect_url: href.startsWith('http') ? href : `https://internshala.com${href}`,
-              location: city,
-              has_relocation: false,
+              description: desc.substring(0, 12000),
+              redirect_url: link,
+              location: job.location || target.defaultLoc,
             });
           }
-        }
-      } catch (err) {
-        console.warn(`[Internshala] Error ${category}/${city}:`, err.message);
+          await delay(700);
+          continue;
+        } catch (_) {}
       }
-      await delay(900);
+
+      const parts = html.split('class="company generic_company');
+      for (let i = 1; i < parts.length && i <= 8; i++) {
+        const p = parts[i];
+        const hrefMatch = p.match(/class="job-title-href"[^>]*href="([^"]+)"[^>]*>\s*([^<]+)/);
+        if (!hrefMatch) continue;
+        const href = hrefMatch[1];
+        const title = stripHtmlTags(hrefMatch[2]).trim();
+        const company =
+          stripHtmlTags(p.match(/class="company-name">\s*(?:<[^>]+>\s*)*([^<\n]+)/)?.[1] || '').trim() ||
+          'Unknown';
+        const rawId = href.match(/(\d+)$/)?.[1] || `${target.label}_${i}`;
+        const id = `internshala_${rawId}`;
+        if (title.length > 3 && !seen.has(id)) {
+          seen.add(id);
+          jobs.push({
+            id,
+            title,
+            company: { display_name: company },
+            description: `${title} role at ${company}, ${target.defaultLoc}. Via Internshala.`,
+            redirect_url: href.startsWith('http') ? href : `https://internshala.com${href}`,
+            location: target.defaultLoc,
+            has_relocation: false,
+          });
+        }
+      }
+    } catch (err) {
+      console.warn(`[Internshala] Error ${target.label}:`, err.message);
     }
+    await delay(800);
   }
   console.log(`[Internshala] Total: ${jobs.length}`);
   return jobs;
@@ -1017,52 +1051,54 @@ export async function fetchFreeHireAtsJobs(profile) {
               scorePostingForBoardSlice(a.title, [a.city, a.country].filter(Boolean).join(', '))
           )
           .slice(0, 10);
-        for (const item of sorted) {
-          const loc =
-            [item.city, item.country].filter(Boolean).join(', ') ||
-            (item.telecommuting ? 'Remote' : 'Flexible');
-          const shortcode = item.shortcode || item.id;
-          const applyUrl =
-            item.url ||
-            item.application_url ||
-            `https://apply.workable.com/${encodeURIComponent(slug)}/j/${shortcode}/`;
-          let fullDesc = '';
-          if (shortcode) {
-            try {
-              const detailRes = await fetch(
-                `https://apply.workable.com/api/v3/accounts/${encodeURIComponent(slug)}/jobs/${encodeURIComponent(String(shortcode))}`,
-                { signal: AbortSignal.timeout(4500) }
-              );
-              if (detailRes.ok) {
-                const detail = await detailRes.json();
-                fullDesc = decodeAndStripHtml(
-                  [detail.description, detail.requirements, detail.benefits].filter(Boolean).join(' ')
+        await Promise.allSettled(
+          sorted.map(async (item) => {
+            const loc =
+              [item.city, item.country].filter(Boolean).join(', ') ||
+              (item.telecommuting ? 'Remote' : 'Flexible');
+            const shortcode = item.shortcode || item.id;
+            const applyUrl =
+              item.url ||
+              item.application_url ||
+              `https://apply.workable.com/${encodeURIComponent(slug)}/j/${shortcode}/`;
+            let fullDesc = '';
+            if (shortcode) {
+              try {
+                const detailRes = await fetch(
+                  `https://apply.workable.com/api/v3/accounts/${encodeURIComponent(slug)}/jobs/${encodeURIComponent(String(shortcode))}`,
+                  { signal: AbortSignal.timeout(4500) }
                 );
-              }
-            } catch (_) {}
-          }
-          const finalDesc = (
-            fullDesc ||
-            `${item.title} (${item.department || 'General'}) at ${companyName}. ${
-              item.telecommuting ? 'Remote eligible.' : ''
-            }`
-          ).substring(0, 12000);
-          jobs.push({
-            id: `workable_${slug}_${shortcode}`,
-            title: item.title,
-            company: { display_name: companyName },
-            description: finalDesc,
-            redirect_url: applyUrl,
-            location: loc,
-            has_relocation: /relocation|visa\s*sponsor|sponsorship/i.test(finalDesc),
-            source_label: 'Workable',
-          });
-        }
+                if (detailRes.ok) {
+                  const detail = await detailRes.json();
+                  fullDesc = decodeAndStripHtml(
+                    [detail.description, detail.requirements, detail.benefits].filter(Boolean).join(' ')
+                  );
+                }
+              } catch (_) {}
+            }
+            const finalDesc = (
+              fullDesc ||
+              `${item.title} (${item.department || 'General'}) at ${companyName}. ${
+                item.telecommuting ? 'Remote eligible.' : ''
+              }`
+            ).substring(0, 12000);
+            jobs.push({
+              id: `workable_${slug}_${shortcode}`,
+              title: item.title,
+              company: { display_name: companyName },
+              description: finalDesc,
+              redirect_url: applyUrl,
+              location: loc,
+              has_relocation: /relocation|visa\s*sponsor|sponsorship/i.test(finalDesc),
+              source_label: 'Workable',
+            });
+          })
+        );
       } catch (_) {}
     })
   );
 
-  // 4F. SmartRecruiters Public Postings API + detail fetch (pre-sorted before slice)
+  // 4F. SmartRecruiters Public Postings API + detail fetch (pre-sorted before slice, parallelized)
   const srBoards = (atsConfig.smartrecruiters || []).slice(0, 12);
   await Promise.allSettled(
     srBoards.map(async (slug) => {
@@ -1086,51 +1122,53 @@ export async function fetchFreeHireAtsJobs(profile) {
               )
           )
           .slice(0, 10);
-        for (const item of sorted) {
-          const companyName = item.company?.name || slug;
-          const companyIdentifier = item.company?.identifier || slug;
-          const loc =
-            [item.location?.city, item.location?.country].filter(Boolean).join(', ') ||
-            (item.location?.remote ? 'Remote' : 'Hybrid');
-          const applyUrl = `https://jobs.smartrecruiters.com/${encodeURIComponent(
-            companyIdentifier
-          )}/${item.id}`;
-          let fullDesc = '';
-          try {
-            const detailRes = await fetch(
-              `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(companyIdentifier)}/postings/${encodeURIComponent(String(item.id))}`,
-              { signal: AbortSignal.timeout(4500) }
-            );
-            if (detailRes.ok) {
-              const detail = await detailRes.json();
-              const sections = detail?.jobAd?.sections || {};
-              fullDesc = decodeAndStripHtml(
-                [
-                  sections.companyDescription?.text,
-                  sections.jobDescription?.text,
-                  sections.qualifications?.text,
-                  sections.additionalInformation?.text,
-                ]
-                  .filter(Boolean)
-                  .join(' ')
+        await Promise.allSettled(
+          sorted.map(async (item) => {
+            const companyName = item.company?.name || slug;
+            const companyIdentifier = item.company?.identifier || slug;
+            const loc =
+              [item.location?.city, item.location?.country].filter(Boolean).join(', ') ||
+              (item.location?.remote ? 'Remote' : 'Hybrid');
+            const applyUrl = `https://jobs.smartrecruiters.com/${encodeURIComponent(
+              companyIdentifier
+            )}/${item.id}`;
+            let fullDesc = '';
+            try {
+              const detailRes = await fetch(
+                `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(companyIdentifier)}/postings/${encodeURIComponent(String(item.id))}`,
+                { signal: AbortSignal.timeout(4500) }
               );
-            }
-          } catch (_) {}
-          const finalDesc = (
-            fullDesc ||
-            `${item.name} in ${item.department?.label || 'Product & Tech'} at ${companyName}. Location: ${loc}.`
-          ).substring(0, 12000);
-          jobs.push({
-            id: `smartrecruiters_${slug}_${item.id}`,
-            title: item.name,
-            company: { display_name: companyName },
-            description: finalDesc,
-            redirect_url: applyUrl,
-            location: loc,
-            has_relocation: /relocation|visa\s*sponsor|sponsorship/i.test(finalDesc),
-            source_label: 'SmartRecruiters',
-          });
-        }
+              if (detailRes.ok) {
+                const detail = await detailRes.json();
+                const sections = detail?.jobAd?.sections || {};
+                fullDesc = decodeAndStripHtml(
+                  [
+                    sections.companyDescription?.text,
+                    sections.jobDescription?.text,
+                    sections.qualifications?.text,
+                    sections.additionalInformation?.text,
+                  ]
+                    .filter(Boolean)
+                    .join(' ')
+                );
+              }
+            } catch (_) {}
+            const finalDesc = (
+              fullDesc ||
+              `${item.name} in ${item.department?.label || 'Product & Tech'} at ${companyName}. Location: ${loc}.`
+            ).substring(0, 12000);
+            jobs.push({
+              id: `smartrecruiters_${slug}_${item.id}`,
+              title: item.name,
+              company: { display_name: companyName },
+              description: finalDesc,
+              redirect_url: applyUrl,
+              location: loc,
+              has_relocation: /relocation|visa\s*sponsor|sponsorship/i.test(finalDesc),
+              source_label: 'SmartRecruiters',
+            });
+          })
+        );
       } catch (_) {}
     })
   );
@@ -1278,16 +1316,25 @@ export async function fetchFreeHireAtsJobs(profile) {
               continue;
             }
             seenHrefs.add(absUrl);
+            const matchIdx = m.index ?? 0;
+            const snippet = stripHtmlTags(
+              html.slice(Math.max(0, matchIdx - 180), Math.min(html.length, matchIdx + m[0].length + 220))
+            );
+            const cityMatch = snippet.match(
+              /\b(Hyderabad|Telangana|Bengaluru|Bangalore|Mumbai|Delhi|NCR|Gurugram|Gurgaon|Noida|Pune|Chennai|India|Remote(?:\s*\/\s*Hybrid)?|Hybrid)\b/i
+            );
+            const inferredLoc = cityMatch ? cityMatch[1] : 'Direct Career Portal';
             const slug = `${host}_${label}_${anchorCount}`.replace(/[^a-z0-9]+/gi, '_').slice(0, 48);
             anchorCount++;
             jobs.push({
               id: `career_${slug}`,
               title: label,
               company: { display_name: companyTitle },
-              description: `${label} listed on ${companyTitle} official careers portal (${absUrl}).`,
+              description: `${label} listed on ${companyTitle} official careers portal (${inferredLoc} · ${absUrl}).`,
               redirect_url: absUrl,
-              location: 'Direct Career Portal',
+              location: inferredLoc,
               has_relocation: false,
+              source_label: 'Company Career Page',
             });
             if (anchorCount >= 8) break;
           }
@@ -1871,14 +1918,15 @@ async function sendDiscordDigest(matches, portfolioUrl, totalScanned, weeklyStat
 
   const date = new Date().toISOString().split('T')[0];
   let content = `📋 **JOB SCOUT DIGEST (${profileName}) — ${date}**\n`;
-  content += `Scanned **${totalScanned}** roles across Official Career Pages, 6 Direct-ATS & Remote Feeds · **${matches.length}** matched ≥90\n`;
+  content += `Evaluated **${totalScanned}** roles across Official Career Pages, 6 Direct-ATS & Remote Feeds · **${matches.length}** high-fit matches committed\n`;
   if (process.env.APP_URL) {
     content += `🖥️ Full Digest Ledger: ${process.env.APP_URL.replace(/\/$/, '')}/admin/digest\n`;
   }
   content += `───────────────────────────────\n`;
 
-  if (matches.length > 0) {
-    matches.forEach((m, idx) => {
+  const previewMatches = matches.slice(0, 8);
+  if (previewMatches.length > 0) {
+    previewMatches.forEach((m, idx) => {
       let domain = 'Direct ATS';
       try {
         if (m.job.redirect_url) domain = new URL(m.job.redirect_url).hostname.replace('www.', '');
@@ -1897,7 +1945,7 @@ async function sendDiscordDigest(matches, portfolioUrl, totalScanned, weeklyStat
       content += `${applyLine}\n`;
     });
   } else {
-    content += `\n_No roles crossed 90 today._\nSources: Company Career Pages + Greenhouse/Lever/Ashby/Workable/SmartRecruiters/Recruitee + Internshala + RemoteOK + Remotive + Arbeitnow\n`;
+    content += `\n_No roles crossed the high-conviction score threshold today._\nSources: Company Career Pages + Greenhouse/Lever/Ashby/Workable/SmartRecruiters/Recruitee + Internshala + RemoteOK + Remotive + Arbeitnow\n`;
   }
 
   if (weeklyStats) {
@@ -1978,6 +2026,14 @@ async function main() {
       ...rawHimalayas,
       ...rawJSearch,
     ];
+    const sourceCounts = {
+      FreeHire: rawFreeHire.length,
+      Internshala: rawInternshala.length,
+      RemoteOK: rawRemoteOK.length,
+      Remotive: rawRemotive.length,
+      Himalayas: rawHimalayas.length,
+      JSearch: rawJSearch.length,
+    };
     console.log(
       `[Scout] Raw: ${rawJobs.length} (FreeHire ATS: ${rawFreeHire.length} | Internshala: ${rawInternshala.length} | RemoteOK: ${rawRemoteOK.length} | Remotive: ${rawRemotive.length} | Himalayas: ${rawHimalayas.length} | JSearch: ${rawJSearch.length})`
     );
@@ -2026,6 +2082,7 @@ async function main() {
       if (neonState) {
         // Re-evaluate if previous run failed LLM scoring (needs_llm_retry = true)
         if (!neonState.needsLlmRetry) continue;
+        job.fromRetryQueue = true;
       } else if (
         seenIds.has(String(job.id)) ||
         seenIds.has(cKey) ||
@@ -2035,13 +2092,43 @@ async function main() {
       }
       newJobs.push(job);
     }
+
+    // Drain any Neon jobs stuck in needs_llm_retry = true even if absent from today's fresh scrape
+    if (neonConfigured) {
+      const queuedRetryJobs = await getNeonJobsPendingLlmRetry(8).catch(() => []);
+      for (const qJob of queuedRetryJobs) {
+        if (!qJob.canonicalKey || dedupedByCanonical.has(qJob.canonicalKey)) continue;
+        newJobs.push({
+          id: qJob.id,
+          canonicalKey: qJob.canonicalKey,
+          title: qJob.title,
+          company: { display_name: qJob.company || 'Unknown' },
+          location: qJob.location || 'Hyderabad',
+          description: qJob.description || `${qJob.title} at ${qJob.company}`,
+          redirect_url: qJob.url || '',
+          sourcesSeen: qJob.sourcesSeen || [],
+          fromRetryQueue: true,
+        });
+      }
+    }
+
     console.log(
-      `[Scout] After canonical dedup (${canonicalDuplicatesMerged} cross-source duplicates merged) + state filter: ${newJobs.length} candidate jobs.`
+      `[Scout] After canonical dedup (${canonicalDuplicatesMerged} cross-source duplicates merged) + retry drain: ${newJobs.length} candidate jobs.`
     );
 
-    // Role relevance filter: match target_roles or high-signal PM/PMM/Growth/Founder/Analyst terms, excluding retail/offline "Marketing Executive" or "Werkstudent"
-    const whitelistRegex =
+    // Dynamic role relevance filter derived from profile.target_roles + PM/Growth/Tech domain terms
+    const profileRolesText = (profile.target_roles || []).join(' ').toLowerCase();
+    const genericRoleStop = new Set(['manager', 'associate', 'lead', 'analyst', 'engineer', 'developer', 'team', 'staff']);
+    const profileRoleTokens = Array.from(
+      new Set(profileRolesText.split(/\W+/).filter((w) => w.length >= 3 && !genericRoleStop.has(w)))
+    );
+    const isPmGrowthTrack = /product|marketing|growth|founder|content/i.test(profileRolesText);
+    const isTechDataTrack = /software|engineer|developer|data|ml|ai|scientist/i.test(profileRolesText);
+
+    const pmDomainRegex =
       /\b(product\s+manager|associate\s+product|apm|product\s+marketing|pmm|growth|founder'?s?\s+associate|founder'?s?\s+office|chief\s+of\s+staff|product\s+analyst|marketing\s+operations|marketing\s+analyst|digital\s+marketing|digital\s+content|gtm)\b/i;
+    const techDomainRegex =
+      /\b(software|full[- ]stack|frontend|backend|ai|ml|machine\s+learning|data\s+scientist|data\s+analyst|analytics\s+engineer|founding\s+engineer)\b/i;
 
     const titleSeniorityRegex =
       /\b(senior|sr\.?|director|vp|vice president|head of|chief|principal|staff)\b/i;
@@ -2058,7 +2145,13 @@ async function main() {
       const title = job.title || '';
       const cleanDesc = decodeAndStripHtml(job.description || '');
       job.description = cleanDesc.substring(0, 12000);
-      const matchesRole = whitelistRegex.test(title);
+
+      const exactTokenMatch = profileRoleTokens.some((tok) => hasWholeToken(title, tok));
+      const domainMatch =
+        (isPmGrowthTrack && pmDomainRegex.test(title)) ||
+        (isTechDataTrack && techDomainRegex.test(title));
+      const matchesRole = exactTokenMatch || domainMatch || profileRoleTokens.length === 0;
+
       const hitsSeniorTitle =
         expYears <= 1 &&
         (titleSeniorityRegex.test(title) || (expYears === 0 && fresherLeadRegex.test(title)));
@@ -2212,9 +2305,9 @@ async function main() {
           queuedForRetryCount += 1;
         }
 
-        // Persist to Neon Postgres (both high matches and DETERMINISTIC_ONLY retry candidates)
+        // Persist to Neon Postgres (high matches, retry candidates, and retry-queue jobs that finished LLM scoring)
         const qualifiesForCommit = isDeterministicFallback ? score >= 72 : score >= 80;
-        if (neonConfigured && (qualifiesForCommit || needsLlmRetry)) {
+        if (neonConfigured && (qualifiesForCommit || needsLlmRetry || (job.fromRetryQueue && !isDeterministicFallback))) {
           await upsertNeonCanonicalJob({
             id: job.id,
             canonicalKey: job.canonicalKey,
@@ -2262,7 +2355,7 @@ async function main() {
     }
 
     scoredMatches.sort((a, b) => b.scoreData.score - a.scoreData.score);
-    const topMatches = scoredMatches.slice(0, 8);
+    const topMatches = scoredMatches.slice(0, 15);
 
     if (topMatches.length > 0 && sheets && auth) {
       const dateStr = new Date().toISOString().split('T')[0];
@@ -2291,6 +2384,7 @@ async function main() {
         evaluatedCount: jobsToScore.length,
         committedCount: topMatches.length,
         queuedForRetryCount,
+        sourceCounts,
         rejectionBreakdown: hardGateReasons,
         durationMs: Date.now() - runStartMs,
       }).catch(() => {});

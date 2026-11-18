@@ -36,7 +36,7 @@ export async function GET() {
       name: 'DATABASE_URL',
       category: 'Primary Persistence (Neon Postgres)',
       description:
-        'Shared Neon Serverless Postgres connection string for canonical cross-source deduplication, retry-safe LLM evaluation states, and multi-source lineage',
+        'Shared Neon Serverless Postgres connection string (direct or pooled via DATABASE_URL_POOLED) for canonical cross-source deduplication, retry-safe LLM evaluation states, and multi-source lineage',
       required: false,
       configured: neonConfigured,
       fallback: 'Google Sheets v4 Sync -> Atomic Local JSON Store (data/jobs-store.json)',

@@ -4,7 +4,12 @@ dotenv.config();
 const subsystems = [
   {
     name: 'DATABASE_URL',
-    subsystem: 'Neon Serverless Postgres Primary Store (Canonical Dedup & Retry Queue)',
+    subsystem: 'Neon Serverless Postgres Direct URL (Migrations / CLI)',
+    required: false,
+  },
+  {
+    name: 'DATABASE_URL_POOLED',
+    subsystem: 'Neon Serverless Postgres Pooled Connection (Serverless / Next.js)',
     required: false,
   },
   {

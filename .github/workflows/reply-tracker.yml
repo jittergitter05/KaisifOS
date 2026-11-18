@@ -1,7 +1,7 @@
 name: Reply Tracker
 on:
   schedule:
-    - cron: '30 3 * * 1-5'
+    - cron: '37 3 * * 1-5'
   workflow_dispatch:
 
 permissions:
@@ -36,6 +36,8 @@ jobs:
 
       - name: Run Reply Tracker
         env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_POOLED: ${{ secrets.DATABASE_URL_POOLED }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SERVICE_KEY_BASE64: ${{ secrets.GOOGLE_SERVICE_KEY_BASE64 }}

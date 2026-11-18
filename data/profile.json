@@ -1,7 +1,8 @@
 {
-  "system_name": "KaisifOS",
   "name": "Shaik Kaisif Basha",
+  "system_name": "KaisifOS",
   "email": "shaikkaisifbasha04@gmail.com",
+  "portfolio": "https://portjitterglitter.vercel.app",
   "target_roles": [
     "Associate Product Manager",
     "Product Marketing Manager",
@@ -33,11 +34,8 @@
       "requires US work authorization / no STEM OPT / no sponsorship"
     ]
   },
-  "min_salary_lpa": 8,
-  "min_salary_usd_annual": 30000,
-  "experience_years": 0,
   "experience_level": "Fresher / Entry Level",
-  "portfolio": "https://portjitterglitter.vercel.app",
+  "experience_years": 0,
   "key_metrics": [
     "~425% organic search growth at Smatr AI",
     "~1,466% product page view growth at Smatr AI",
@@ -58,6 +56,8 @@
     "Cloudflare Workers",
     "Full-Stack Prototyping"
   ],
+  "min_salary_lpa": 8,
+  "min_salary_usd_annual": 30000,
   "languages": [
     "English (fluent)",
     "Telugu (native)",

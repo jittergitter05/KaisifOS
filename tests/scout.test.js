@@ -1022,11 +1022,42 @@ Skills: SQL, Python, GTM Strategy`;
       expect(typeof neon.getNeonPipelineJobs).toBe('function');
       expect(typeof neon.upsertNeonCanonicalJob).toBe('function');
       expect(typeof neon.recordNeonScoutRun).toBe('function');
+      expect(typeof neon.getNeonAppliedJobs).toBe('function');
+      expect(typeof neon.sanitizePostgresErrorMessage).toBe('function');
+
+      const sanitized = neon.sanitizePostgresErrorMessage(
+        new Error('Connection failed for postgresql://neondb_owner:superSecret123@ep-host.neon.tech/neondb?password=abc')
+      );
+      expect(sanitized).not.toContain('superSecret123');
+      expect(sanitized).not.toContain('password=abc');
+      expect(sanitized).toContain('[REDACTED]');
+    });
+
+    it('preserves non-location "in ..." role modifiers while stripping location suffixes and infers anchor card cities', async () => {
+      const { buildCanonicalJobKey } = await import('../lib/eligibility.js');
+      const { extractCareerPageAnchors } = await import('../lib/career-scraper');
+
+      const growthKey = buildCanonicalJobKey('Keka', 'Product Analyst in Growth', 'Hyderabad, India');
+      const plainKey = buildCanonicalJobKey('Keka', 'Product Analyst', 'Hyderabad, India');
+      expect(growthKey).toContain('productanalystingrowth');
+      expect(growthKey).not.toBe(plainKey);
+
+      const strippedLocKey = buildCanonicalJobKey(
+        'disABLEDperson',
+        'Associate Product Manager at ATCC in Gaithersburg, Maryland',
+        'Manassas Park, US'
+      );
+      expect(strippedLocKey).toBe('disabledperson::associateproductmanager::global');
+
+      const cardHtml = `
+        <div class="job-card">
+          <a href="/careers/associate-product-manager">Associate Product Manager</a>
+          <span class="loc">Hyderabad, India · Full-time</span>
+        </div>
+      `;
+      const anchors = extractCareerPageAnchors(cardHtml, 'https://www.keka.com/careers', 'Keka');
+      expect(anchors).toHaveLength(1);
+      expect(anchors[0].location.toLowerCase()).toBe('hyderabad');
     });
   });
 });
-
-
-
-
-

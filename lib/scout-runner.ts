@@ -515,8 +515,9 @@ async function fetchAshbyBoards(boards: string[]): Promise<BoardFetchResult> {
   return { jobs: results, failedBoards, truncatedBoards };
 }
 
-async function fetchInternshalaHyderabad(profile: CandidateProfile): Promise<RawScoutedJob[]> {
+async function fetchInternshalaHyderabad(profile: CandidateProfile): Promise<BoardFetchResult> {
   const jobs: RawScoutedJob[] = [];
+  const failedBoards: string[] = [];
   const { internshalaSlugs } = deriveDynamicSearchParams(profile);
   const rawCities = (profile.target_cities || [])
     .map((c) => c.toLowerCase().replace('bengaluru', 'bangalore').trim())
@@ -524,96 +525,159 @@ async function fetchInternshalaHyderabad(profile: CandidateProfile): Promise<Raw
   const cities = rawCities.length > 0 ? rawCities : ['hyderabad'];
   const seen = new Set<string>();
 
+  const targetPaths: Array<{ url: string; label: string; defaultLoc: string }> = [];
   for (const category of internshalaSlugs.slice(0, 3)) {
     for (const city of cities.slice(0, 2)) {
-      try {
-        const res = await fetch(`https://internshala.com/jobs/${category}-jobs/${city}-city/`, {
-          headers: {
-            'User-Agent':
-              'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          },
-          signal: AbortSignal.timeout(7000),
-        });
-        if (!res.ok) continue;
-        const html = await res.text();
-        const nextMatch = html.match(
-          /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/
-        );
-        if (nextMatch) {
-          try {
-            const d = JSON.parse(nextMatch[1]);
-            const list =
-              d?.props?.pageProps?.jobs ||
-              d?.props?.pageProps?.data?.jobs ||
-              d?.props?.pageProps?.listings ||
-              [];
-            for (const item of list.slice(0, 10)) {
-              const title = String(item.profile || item.title || item.job_title || '').trim();
-              if (!title) continue;
-              const company = String(
-                item.company_name || item.employer_name || item.company || 'Unknown'
-              ).trim();
-              const id = `internshala_${item.id || item.job_id || `${category}_${city}_${company}_${title}`.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 48)}`;
-              if (seen.has(id)) continue;
-              seen.add(id);
-              const rawDesc = decodeAndStripHtml(
-                item.description || item.job_description || `${title} at ${company} in ${city}.`
-              );
-              jobs.push({
-                id,
-                title,
-                company,
-                location: String(item.location || city),
-                salary: String(item.salary || item.ctc || 'Not listed'),
-                description: rawDesc.substring(0, 12000),
-                url: item.url
-                  ? item.url.startsWith('http')
-                    ? item.url
-                    : `https://internshala.com${item.url}`
-                  : `https://internshala.com/jobs/${category}-jobs/${city}-city/`,
-                source: 'Internshala',
-              });
-            }
-            continue;
-          } catch {
-            // Fall through to HTML parsing
-          }
-        }
+      targetPaths.push({
+        url: `https://internshala.com/jobs/${category}-jobs/${city}-city/`,
+        label: `${category}/${city}`,
+        defaultLoc: city,
+      });
+    }
+  }
+  if (internshalaSlugs[0]) {
+    targetPaths.push({
+      url: `https://internshala.com/jobs/work-from-home-${internshalaSlugs[0]}-jobs/`,
+      label: `wfh/${internshalaSlugs[0]}`,
+      defaultLoc: 'India Remote (WFH)',
+    });
+  }
 
-        const parts = html.split('class="company generic_company');
-        for (let i = 1; i < parts.length && i <= 8; i++) {
-          const p = parts[i];
-          const hrefMatch = p.match(/class="job-title-href"[^>]*href="([^"]+)"[^>]*>\s*([^<]+)/);
-          if (!hrefMatch) continue;
-          const href = hrefMatch[1];
-          const title = decodeAndStripHtml(hrefMatch[2] || '').trim();
-          const company =
-            decodeAndStripHtml(
-              p.match(/class="company-name">\s*(?:<[^>]+>\s*)*([^<\n]+)/)?.[1] || ''
-            ).trim() || 'Unknown';
-          const rawId = href.match(/(\d+)$/)?.[1] || `${category}_${city}_${i}`;
-          const id = `internshala_${rawId}`;
-          if (title.length <= 3 || seen.has(id)) continue;
-          seen.add(id);
-          jobs.push({
-            id,
-            title,
-            company,
-            location: city,
-            salary: 'Not listed',
-            description: `${title} role at ${company}, ${city}. Via Internshala.`,
-            url: href.startsWith('http') ? href : `https://internshala.com${href}`,
-            source: 'Internshala',
-          });
-        }
-      } catch {
-        // Non-fatal per-city Internshala fetch error
+  for (const target of targetPaths) {
+    try {
+      const res = await fetch(target.url, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        signal: AbortSignal.timeout(7000),
+      });
+      if (!res.ok) {
+        failedBoards.push(`${target.label} (${res.status})`);
+        continue;
       }
+      const html = await res.text();
+      const nextMatch = html.match(
+        /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/
+      );
+      if (nextMatch) {
+        try {
+          const d = JSON.parse(nextMatch[1]);
+          const list =
+            d?.props?.pageProps?.jobs ||
+            d?.props?.pageProps?.data?.jobs ||
+            d?.props?.pageProps?.listings ||
+            [];
+          for (const item of list.slice(0, 10)) {
+            const title = String(item.profile || item.title || item.job_title || '').trim();
+            if (!title) continue;
+            const company = String(
+              item.company_name || item.employer_name || item.company || 'Unknown'
+            ).trim();
+            const id = `internshala_${item.id || item.job_id || `${target.label}_${company}_${title}`.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 48)}`;
+            if (seen.has(id)) continue;
+            seen.add(id);
+            const rawDesc = decodeAndStripHtml(
+              item.description || item.job_description || `${title} at ${company} (${target.defaultLoc}).`
+            );
+            jobs.push({
+              id,
+              title,
+              company,
+              location: String(item.location || target.defaultLoc),
+              salary: String(item.salary || item.ctc || 'Not listed'),
+              description: rawDesc.substring(0, 12000),
+              url: item.url
+                ? item.url.startsWith('http')
+                  ? item.url
+                  : `https://internshala.com${item.url}`
+                : target.url,
+              source: 'Internshala',
+            });
+          }
+          continue;
+        } catch {
+          // Fall through to HTML parsing
+        }
+      }
+
+      const parts = html.split('class="company generic_company');
+      for (let i = 1; i < parts.length && i <= 8; i++) {
+        const p = parts[i];
+        const hrefMatch = p.match(/class="job-title-href"[^>]*href="([^"]+)"[^>]*>\s*([^<]+)/);
+        if (!hrefMatch) continue;
+        const href = hrefMatch[1];
+        const title = decodeAndStripHtml(hrefMatch[2] || '').trim();
+        const company =
+          decodeAndStripHtml(
+            p.match(/class="company-name">\s*(?:<[^>]+>\s*)*([^<\n]+)/)?.[1] || ''
+          ).trim() || 'Unknown';
+        const rawId = href.match(/(\d+)$/)?.[1] || `${target.label}_${i}`;
+        const id = `internshala_${rawId}`;
+        if (title.length <= 3 || seen.has(id)) continue;
+        seen.add(id);
+        jobs.push({
+          id,
+          title,
+          company,
+          location: target.defaultLoc,
+          salary: 'Not listed',
+          description: `${title} role at ${company}, ${target.defaultLoc}. Via Internshala.`,
+          url: href.startsWith('http') ? href : `https://internshala.com${href}`,
+          source: 'Internshala',
+        });
+      }
+    } catch (err) {
+      failedBoards.push(`${target.label} (${(err as Error).message.slice(0, 24)})`);
     }
   }
 
-  return jobs;
+  return { jobs, failedBoards };
+}
+
+async function fetchJSearchLive(profile: CandidateProfile): Promise<RawScoutedJob[]> {
+  const apiKey = process.env.RAPIDAPI_KEY?.trim();
+  if (!apiKey) return [];
+
+  const roles = (profile.target_roles || ['Associate Product Manager', 'Growth Analyst']).slice(0, 3);
+  const cityConstraint =
+    profile.open_to_relocation === false
+      ? `in ${(profile.target_cities || ['Hyderabad']).join(' OR ')}, India`
+      : '';
+  const query = `(${roles.map((r) => `"${r}"`).join(' OR ')}) (fresher OR "entry level" OR junior OR associate) ${cityConstraint}`.trim();
+
+  const url = new URL('https://jsearch.p.rapidapi.com/search');
+  url.searchParams.set('query', query);
+  url.searchParams.set('num_pages', '1');
+  url.searchParams.set('date_posted', 'week');
+  if (profile.open_to_relocation === false) {
+    url.searchParams.set('country', 'in');
+  }
+
+  const res = await fetch(url.toString(), {
+    headers: {
+      'X-RapidAPI-Key': apiKey,
+      'X-RapidAPI-Host': 'jsearch.p.rapidapi.com',
+    },
+    signal: AbortSignal.timeout(9000),
+  });
+  if (!res.ok) throw new Error(`JSearch HTTP ${res.status}`);
+  const data = await res.json();
+  return (data.data || []).slice(0, 15).map((item: any) => ({
+    id: `jsearch_${item.job_id}`,
+    title: String(item.job_title || ''),
+    company: String(item.employer_name || 'Unknown'),
+    location:
+      [item.job_city, item.job_country].filter(Boolean).join(', ') || 'Remote / Global',
+    salary: item.job_min_salary
+      ? `${item.job_salary_currency || '$'}${item.job_min_salary}${item.job_max_salary ? ` - ${item.job_max_salary}` : ''}`
+      : 'Not listed',
+    description: stripHtml(item.job_description || '').substring(0, 12000),
+    url: String(item.job_apply_link || ''),
+    source: 'JSearch',
+  }));
 }
 
 /**
@@ -831,6 +895,7 @@ export async function executeLiveScoutRun(options?: {
 
   const [
     internshalaJobs,
+    jSearchJobs,
     careerPages,
     greenhouse,
     ashby,
@@ -849,6 +914,9 @@ export async function executeLiveScoutRun(options?: {
     neonStateMap,
   ] = await Promise.all([
     timedFetch('Internshala', () => fetchInternshalaHyderabad(profile), sourceHealth),
+    process.env.RAPIDAPI_KEY
+      ? timedFetch('JSearch', () => fetchJSearchLive(profile), sourceHealth)
+      : Promise.resolve([]),
     timedFetch('Company Career Pages', () => fetchCompanyCareerPages(careerUrls), sourceHealth),
     timedFetch('Greenhouse', () => fetchGreenhouseBoards(ghBoards), sourceHealth),
     timedFetch('Ashby', () => fetchAshbyBoards(ashbyBoards), sourceHealth),
@@ -873,7 +941,7 @@ export async function executeLiveScoutRun(options?: {
 
   for (const [src, metric] of Object.entries(sourceHealth)) {
     if (metric.failedBoards && metric.failedBoards.length > 0) {
-      warnings.push(`${src} board issues: ${metric.failedBoards.join(', ')}`);
+      warnings.push(`${src} issues: ${metric.failedBoards.slice(0, 4).join(', ')}`);
     }
     if (metric.truncatedBoards && metric.truncatedBoards > 0) {
       warnings.push(`${src}: ${metric.truncatedBoards} configured boards exceeded the ${MAX_ATS_BOARDS_PER_PROVIDER}-board per-sweep limit.`);
@@ -896,6 +964,7 @@ export async function executeLiveScoutRun(options?: {
     ...himalayas,
     ...arbeitnow,
     ...theMuse,
+    ...jSearchJobs,
   ];
 
   const sourceCounts: Record<string, number> = {};
@@ -1057,6 +1126,44 @@ export async function executeLiveScoutRun(options?: {
       }
       continue;
     }
+
+    // Dynamic role-relevance gate so unrelated roles (e.g. Hardware Eng for PM profile) don't waste LLM slots
+    const titleRoleHits = countTokenHits(j.title, roleTokens);
+    const hasCoreDomainSynonym =
+      (/\b(apm|pmm|gtm|product\s+(?:manager|marketing|analyst|operations)|growth|founder'?s?\s+(?:associate|office)|marketing\s+(?:operations|analyst)|digital\s+(?:marketing|content))\b/i.test(
+        j.title
+      ) &&
+        profile.target_roles.some((r) => /product|marketing|growth|founder|content/i.test(r))) ||
+      (/\b(software|full[- ]stack|frontend|backend|ai|ml|machine\s+learning|data\s+(?:scientist|analyst|engineer))\b/i.test(
+        j.title
+      ) &&
+        profile.target_roles.some((r) => /engineer|developer|scientist|data|ai|ml/i.test(r)));
+
+    if (roleTokens.length > 0 && titleRoleHits === 0 && !hasCoreDomainSynonym) {
+      rejectedIneligibleIds.push(j.id);
+      if (j.canonicalKey) rejectedIneligibleIds.push(j.canonicalKey);
+      hardGateReasons['Non-target role title'] = (hardGateReasons['Non-target role title'] || 0) + 1;
+      if (neonConfigured) {
+        upsertNeonCanonicalJob({
+          id: j.id,
+          canonicalKey: j.canonicalKey,
+          title: j.title,
+          company: j.company,
+          location: j.location,
+          salary: j.salary,
+          url: j.url,
+          source: j.source,
+          sourcesSeen: j.sourcesSeen,
+          score: 0,
+          evaluationStatus: 'REJECTED_PREFILTER',
+          needsLlmRetry: false,
+          pipelineStage: 'REJECTED',
+          hardRejectReason: 'Non-target role title relative to candidate target_roles',
+        }).catch(() => {});
+      }
+      continue;
+    }
+
     eligibleCandidates.push({
       job: j,
       matchesTargetHub: eligibility.flags.matchesTargetHub,
@@ -1065,7 +1172,7 @@ export async function executeLiveScoutRun(options?: {
 
   if (unseen.length > 0 && eligibleCandidates.length === 0) {
     warnings.push(
-      `All ${unseen.length} unseen postings were filtered out by strict ${(profile.target_cities || ['Hyderabad']).join('/')} & ${profile.experience_level} eligibility gates.`
+      `All ${unseen.length} unseen postings were filtered out by strict ${(profile.target_cities || ['Hyderabad']).join('/')} & ${profile.experience_level} & target-role gates.`
     );
   }
 
@@ -1303,6 +1410,9 @@ export async function executeLiveScoutRun(options?: {
     'Arbeitnow Visa Board',
     'TheMuse Public API',
   ];
+  if (process.env.RAPIDAPI_KEY) {
+    sourcesQueried.push('JSearch API');
+  }
   if (process.env.FREEHIRE_API_URL) {
     sourcesQueried.unshift('FreeHire API Endpoint');
   }

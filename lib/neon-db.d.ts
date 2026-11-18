@@ -95,11 +95,18 @@ export interface NeonTelemetrySummary {
   lastRun: Record<string, unknown> | null;
 }
 
+export function sanitizePostgresErrorMessage(err: unknown): string;
 export function isNeonPostgresConfigured(): boolean;
 export function computeProfileVersionHash(profile: Partial<CandidateProfile>): string;
 export function ensureNeonSchema(): Promise<boolean>;
 export function getNeonCanonicalStateMap(): Promise<Map<string, NeonCanonicalState>>;
 export function getNeonJobsPendingLlmRetry(limit?: number): Promise<NeonPipelineJob[]>;
+export function getNeonAppliedJobs(limit?: number): Promise<Array<{
+  canonicalKey: string;
+  id: string;
+  title: string;
+  company: string;
+}>>;
 export function upsertNeonCanonicalJob(
   record: NeonJobUpsertInput
 ): Promise<{ ok: boolean; merged: boolean; error?: string }>;

@@ -2,6 +2,12 @@ import { google } from 'googleapis';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 
+import {
+  isNeonPostgresConfigured,
+  getNeonAppliedJobs,
+  updateNeonJobFields,
+} from '../lib/neon-db.js';
+
 dotenv.config();
 
 export function groupCompanies(rows) {
@@ -77,67 +83,80 @@ export function isCompanyMentioned(text, company) {
 
 async function main() {
   try {
-    const auth = getAuth();
-    try {
-      await auth.getClient();
-    } catch (authErr) {
-      const targetEmail = (process.env.GMAIL_USER_EMAIL || '').trim().toLowerCase();
-      if (targetEmail.endsWith('@gmail.com')) {
-        throw new Error(
-          `Gmail Domain-Wide Delegation error for consumer address (${targetEmail}). Google Service Accounts cannot impersonate @gmail.com inboxes — use a Google Workspace domain address with Gmail readonly delegation enabled.`
-        );
-      }
-      throw authErr;
+    const targetEmail = (process.env.GMAIL_USER_EMAIL || '').trim().toLowerCase();
+    const hasServiceAccount = Boolean((process.env.GOOGLE_SERVICE_KEY_BASE64 || '').trim());
+
+    if (!hasServiceAccount || !targetEmail) {
+      console.log(
+        '[Reply Tracker] Skipping cleanly — GOOGLE_SERVICE_KEY_BASE64 and a Google Workspace GMAIL_USER_EMAIL are required for automated inbox polling.'
+      );
+      return;
     }
+
+    if (targetEmail.endsWith('@gmail.com')) {
+      console.log(
+        `[Reply Tracker] Notice: "${targetEmail}" is a consumer @gmail.com address. Google Service Account Domain-Wide Delegation only works on Google Workspace domains — skipping inbox poll cleanly instead of failing CI.`
+      );
+      return;
+    }
+
+    const auth = getAuth();
+    await auth.getClient();
 
     const sheets = google.sheets('v4');
     const gmail = google.gmail('v1');
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+    const neonConfigured = isNeonPostgresConfigured();
 
-    const response = await sheets.spreadsheets.values.get({
-      auth,
-      spreadsheetId,
-      range: 'Sheet1!A:K',
-    });
-
-    const rows = response.data.values || [];
-    if (rows.length === 0) {
-      return;
+    let sheetRows = [];
+    if (spreadsheetId) {
+      const response = await sheets.spreadsheets.values.get({
+        auth,
+        spreadsheetId,
+        range: 'Sheet1!A:K',
+      });
+      sheetRows = response.data.values || [];
     }
 
-    const { pendingRows, lowerCompanies } = groupCompanies(rows);
-    if (pendingRows.length === 0) return;
+    const { pendingRows, lowerCompanies } = groupCompanies(sheetRows);
+    const neonApplied = neonConfigured ? await getNeonAppliedJobs(200) : [];
+    const neonByCompany = new Map();
+    for (const job of neonApplied) {
+      const key = String(job.company || '').trim().toLowerCase();
+      if (!key) continue;
+      if (!neonByCompany.has(key)) neonByCompany.set(key, []);
+      neonByCompany.get(key).push(job);
+      if (!lowerCompanies.has(key)) {
+        lowerCompanies.set(key, []);
+      }
+    }
+
+    if (pendingRows.length === 0 && neonApplied.length === 0) {
+      console.log('[Reply Tracker] No APPLIED applications to poll.');
+      return;
+    }
 
     const messages = [];
     let pageToken;
     let pages = 0;
-    try {
-      do {
-        const listRes = await gmail.users.messages.list({
-          auth,
-          userId: 'me',
-          q: 'in:inbox newer_than:2d',
-          maxResults: 100,
-          pageToken,
-        });
-        if (Array.isArray(listRes.data.messages)) {
-          messages.push(...listRes.data.messages);
-        }
-        pageToken = listRes.data.nextPageToken;
-        pages++;
-      } while (pageToken && pages < 5);
-    } catch (gerr) {
-      const targetEmail = (process.env.GMAIL_USER_EMAIL || '').trim().toLowerCase();
-      if (targetEmail.endsWith('@gmail.com')) {
-        throw new Error(
-          `Gmail API error (${gerr.message}). Note: consumer @gmail.com accounts do not support Service Account Domain-Wide Delegation.`
-        );
+    do {
+      const listRes = await gmail.users.messages.list({
+        auth,
+        userId: 'me',
+        q: 'in:inbox newer_than:2d',
+        maxResults: 100,
+        pageToken,
+      });
+      if (Array.isArray(listRes.data.messages)) {
+        messages.push(...listRes.data.messages);
       }
-      throw new Error(`Gmail API Error: ${gerr.message}`);
-    }
+      pageToken = listRes.data.nextPageToken;
+      pages++;
+    } while (pageToken && pages < 5);
 
     const cappedMessages = messages.slice(0, 150);
     const matchedIndices = new Set();
+    const matchedNeonKeys = new Set();
     const hits = [];
 
     for (let i = 0; i < cappedMessages.length; i += 5) {
@@ -165,22 +184,38 @@ async function main() {
           const matchFound =
             isCompanyMentioned(from, companyLowerCase) ||
             isCompanyMentioned(subject, companyLowerCase);
-          if (matchFound) {
-            for (const rowIndex of indices) {
-              if (!matchedIndices.has(rowIndex)) {
-                matchedIndices.add(rowIndex);
-                const matchedRow = pendingRows.find((p) => p.index === rowIndex)?.row;
-                if (matchedRow) {
-                  hits.push({
-                    rowIndex,
-                    id: String(matchedRow[1] || '').trim(),
-                    company: matchedRow[3],
-                    from,
-                    subject,
-                    dateStr,
-                  });
-                }
+          if (!matchFound) continue;
+
+          for (const rowIndex of indices) {
+            if (!matchedIndices.has(rowIndex)) {
+              matchedIndices.add(rowIndex);
+              const matchedRow = pendingRows.find((p) => p.index === rowIndex)?.row;
+              if (matchedRow) {
+                hits.push({
+                  rowIndex,
+                  id: String(matchedRow[1] || '').trim(),
+                  canonicalKey: undefined,
+                  company: matchedRow[3],
+                  from,
+                  subject,
+                  dateStr,
+                });
               }
+            }
+          }
+
+          for (const neonJob of neonByCompany.get(companyLowerCase) || []) {
+            if (!matchedNeonKeys.has(neonJob.canonicalKey)) {
+              matchedNeonKeys.add(neonJob.canonicalKey);
+              hits.push({
+                rowIndex: null,
+                id: neonJob.id,
+                canonicalKey: neonJob.canonicalKey,
+                company: neonJob.company,
+                from,
+                subject,
+                dateStr,
+              });
             }
           }
         }
@@ -188,42 +223,57 @@ async function main() {
     }
 
     if (hits.length > 0) {
-      // Re-fetch Column B immediately before patching so concurrent Sheet appends/deletes cannot shift rows
-      const latestColB = await sheets.spreadsheets.values.get({
-        auth,
-        spreadsheetId,
-        range: 'Sheet1!B:B',
-      });
-      const colBValues = latestColB.data.values || [];
+      let colBValues = [];
+      if (spreadsheetId) {
+        const latestColB = await sheets.spreadsheets.values.get({
+          auth,
+          spreadsheetId,
+          range: 'Sheet1!B:B',
+        });
+        colBValues = latestColB.data.values || [];
+      }
 
       for (const hit of hits) {
-        let rowToUpdate = hit.rowIndex + 1;
-        if (hit.id) {
-          const verifiedIdx = colBValues.findIndex(
-            (r, idx) => idx >= 1 && String(r[0] || '').trim() === hit.id
+        if (neonConfigured && (hit.canonicalKey || hit.id)) {
+          await updateNeonJobFields(
+            { id: hit.id, canonicalKey: hit.canonicalKey },
+            { status: 'REPLIED' }
           );
-          if (verifiedIdx < 1) {
-            console.warn(`[Sheets] Skipping update for ${hit.company}: ID ${hit.id} no longer in Sheet1.`);
-            continue;
-          }
-          rowToUpdate = verifiedIdx + 1;
         }
 
-        try {
-          await sheets.spreadsheets.values.update({
-            auth,
-            spreadsheetId,
-            range: `Sheet1!K${rowToUpdate}`,
-            valueInputOption: 'USER_ENTERED',
-            requestBody: {
-              values: [['REPLIED']],
-            },
-          });
-          const alertMsg = `📩 REPLY DETECTED\nCompany: ${hit.company}\nFrom: ${hit.from}\nSubject: ${hit.subject}\nDate: ${hit.dateStr}\n→ Update your tracker and respond within 2 hours.`;
-          await sendDiscordAlert(alertMsg);
-        } catch (updateErr) {
-          console.error(`[Sheets] Failed to update row for ${hit.company}:`, updateErr.message);
+        if (spreadsheetId && hit.rowIndex !== null) {
+          let rowToUpdate = hit.rowIndex + 1;
+          if (hit.id) {
+            const verifiedIdx = colBValues.findIndex(
+              (r, idx) => idx >= 1 && String(r[0] || '').trim() === hit.id
+            );
+            if (verifiedIdx >= 1) {
+              rowToUpdate = verifiedIdx + 1;
+            } else {
+              console.warn(`[Sheets] Skipping update for ${hit.company}: ID ${hit.id} no longer in Sheet1.`);
+              rowToUpdate = -1;
+            }
+          }
+
+          if (rowToUpdate >= 2) {
+            try {
+              await sheets.spreadsheets.values.update({
+                auth,
+                spreadsheetId,
+                range: `Sheet1!K${rowToUpdate}`,
+                valueInputOption: 'USER_ENTERED',
+                requestBody: {
+                  values: [['REPLIED']],
+                },
+              });
+            } catch (updateErr) {
+              console.error(`[Sheets] Failed to update row for ${hit.company}:`, updateErr.message);
+            }
+          }
         }
+
+        const alertMsg = `📩 REPLY DETECTED\nCompany: ${hit.company}\nFrom: ${hit.from}\nSubject: ${hit.subject}\nDate: ${hit.dateStr}\n→ Update your tracker and respond within 2 hours.`;
+        await sendDiscordAlert(alertMsg);
       }
     }
   } catch (error) {

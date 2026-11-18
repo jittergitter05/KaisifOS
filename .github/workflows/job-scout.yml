@@ -1,7 +1,8 @@
 name: Job Scout
 on:
   schedule:
-    - cron: '0 4 * * 0,1,3,5'
+    # Daily at 04:17 UTC (09:47 AM IST) — off top-of-hour to avoid GitHub Actions scheduler queue delays
+    - cron: '17 4 * * *'
   workflow_dispatch:
 
 permissions:
@@ -37,6 +38,7 @@ jobs:
       - name: Run Scout Agent
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_POOLED: ${{ secrets.DATABASE_URL_POOLED }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}

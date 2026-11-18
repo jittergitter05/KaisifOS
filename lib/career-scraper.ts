@@ -307,13 +307,22 @@ export function extractCareerPageAnchors(
     if (!isJobPath || !hasRoleWords || seenUrls.has(absUrl)) continue;
     seenUrls.add(absUrl);
 
+    const matchIdx = match.index ?? 0;
+    const contextSnippet = stripHtml(
+      html.slice(Math.max(0, matchIdx - 180), Math.min(html.length, matchIdx + match[0].length + 220))
+    );
+    const cityMatch = contextSnippet.match(
+      /\b(Hyderabad|Telangana|Bengaluru|Bangalore|Mumbai|Delhi|NCR|Gurugram|Gurgaon|Noida|Pune|Chennai|India|Remote(?:\s*\/\s*Hybrid)?|Hybrid)\b/i
+    );
+    const inferredLocation = cityMatch ? cityMatch[1] : 'Direct Career Portal';
+
     jobs.push({
       id: `career_${stableShortHash(absUrl)}`,
       title: label,
       company,
-      location: 'Direct Career Portal',
+      location: inferredLocation,
       salary: 'Direct Career Page',
-      description: `${label} opening listed on ${company} official careers page (${absUrl}).`,
+      description: `${label} opening listed on ${company} official careers page (${inferredLocation} · ${absUrl}).`,
       url: absUrl,
       source: 'Company Career Page',
     });
@@ -654,7 +663,7 @@ export async function fetchCompanyCareerPages(careerUrls: string[]): Promise<Car
  */
 export async function enrichThinJobDescriptions<T extends { description: string; url: string; company: string }>(
   jobs: T[],
-  maxFetches = 10
+  maxFetches = 14
 ): Promise<T[]> {
   let remaining = maxFetches;
   await Promise.all(
