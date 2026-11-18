@@ -58,6 +58,11 @@ const subsystems = [
     required: false,
   },
   {
+    name: 'INGEST_WEBHOOK_SECRET',
+    subsystem: 'Naukri / LinkedIn Alert Email Webhook Bearer Token',
+    required: false,
+  },
+  {
     name: 'APP_URL',
     subsystem: 'Canonical Origin & OpenRouter Referer Header',
     required: false,
@@ -74,7 +79,7 @@ const subsystems = [
   },
 ];
 
-console.log('Checking KaisifOS environment configuration (12 variables across 5 subsystems)...');
+console.log(`Checking KaisifOS environment configuration (${subsystems.length} variables across 5 subsystems)...`);
 
 let fallbackCount = 0;
 

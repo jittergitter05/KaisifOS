@@ -1297,46 +1297,93 @@ export async function fetchFreeHireAtsJobs(profile) {
         if (foundLd === 0) {
           const seenHrefs = new Set();
           let anchorCount = 0;
-          const anchorRegex = /<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-          for (const m of html.matchAll(anchorRegex)) {
-            const label = stripHtmlTags(m[2] || '').replace(/\s+/g, ' ').trim();
-            if (!label || label.length < 6 || label.length > 100) continue;
-            let absUrl = '';
-            try {
-              absUrl = new URL(m[1].trim(), parsed.toString()).toString();
-            } catch (_) {
-              continue;
+
+          // Keka / Darwinbox embedded JSON job blocks
+          const isKekaOrDarwinbox =
+            /kekacdn|keka\.com|darwinbox|darwinboxcdn/i.test(html) ||
+            /keka|darwinbox/i.test(parsed.hostname);
+          if (isKekaOrDarwinbox) {
+            for (const m of html.matchAll(
+              /"(?:title|jobTitle)"\s*:\s*"([^"]{4,110})"[^}]{0,400}?"(?:jobUrl|applyUrl|url|slug|id)"\s*:\s*"?([a-zA-Z0-9/_:-]{2,140})"?/gi
+            )) {
+              const title = stripHtmlTags(m[1] || '').trim();
+              const ref = (m[2] || '').trim();
+              if (!title || /\b(home|about|contact|privacy|terms|careers)\b/i.test(title)) continue;
+              let absUrl = parsed.toString();
+              if (/^https?:\/\//i.test(ref)) absUrl = ref;
+              else if (ref.startsWith('/')) {
+                try {
+                  absUrl = new URL(ref, parsed.toString()).toString();
+                } catch (_) {}
+              } else {
+                absUrl = `${parsed.toString().replace(/\/$/, '')}#job=${encodeURIComponent(ref)}`;
+              }
+              if (seenHrefs.has(absUrl)) continue;
+              seenHrefs.add(absUrl);
+              const snippet = html.slice(Math.max(0, (m.index ?? 0) - 100), (m.index ?? 0) + 450);
+              const locMatch = snippet.match(/"(?:location|city|locationName)"\s*:\s*"([^"]{2,60})"/i);
+              const loc = locMatch?.[1]?.trim() || 'Hyderabad / India';
+              const slug = `${host}_${title}_${anchorCount}`.replace(/[^a-z0-9]+/gi, '_').slice(0, 48);
+              anchorCount++;
+              jobs.push({
+                id: `career_${slug}`,
+                title,
+                company: { display_name: companyTitle },
+                description: `${title} opening on ${companyTitle} official career portal (${loc} · ${absUrl}).`,
+                redirect_url: absUrl,
+                location: loc,
+                has_relocation: false,
+                source_label: 'Company Career Page',
+              });
+              if (anchorCount >= 12) break;
             }
-            if (
-              seenHrefs.has(absUrl) ||
-              !/^https?:\/\//i.test(absUrl) ||
-              !/\/(job|jobs|career|careers|opening|openings|position|positions|role|roles)\/[^/?#]+/i.test(absUrl) ||
-              !/\b(manager|engineer|developer|analyst|designer|associate|lead|intern|specialist|scientist|product|marketing|growth|founder)\b/i.test(label)
-            ) {
-              continue;
+          }
+
+          if (anchorCount === 0) {
+            const anchorRegex = /<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+            for (const m of html.matchAll(anchorRegex)) {
+              const label = stripHtmlTags(m[2] || '').replace(/\s+/g, ' ').trim();
+              if (!label || label.length < 6 || label.length > 100) continue;
+              let absUrl = '';
+              try {
+                absUrl = new URL(m[1].trim(), parsed.toString()).toString();
+              } catch (_) {
+                continue;
+              }
+              const isJobOrPortalHref =
+                /\/(job|jobs|career|careers|opening|openings|position|positions|role|roles)\/[^/?#]+/i.test(absUrl) ||
+                (isKekaOrDarwinbox && /(jobdetails|candidate\/careers|openings|requisition|jobs\/view)/i.test(absUrl));
+              if (
+                seenHrefs.has(absUrl) ||
+                !/^https?:\/\//i.test(absUrl) ||
+                !isJobOrPortalHref ||
+                !/\b(manager|engineer|developer|analyst|designer|associate|lead|intern|specialist|scientist|product|marketing|growth|founder)\b/i.test(label)
+              ) {
+                continue;
+              }
+              seenHrefs.add(absUrl);
+              const matchIdx = m.index ?? 0;
+              const snippet = stripHtmlTags(
+                html.slice(Math.max(0, matchIdx - 180), Math.min(html.length, matchIdx + m[0].length + 220))
+              );
+              const cityMatch = snippet.match(
+                /\b(Hyderabad|Telangana|Bengaluru|Bangalore|Mumbai|Delhi|NCR|Gurugram|Gurgaon|Noida|Pune|Chennai|India|Remote(?:\s*\/\s*Hybrid)?|Hybrid)\b/i
+              );
+              const inferredLoc = cityMatch ? cityMatch[1] : 'Direct Career Portal';
+              const slug = `${host}_${label}_${anchorCount}`.replace(/[^a-z0-9]+/gi, '_').slice(0, 48);
+              anchorCount++;
+              jobs.push({
+                id: `career_${slug}`,
+                title: label,
+                company: { display_name: companyTitle },
+                description: `${label} listed on ${companyTitle} official careers portal (${inferredLoc} · ${absUrl}).`,
+                redirect_url: absUrl,
+                location: inferredLoc,
+                has_relocation: false,
+                source_label: 'Company Career Page',
+              });
+              if (anchorCount >= 8) break;
             }
-            seenHrefs.add(absUrl);
-            const matchIdx = m.index ?? 0;
-            const snippet = stripHtmlTags(
-              html.slice(Math.max(0, matchIdx - 180), Math.min(html.length, matchIdx + m[0].length + 220))
-            );
-            const cityMatch = snippet.match(
-              /\b(Hyderabad|Telangana|Bengaluru|Bangalore|Mumbai|Delhi|NCR|Gurugram|Gurgaon|Noida|Pune|Chennai|India|Remote(?:\s*\/\s*Hybrid)?|Hybrid)\b/i
-            );
-            const inferredLoc = cityMatch ? cityMatch[1] : 'Direct Career Portal';
-            const slug = `${host}_${label}_${anchorCount}`.replace(/[^a-z0-9]+/gi, '_').slice(0, 48);
-            anchorCount++;
-            jobs.push({
-              id: `career_${slug}`,
-              title: label,
-              company: { display_name: companyTitle },
-              description: `${label} listed on ${companyTitle} official careers portal (${inferredLoc} · ${absUrl}).`,
-              redirect_url: absUrl,
-              location: inferredLoc,
-              has_relocation: false,
-              source_label: 'Company Career Page',
-            });
-            if (anchorCount >= 8) break;
           }
         }
       } catch (_) {}
@@ -1369,7 +1416,103 @@ export async function fetchFreeHireAtsJobs(profile) {
     }
   } catch (_) {}
 
-  console.log(`[FreeHire ATS + Career Pages + Arbeitnow] Total: ${jobs.length}`);
+  // 4J. Workday CXS Public JSON Endpoint (enterprise Hyderabad & India tech hubs)
+  const rawWorkdayBoards = Array.isArray(atsConfig.workday) ? atsConfig.workday.slice(0, 10) : [];
+  const parsedWorkdayTargets = rawWorkdayBoards
+    .map((raw) => {
+      if (raw && typeof raw === 'object') {
+        const tenant = String(raw.tenant || '').trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+        const site = String(raw.site || '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+        const hostRaw = String(raw.host || 'wd5').trim().toLowerCase();
+        const host = /^wd\d+$/.test(hostRaw) ? hostRaw : 'wd5';
+        const company = String(raw.company || tenant).trim();
+        return tenant && site ? { tenant, site, host, company } : null;
+      }
+      const parts = String(raw || '').split(/[|/]+/).map((p) => p.trim()).filter(Boolean);
+      if (parts.length < 2) return null;
+      const tenant = parts[0].toLowerCase().replace(/[^a-z0-9-]/g, '');
+      const hasHost = /^wd\d+$/i.test(parts[1]);
+      const host = hasHost ? parts[1].toLowerCase() : 'wd5';
+      const site = (hasHost ? parts[2] : parts[1])?.replace(/[^a-zA-Z0-9_-]/g, '') || '';
+      const company = (hasHost ? parts[3] : parts[2]) || tenant;
+      return tenant && site ? { tenant, site, host, company } : null;
+    })
+    .filter(Boolean);
+
+  await Promise.allSettled(
+    parsedWorkdayTargets.map(async (wd) => {
+      try {
+        const origin = `https://${wd.tenant}.${wd.host}.myworkdayjobs.com`;
+        const endpoint = `${origin}/wday/cxs/${encodeURIComponent(wd.tenant)}/${encodeURIComponent(wd.site)}/jobs`;
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            Origin: origin,
+            Referer: `${origin}/${wd.site}`,
+            'User-Agent': 'KaisifOS-CareerCrawler/1.0 (+https://github.com)',
+          },
+          body: JSON.stringify({ appliedFacets: {}, limit: 20, offset: 0, searchText: '' }),
+          signal: AbortSignal.timeout(7000),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const sorted = [...(data.jobPostings || [])]
+          .sort(
+            (a, b) =>
+              scorePostingForBoardSlice(b.title || '', b.locationsText || '') -
+              scorePostingForBoardSlice(a.title || '', a.locationsText || '')
+          )
+          .slice(0, 10);
+
+        await Promise.allSettled(
+          sorted.map(async (item, idx) => {
+            if (!item?.title || !item?.externalPath) return;
+            const extPath = String(item.externalPath).startsWith('/')
+              ? String(item.externalPath)
+              : `/${String(item.externalPath)}`;
+            const applyUrl = `${origin}/${encodeURIComponent(wd.site)}${extPath}`;
+            let loc = String(item.locationsText || 'Hyderabad / India').trim();
+            let desc = `${item.title} at ${wd.company} (${loc}). ${item.postedOn || ''}`.trim();
+            if (idx < 5) {
+              try {
+                const detailRes = await fetch(
+                  `${origin}/wday/cxs/${encodeURIComponent(wd.tenant)}/${encodeURIComponent(wd.site)}${extPath}`,
+                  {
+                    headers: { Accept: 'application/json', 'User-Agent': 'KaisifOS-CareerCrawler/1.0' },
+                    signal: AbortSignal.timeout(4500),
+                  }
+                );
+                if (detailRes.ok) {
+                  const detailJson = await detailRes.json();
+                  const info = detailJson?.jobPostingInfo;
+                  if (info?.jobDescription) {
+                    const stripped = stripHtmlTags(info.jobDescription);
+                    if (stripped.length > desc.length) desc = stripped;
+                  }
+                  if (info?.location) loc = String(info.location).trim() || loc;
+                }
+              } catch (_) {}
+            }
+            const safeSlug = extPath.replace(/[^a-z0-9]+/gi, '_').slice(-32);
+            jobs.push({
+              id: `workday_${wd.tenant}_${safeSlug}`,
+              title: String(item.title).trim(),
+              company: { display_name: wd.company },
+              description: desc.substring(0, 12000),
+              redirect_url: applyUrl,
+              location: loc,
+              has_relocation: /relocation|visa\s*sponsor|sponsorship/i.test(desc),
+              source_label: 'Workday ATS',
+            });
+          })
+        );
+      } catch (_) {}
+    })
+  );
+
+  console.log(`[FreeHire ATS + Workday + Career Pages + Arbeitnow] Total: ${jobs.length}`);
   return jobs;
 }
 
@@ -1983,7 +2126,7 @@ async function main() {
     );
 
     console.log(
-      '[Scout] Starting v4.0 — sources: Company Career Pages + 6 Direct-ATS (Greenhouse/Lever/Ashby/Workable/SmartRecruiters/Recruitee) + Internshala + RemoteOK + Remotive + Himalayas + Arbeitnow + JSearch'
+      '[Scout] Starting v4.1 — sources: Company Career Pages (incl. Keka/Darwinbox) + Workday + 6 Direct-ATS (Greenhouse/Lever/Ashby/Workable/SmartRecruiters/Recruitee) + RemoteOK + Remotive + Himalayas + Arbeitnow + JSearch (Internshala disabled unless profile.enable_internshala=true)'
     );
 
     let auth = null;
@@ -1999,19 +2142,20 @@ async function main() {
     }
 
     const profile = await loadProfileForCli(sheets, auth, profilePath);
+    const enableInternshala = profile?.enable_internshala === true;
     const [seenIds, existingSheetIds, neonStateMap] = await Promise.all([
       sheets && auth ? getSeenJobIds(sheets, auth).catch(() => new Set()) : Promise.resolve(new Set()),
       sheets && auth ? getExistingJobIds(sheets, auth).catch(() => new Set()) : Promise.resolve(new Set()),
       neonConfigured ? getNeonCanonicalStateMap() : Promise.resolve(new Map()),
     ]);
     console.log(
-      `[Scout] State loaded — Neon canonical keys: ${neonStateMap.size} | Seen IDs: ${seenIds.size} | Sheet IDs: ${existingSheetIds.size}`
+      `[Scout] State loaded — Neon canonical keys: ${neonStateMap.size} | Seen IDs: ${seenIds.size} | Sheet IDs: ${existingSheetIds.size} | Internshala: ${enableInternshala ? 'OPT-IN ON' : 'DISABLED'}`
     );
 
     const [rawFreeHire, rawInternshala, rawRemoteOK, rawRemotive, rawHimalayas, rawJSearch] =
       await Promise.all([
         fetchFreeHireAtsJobs(profile),
-        fetchInternshalaJobs(profile),
+        enableInternshala ? fetchInternshalaJobs(profile) : Promise.resolve([]),
         fetchRemoteOKJobs(profile),
         fetchRemotiveJobs(profile),
         fetchHimalayasJobs(),
@@ -2028,14 +2172,14 @@ async function main() {
     ];
     const sourceCounts = {
       FreeHire: rawFreeHire.length,
-      Internshala: rawInternshala.length,
+      ...(enableInternshala ? { Internshala: rawInternshala.length } : {}),
       RemoteOK: rawRemoteOK.length,
       Remotive: rawRemotive.length,
       Himalayas: rawHimalayas.length,
       JSearch: rawJSearch.length,
     };
     console.log(
-      `[Scout] Raw: ${rawJobs.length} (FreeHire ATS: ${rawFreeHire.length} | Internshala: ${rawInternshala.length} | RemoteOK: ${rawRemoteOK.length} | Remotive: ${rawRemotive.length} | Himalayas: ${rawHimalayas.length} | JSearch: ${rawJSearch.length})`
+      `[Scout] Raw: ${rawJobs.length} (FreeHire/Workday ATS: ${rawFreeHire.length}${enableInternshala ? ` | Internshala: ${rawInternshala.length}` : ''} | RemoteOK: ${rawRemoteOK.length} | Remotive: ${rawRemotive.length} | Himalayas: ${rawHimalayas.length} | JSearch: ${rawJSearch.length})`
     );
 
     // Canonical Cross-Source Deduplication (buildCanonicalJobKey: company::title::geoBucket)

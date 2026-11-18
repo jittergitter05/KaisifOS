@@ -1,5 +1,79 @@
 import { siteConfig } from '../config/site';
 
+export interface WorkdayBoardTarget {
+  tenant: string;
+  site: string;
+  host?: string;
+  company?: string;
+}
+
+export function parseWorkdayBoardTarget(raw: unknown): WorkdayBoardTarget | null {
+  if (!raw) return null;
+  if (typeof raw === 'object' && !Array.isArray(raw)) {
+    const obj = raw as Record<string, unknown>;
+    const tenant = String(obj.tenant || '').trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+    const site = String(obj.site || '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+    const hostRaw = String(obj.host || 'wd5').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    const host = /^wd\d+$/.test(hostRaw) ? hostRaw : 'wd5';
+    const company = String(obj.company || '').trim().slice(0, 80);
+    if (!tenant || !site) return null;
+    return {
+      tenant,
+      site,
+      host,
+      company: company || tenant.charAt(0).toUpperCase() + tenant.slice(1),
+    };
+  }
+
+  const str = String(raw).trim();
+  if (!str) return null;
+
+  // Support Workday career URL: https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite
+  const wdUrlMatch = str.match(
+    /^https?:\/\/([a-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com\/(?:[a-z]{2}-[A-Z]{2}\/)?([a-zA-Z0-9_-]+)/i
+  );
+  if (wdUrlMatch) {
+    const tenant = wdUrlMatch[1].toLowerCase();
+    const host = wdUrlMatch[2].toLowerCase();
+    const site = wdUrlMatch[3];
+    return {
+      tenant,
+      site,
+      host,
+      company: tenant.charAt(0).toUpperCase() + tenant.slice(1),
+    };
+  }
+
+  if (/^https?:\/\//i.test(str) || str.includes('://')) {
+    return null;
+  }
+
+  // Support pipe/slash syntax: "tenant|wdHost|site|Company" or "tenant/wdHost/site"
+  const parts = str.split(/[|/]+/).map((p) => p.trim()).filter(Boolean);
+  if (parts.length >= 2) {
+    const tenant = parts[0].toLowerCase().replace(/[^a-z0-9-]/g, '');
+    const secondIsHost = /^wd\d+$/i.test(parts[1]);
+    const host = secondIsHost ? parts[1].toLowerCase() : 'wd5';
+    const site = (secondIsHost ? parts[2] : parts[1])?.replace(/[^a-zA-Z0-9_-]/g, '') || '';
+    const company = (secondIsHost ? parts[3] : parts[2])?.slice(0, 80);
+    if (!tenant || !site) return null;
+    return {
+      tenant,
+      site,
+      host,
+      company: company || tenant.charAt(0).toUpperCase() + tenant.slice(1),
+    };
+  }
+
+  return null;
+}
+
+export function formatWorkdayBoardTarget(item: string | WorkdayBoardTarget): string {
+  const parsed = parseWorkdayBoardTarget(item);
+  if (!parsed) return typeof item === 'string' ? item : '';
+  return `${parsed.tenant}|${parsed.host || 'wd5'}|${parsed.site}${parsed.company ? `|${parsed.company}` : ''}`;
+}
+
 export interface AtsCompanyTargets {
   greenhouse: string[];
   lever: string[];
@@ -7,6 +81,7 @@ export interface AtsCompanyTargets {
   workable?: string[];
   smartrecruiters?: string[];
   recruitee?: string[];
+  workday?: Array<string | WorkdayBoardTarget>;
 }
 
 export interface CandidateProfile {
@@ -16,6 +91,7 @@ export interface CandidateProfile {
   target_roles: string[];
   target_cities: string[];
   open_to_relocation: boolean;
+  enable_internshala?: boolean;
   relocation_preference: {
     willing: boolean;
     requirements: string[];
@@ -40,6 +116,7 @@ export const DEFAULT_CAREER_URLS: string[] = [
   'https://razorpay.com/jobs/',
   'https://www.darwinbox.com/careers',
   'https://www.keka.com/careers',
+  'https://careers.swiggy.com/',
   'https://linear.app/careers',
   'https://posthog.com/careers',
 ];
@@ -50,15 +127,24 @@ export const DEFAULT_ATS_COMPANIES: AtsCompanyTargets = {
     'postman',
     'browserstack',
     'chargebee',
+    'phonepe',
+    'groww',
     'stripe',
     'vercel',
     'cloudflare',
+    'rubrik',
   ],
-  lever: ['zepto', 'cred', 'meesho', 'mistral'],
+  lever: ['zepto', 'cred', 'meesho', 'keka', 'mistral'],
   ashby: ['linear', 'posthog', 'supabase', 'langchain'],
   workable: ['raycast'],
-  smartrecruiters: ['Visa'],
+  smartrecruiters: ['Visa', 'PublicisSapient', 'BoschGroup'],
   recruitee: ['framer'],
+  workday: [
+    { tenant: 'salesforce', site: 'External_Career_Site', host: 'wd12', company: 'Salesforce' },
+    { tenant: 'servicenow', site: 'Careers', host: 'wd1', company: 'ServiceNow' },
+    { tenant: 'nvidia', site: 'NVIDIAExternalCareerSite', host: 'wd5', company: 'NVIDIA' },
+    { tenant: 'adobe', site: 'external_experienced', host: 'wd5', company: 'Adobe' },
+  ],
 };
 
 export interface ProfilePresetMetadata {
@@ -107,6 +193,7 @@ export const FORK_PROFILE_TEMPLATES: Record<string, CandidateProfile> = {
     ],
     target_cities: ['Hyderabad'],
     open_to_relocation: false,
+    enable_internshala: false,
     relocation_preference: {
       willing: false,
       requirements: [

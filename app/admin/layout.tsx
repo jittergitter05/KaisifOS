@@ -2,7 +2,7 @@
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Terminal, Radar, LogOut, User, Settings, ArrowUpRight, Command } from 'lucide-react';
+import { Terminal, Radar, LogOut, User, Settings, ArrowUpRight, Command, BookmarkPlus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import ThemeToggle from '@/components/ThemeToggle';
 import CommandPalette from '@/components/CommandPalette';
@@ -11,6 +11,7 @@ import { siteConfig } from '@/config/site';
 const NAV_ITEMS = [
   { href: '/admin/tracker', label: 'Pipeline Tracker', shortLabel: 'Tracker', icon: Radar },
   { href: '/admin/digest', label: 'Scout Digest', shortLabel: 'Digest', icon: Terminal },
+  { href: '/admin/clip', label: '1-Click Job Clipper', shortLabel: 'Clipper', icon: BookmarkPlus },
   { href: '/admin/profile', label: 'Owner & Targeting', shortLabel: 'Profile', icon: User },
   { href: '/admin/settings', label: 'System Audit', shortLabel: 'Audit', icon: Settings },
 ];

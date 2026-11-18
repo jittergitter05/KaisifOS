@@ -30,6 +30,7 @@ export async function GET() {
   const openRouterConfigured = Boolean(process.env.OPENROUTER_API_KEY);
   const freehireBridgeConfigured = Boolean(process.env.FREEHIRE_API_URL);
   const neonConfigured = isNeonPostgresConfigured();
+  const ingestWebhookConfigured = Boolean(process.env.INGEST_WEBHOOK_SECRET?.trim());
 
   const envChecks = [
     {
@@ -73,10 +74,10 @@ export async function GET() {
       name: 'FREEHIRE_API_URL',
       category: 'Optional External Bridge',
       description:
-        'Optional SSRF-validated strelov1/freehire HTTP API bridge (built-in 6-ATS + Career Page connectors run regardless)',
+        'Optional SSRF-validated strelov1/freehire HTTP API bridge (built-in Workday + 6 Direct-ATS + Keka/Darwinbox Career Connectors run regardless)',
       required: false,
       configured: freehireBridgeConfigured,
-      fallback: 'Built-in 6-ATS Connectors (Greenhouse · Lever · Ashby · Workable · SmartRecruiters · Recruitee)',
+      fallback: 'Built-in Workday CXS + Greenhouse · Lever · Ashby · Workable · SmartRecruiters · Recruitee + Keka/Darwinbox',
     },
     {
       name: 'RAPIDAPI_KEY',
@@ -128,6 +129,15 @@ export async function GET() {
       required: false,
       configured: Boolean(process.env.DISCORD_WEBHOOK_URL),
       fallback: 'In-app Executive Scout Digest (/admin/digest)',
+    },
+    {
+      name: 'INGEST_WEBHOOK_SECRET',
+      category: 'Alert Ingestion Webhook',
+      description:
+        'Bearer secret authenticating automated Google Apps Script forwarding of Naukri, LinkedIn & Wellfound job alert emails to /api/ingest/webhook',
+      required: false,
+      configured: ingestWebhookConfigured,
+      fallback: '1-Click Browser Clipper (/admin/clip) + Direct-ATS & Workday Feeds',
     },
     {
       name: 'APP_URL',
@@ -223,7 +233,14 @@ export async function GET() {
             ? '/tmp Ephemeral Fallback'
             : 'Local Fallback',
         },
-        { label: 'Company Career Pages + 6 Direct-ATS Feeds', status: 'Always-On (25+ Boards)' },
+        {
+          label: 'Workday CXS + Keka/Darwinbox + 6 Direct-ATS Feeds',
+          status: 'Always-On (30+ Boards)',
+        },
+        {
+          label: 'Alert Email Webhook & 1-Click Browser Clipper',
+          status: ingestWebhookConfigured ? 'Webhook + Clipper Ready' : 'Clipper Ready',
+        },
       ],
     },
   ];
@@ -268,6 +285,7 @@ export async function GET() {
     authConfigured: isCustomAuthConfigured(),
     neonConfigured,
     freehireBridgeConfigured,
+    ingestWebhookConfigured,
     storageMode: neonConfigured
       ? 'neon-postgres'
       : isCloudSheetsConfigured() && !stats.cloud_error

@@ -326,23 +326,25 @@ export default async function Home() {
                     </span>
                   </div>
                   <div className="px-5 py-3 flex items-baseline justify-between gap-4">
-                    <span className="text-slate-500 dark:text-slate-400 shrink-0">Global Feeds</span>
+                    <span className="text-slate-500 dark:text-slate-400 shrink-0">
+                      Enterprise &amp; Feeds
+                    </span>
                     <span className="text-slate-800 dark:text-slate-200 font-mono text-right">
-                      RemoteOK · Remotive · Himalayas · Internshala · Arbeitnow
+                      Workday CXS · Keka/Darwinbox · RemoteOK · Remotive · Himalayas
                     </span>
                   </div>
                   <div className="px-5 py-3 flex items-baseline justify-between gap-4">
                     <span className="text-slate-500 dark:text-slate-400 shrink-0">
-                      Optional Bridge
+                      Alert Webhook &amp; Clipper
                     </span>
                     <span className="text-slate-800 dark:text-slate-200 font-mono text-right">
-                      FREEHIRE_API_URL &amp; JSearch
+                      Naukri · LinkedIn · Wellfound Alerts + FREEHIRE_API_URL
                     </span>
                   </div>
                 </div>
               </div>
               <div className="px-5 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0D131F] text-[11px] font-mono text-slate-500 dark:text-slate-400">
-                Synced with Google Sheets v4 &amp; GitHub Actions (job-scout.yml)
+                Synced with Neon Postgres, Google Sheets v4 &amp; GitHub Actions (job-scout.yml)
               </div>
             </div>
           </div>

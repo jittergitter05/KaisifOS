@@ -1059,5 +1059,187 @@ Skills: SQL, Python, GTM Strategy`;
       expect(anchors).toHaveLength(1);
       expect(anchors[0].location.toLowerCase()).toBe('hyderabad');
     });
+
+    it('disables Internshala by default and parses/normalizes Workday CXS board targets', async () => {
+      const {
+        FORK_PROFILE_TEMPLATES,
+        parseWorkdayBoardTarget,
+        formatWorkdayBoardTarget,
+      } = await import('../lib/profile-presets');
+      const { normalizeCandidateProfile } = await import('../lib/profile');
+
+      expect(FORK_PROFILE_TEMPLATES.pm_growth.enable_internshala).toBe(false);
+
+      const defaultNormalized = normalizeCandidateProfile({});
+      expect(defaultNormalized.enable_internshala).toBe(false);
+      expect(Array.isArray(defaultNormalized.ats_companies?.workday)).toBe(true);
+      expect((defaultNormalized.ats_companies?.workday || []).length).toBeGreaterThan(0);
+
+      const enabledNormalized = normalizeCandidateProfile({ enable_internshala: true });
+      expect(enabledNormalized.enable_internshala).toBe(true);
+
+      const fromPipe = parseWorkdayBoardTarget('salesforce|wd12|External_Career_Site|Salesforce');
+      expect(fromPipe).toEqual({
+        tenant: 'salesforce',
+        host: 'wd12',
+        site: 'External_Career_Site',
+        company: 'Salesforce',
+      });
+      expect(formatWorkdayBoardTarget(fromPipe)).toBe(
+        'salesforce|wd12|External_Career_Site|Salesforce'
+      );
+
+      const fromUrl = parseWorkdayBoardTarget(
+        'https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite'
+      );
+      expect(fromUrl).toEqual({
+        tenant: 'nvidia',
+        host: 'wd5',
+        site: 'NVIDIAExternalCareerSite',
+        company: 'Nvidia',
+      });
+
+      expect(parseWorkdayBoardTarget('https://evil.example.com/jobs')).toBeNull();
+    });
+
+    it('fetches Workday CXS postings, extracts Keka/Darwinbox careers, and detects embedded Workday links', async () => {
+      const {
+        fetchWorkdayBoards,
+        extractKekaOrDarwinboxJobs,
+        detectEmbeddedAtsBoards,
+      } = await import('../lib/career-scraper');
+
+      const embedded = detectEmbeddedAtsBoards(
+        '<a href="https://servicenow.wd1.myworkdayjobs.com/ServiceNow">Jobs</a>',
+        'https://careers.servicenow.com'
+      );
+      expect(embedded.workday).toHaveLength(1);
+      expect(embedded.workday[0]).toMatchObject({
+        tenant: 'servicenow',
+        host: 'wd1',
+        site: 'ServiceNow',
+      });
+
+      const kekaHtml = `
+        <html>
+          <script id="__NEXT_DATA__" type="application/json">
+            {"jobs":[{"title":"Associate Product Manager","location":"Hyderabad, India","url":"https://acme.keka.com/careers/jobs/apm-hyd"}]}
+          </script>
+          <a href="/careers/jobdetails/growth-analyst-101">Growth Analyst</a>
+        </html>
+      `;
+      const kekaJobs = extractKekaOrDarwinboxJobs(
+        kekaHtml,
+        'https://acme.keka.com/careers',
+        'AcmeKeka'
+      );
+      expect(kekaJobs.length).toBeGreaterThanOrEqual(1);
+      expect(kekaJobs.some((j) => /Associate Product Manager/i.test(j.title))).toBe(true);
+      expect(kekaJobs[0].source).toBe('Company Career Page');
+      expect(kekaJobs[0].salary).toContain('Keka');
+
+      const origFetch = global.fetch;
+      global.fetch = vi.fn(async (input) => {
+        const u = String(input);
+        if (u.includes('/wday/cxs/salesforce/External_Career_Site/jobs')) {
+          return new Response(
+            JSON.stringify({
+              jobPostings: [
+                {
+                  title: 'Senior Director of Sales',
+                  locationsText: 'San Francisco, CA',
+                  externalPath: '/job/sf-director',
+                },
+                {
+                  title: 'Associate Product Manager',
+                  locationsText: 'Hyderabad, India',
+                  externalPath: '/job/hyd-apm',
+                },
+              ],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            jobPostingInfo: {
+              jobDescription: '<p>Work closely on product analytics in Hyderabad.</p>',
+              location: 'Hyderabad, Telangana, India',
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      });
+
+      try {
+        const wdResult = await fetchWorkdayBoards([
+          { tenant: 'salesforce', host: 'wd12', site: 'External_Career_Site', company: 'Salesforce' },
+        ]);
+        expect(wdResult.jobs.length).toBe(2);
+        // Hyderabad APM prioritized before SF Director
+        expect(wdResult.jobs[0].title).toBe('Associate Product Manager');
+        expect(wdResult.jobs[0].source).toBe('Workday ATS');
+        expect(wdResult.jobs[0].url).toBe(
+          'https://salesforce.wd12.myworkdayjobs.com/External_Career_Site/job/hyd-apm'
+        );
+        expect(wdResult.jobs[0].description).toContain('product analytics in Hyderabad');
+      } finally {
+        global.fetch = origFetch;
+      }
+    });
+
+    it('parses Naukri/LinkedIn alert emails safely and scores Workday/Clipper sources cleanly', async () => {
+      const { parseAlertEmailToJobs } = await import('../lib/ingest');
+      const { detectSource, SOURCE_FILTER_OPTIONS } = await import('../lib/utils');
+      const { getSourceUrlPriority } = await import('../lib/eligibility.js');
+
+      const alertJobs = parseAlertEmailToJobs(
+        {
+          from: 'Naukri Alerts <alerts@naukri.com>',
+          subject: 'New Associate Product Manager jobs in Hyderabad',
+          htmlBody: `
+            <div>
+              <a href="https://www.naukri.com/job-listings-associate-product-manager-darwinbox-hyderabad-12345">Associate Product Manager at Darwinbox</a>
+              <span>Hyderabad · ₹10-14 LPA</span>
+              <a href="http://127.0.0.1/internal-ssrf">Associate Product Manager at Localhost</a>
+              <a href="https://www.naukri.com/unsubscribe?id=1">Unsubscribe from alerts</a>
+            </div>
+          `,
+        },
+        'webhook'
+      );
+
+      expect(alertJobs).toHaveLength(1);
+      expect(alertJobs[0].title).toBe('Associate Product Manager');
+      expect(alertJobs[0].company).toBe('Darwinbox');
+      expect(alertJobs[0].source).toBe('Naukri Alert');
+      expect(alertJobs[0].salary).toContain('10-14 LPA');
+
+      const clipped = parseAlertEmailToJobs(
+        {
+          title: 'Product Analyst',
+          company: 'Swiggy',
+          location: 'Hyderabad / Remote',
+          url: 'https://careers.swiggy.com/jobs/123',
+          description: 'Own SQL funnel telemetry.',
+        },
+        'clipper'
+      );
+      expect(clipped).toHaveLength(1);
+      expect(clipped[0].id.startsWith('clipper_')).toBe(true);
+
+      expect(detectSource('workday_salesforce_1')).toBe('Workday ATS');
+      expect(detectSource('webhook_1234abcd')).toBe('Webhook / Clipper');
+      expect(detectSource('clipper_1234abcd')).toBe('Webhook / Clipper');
+      expect(SOURCE_FILTER_OPTIONS).toContain('Workday ATS');
+      expect(SOURCE_FILTER_OPTIONS).toContain('Webhook / Clipper');
+
+      expect(getSourceUrlPriority('https://salesforce.wd12.myworkdayjobs.com/job/1')).toBeGreaterThan(
+        getSourceUrlPriority('https://www.naukri.com/job-listings-123')
+      );
+      expect(getSourceUrlPriority('https://acme.keka.com/careers')).toBeGreaterThan(
+        getSourceUrlPriority('https://www.linkedin.com/jobs/view/123')
+      );
+    });
   });
 });

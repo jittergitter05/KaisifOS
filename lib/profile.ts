@@ -4,6 +4,8 @@ import {
   DEFAULT_ATS_COMPANIES,
   DEFAULT_CAREER_URLS,
   FORK_PROFILE_TEMPLATES,
+  parseWorkdayBoardTarget,
+  type WorkdayBoardTarget,
 } from './profile-presets';
 import {
   isCloudSheetsConfigured,
@@ -107,6 +109,10 @@ export function normalizeCandidateProfile(
       typeof parsed.open_to_relocation === 'boolean'
         ? parsed.open_to_relocation
         : base.open_to_relocation,
+    enable_internshala:
+      typeof parsed.enable_internshala === 'boolean'
+        ? parsed.enable_internshala
+        : Boolean(base.enable_internshala),
     relocation_preference: {
       willing:
         typeof rawReloc?.willing === 'boolean'
@@ -146,6 +152,12 @@ export function normalizeCandidateProfile(
         ? rawAts.smartrecruiters.map((x) => String(x).trim()).filter(Boolean)
         : DEFAULT_ATS_COMPANIES.smartrecruiters || [],
       recruitee: cleanSlugArr(rawAts.recruitee, DEFAULT_ATS_COMPANIES.recruitee || []),
+      workday: Array.isArray(rawAts.workday)
+        ? rawAts.workday
+            .map((x) => parseWorkdayBoardTarget(x))
+            .filter((x): x is WorkdayBoardTarget => Boolean(x))
+            .slice(0, 16)
+        : DEFAULT_ATS_COMPANIES.workday || [],
     },
     career_urls: Array.isArray(parsed.career_urls)
       ? parsed.career_urls

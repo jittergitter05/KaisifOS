@@ -8,6 +8,8 @@ import {
   DEFAULT_CAREER_URLS,
   getCandidateProfileAsync,
   saveCandidateProfileAsync,
+  parseWorkdayBoardTarget,
+  type WorkdayBoardTarget,
 } from '@/lib/profile';
 import { validateSafePublicUrl } from '@/lib/utils';
 import { siteConfig } from '@/config/site';
@@ -98,6 +100,25 @@ export async function POST(request: NextRequest) {
     const current = await getCandidateProfileAsync();
 
     // Explicitly whitelist and sanitize all CandidateProfile fields (prevents prototype pollution / arbitrary key injection)
+    const sanitizeWorkdayList = (
+      val: unknown,
+      fallback: Array<string | WorkdayBoardTarget> = []
+    ): WorkdayBoardTarget[] => {
+      const source = Array.isArray(val) ? val : fallback;
+      const out: WorkdayBoardTarget[] = [];
+      const seen = new Set<string>();
+      for (const item of source) {
+        const parsed = parseWorkdayBoardTarget(item);
+        if (!parsed) continue;
+        const k = `${parsed.tenant}::${parsed.site}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        out.push(parsed);
+        if (out.length >= 16) break;
+      }
+      return out;
+    };
+
     const updatedProfile: CandidateProfile = {
       system_name: String(body.system_name || current.system_name || siteConfig.name).trim().slice(0, 80),
       name: String(body.name).trim().slice(0, 120),
@@ -108,6 +129,10 @@ export async function POST(request: NextRequest) {
         typeof body.open_to_relocation === 'boolean'
           ? body.open_to_relocation
           : current.open_to_relocation,
+      enable_internshala:
+        typeof body.enable_internshala === 'boolean'
+          ? body.enable_internshala
+          : Boolean(current.enable_internshala),
       relocation_preference: {
         willing:
           typeof body.relocation_preference?.willing === 'boolean'
@@ -171,6 +196,10 @@ export async function POST(request: NextRequest) {
         recruitee: sanitizeStringArray(
           body.ats_companies?.recruitee,
           current.ats_companies?.recruitee ?? DEFAULT_ATS_COMPANIES.recruitee ?? []
+        ),
+        workday: sanitizeWorkdayList(
+          body.ats_companies?.workday,
+          current.ats_companies?.workday ?? DEFAULT_ATS_COMPANIES.workday ?? []
         ),
       },
       career_urls: Array.isArray(body.career_urls)

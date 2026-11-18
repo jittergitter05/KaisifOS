@@ -15,6 +15,7 @@ import {
   Loader2,
   CheckCircle2,
   AlertTriangle,
+  BookmarkPlus,
 } from 'lucide-react';
 
 interface CommandAction {
@@ -130,6 +131,17 @@ export default function CommandPalette({
         perform: () => {
           setOpen(false);
           router.push('/admin/digest');
+        },
+      },
+      {
+        id: 'nav-clip',
+        label: '1-Click Job Clipper & Alert Email Parser',
+        hint: '/admin/clip',
+        section: 'Navigation',
+        icon: BookmarkPlus,
+        perform: () => {
+          setOpen(false);
+          router.push('/admin/clip');
         },
       },
       {

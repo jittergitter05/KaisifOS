@@ -22,7 +22,10 @@ import {
   DEFAULT_ATS_COMPANIES,
   DEFAULT_CAREER_URLS,
   detectMatchingPresetKey,
+  parseWorkdayBoardTarget,
+  formatWorkdayBoardTarget,
   type CandidateProfile,
+  type WorkdayBoardTarget,
 } from '@/lib/profile-presets';
 import { siteConfig } from '@/config/site';
 
@@ -402,11 +405,13 @@ ${locRule}`;
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
               Parse a resume or edit parameters via{' '}
               <span className="font-mono">
-                {persistenceMode === 'cloud-sheets'
+                {persistenceMode === 'neon-postgres'
+                  ? 'Neon Serverless Postgres'
+                  : persistenceMode === 'cloud-sheets'
                   ? 'Google Sheets (Profile!A1)'
                   : persistenceMode === 'ephemeral-tmp'
                   ? 'Ephemeral /tmp Overlay'
-                  : 'Cloud Sheets / data/profile.json'}
+                  : 'Neon Postgres / Cloud Sheets / data/profile.json'}
               </span>
               .
             </p>
@@ -1088,18 +1093,30 @@ ${locRule}`;
             <div className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-6 space-y-5">
               <div className="border-b border-slate-200 dark:border-slate-800 pb-3">
                 <h2 className="text-sm font-display font-semibold text-slate-900 dark:text-white">
-                  04. Direct Company Career Pages &amp; 6-ATS Endpoints
+                  04. Workday CXS, Company Career Pages (Keka/Darwinbox) &amp; 6-ATS Endpoints
                 </h2>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                  Target official company career pages (Schema.org JobPosting JSON-LD &amp; embedded
-                  ATS detection) plus 6 public Direct-ATS JSON APIs with zero recruiter middlemen.
+                  Target direct Enterprise Workday CXS JSON boards, official company career pages
+                  (JSON-LD, Keka, Darwinbox &amp; embedded ATS detection), plus 6 public Direct-ATS
+                  JSON APIs with zero recruiter middlemen.
                 </p>
               </div>
               <ArrayEditor
-                label="Direct Company Career Page URLs (HTTPS)"
+                label="Workday CXS Boards (tenant|wdHost|site|Company or myworkdayjobs.com URL)"
+                items={(atsCompanies.workday || []).map(formatWorkdayBoardTarget)}
+                onChange={(v) => {
+                  const parsed = v
+                    .map((s) => parseWorkdayBoardTarget(s))
+                    .filter((x): x is WorkdayBoardTarget => Boolean(x));
+                  update({ ats_companies: { ...atsCompanies, workday: parsed } });
+                }}
+                placeholder="e.g. salesforce|wd12|External_Career_Site|Salesforce or https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite"
+              />
+              <ArrayEditor
+                label="Direct Company Career Page URLs (HTTPS · JSON-LD / Keka / Darwinbox)"
                 items={careerUrls}
                 onChange={(v) => update({ career_urls: v })}
-                placeholder="e.g. https://www.postman.com/company/careers/"
+                placeholder="e.g. https://careers.swiggy.com/"
               />
               <ArrayEditor
                 label="Greenhouse Boards"
@@ -1113,7 +1130,7 @@ ${locRule}`;
                 label="Lever Boards"
                 items={atsCompanies.lever || []}
                 onChange={(v) => update({ ats_companies: { ...atsCompanies, lever: v } })}
-                placeholder="e.g. zepto, cred, mistral"
+                placeholder="e.g. meesho, paytm, mistral"
               />
               <ArrayEditor
                 label="Ashby Boards"
@@ -1141,6 +1158,27 @@ ${locRule}`;
                 onChange={(v) => update({ ats_companies: { ...atsCompanies, recruitee: v } })}
                 placeholder="e.g. framer, bunq"
               />
+              <div className="flex items-start justify-between gap-4 rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#0B0F17] p-3.5">
+                <div>
+                  <p className="text-xs font-medium text-slate-900 dark:text-slate-100">
+                    Enable Internshala Legacy Scraper (Opt-In — Disabled by Default)
+                  </p>
+                  <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
+                    Off by default because Internshala heavily skews toward unpaid/low-CTC internships. Keep disabled and rely on Workday, Direct-ATS, Keka/Darwinbox, and Naukri/LinkedIn alert ingestion.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => update({ enable_internshala: !profile.enable_internshala })}
+                  className={`shrink-0 px-3 py-1.5 rounded text-xs font-medium border transition-colors cursor-pointer ${
+                    profile.enable_internshala
+                      ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40'
+                      : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/40'
+                  }`}
+                >
+                  {profile.enable_internshala ? 'Opt-In Enabled' : 'Disabled (Recommended)'}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -1182,8 +1220,8 @@ ${locRule}`;
                   Derived Live Scraper Targets
                 </div>
                 <div className="text-slate-700 dark:text-slate-300">
-                  <span className="text-slate-500 dark:text-slate-400">Internshala Slugs:</span>{' '}
-                  {derivedTargets.internshalaSlugs.join(', ')}
+                  <span className="text-slate-500 dark:text-slate-400">Workday Search Terms:</span>{' '}
+                  {derivedTargets.workdaySearchTerms.join(', ')}
                 </div>
                 <div className="text-slate-700 dark:text-slate-300">
                   <span className="text-slate-500 dark:text-slate-400">RemoteOK Tags:</span>{' '}
@@ -1193,6 +1231,12 @@ ${locRule}`;
                   <span className="text-slate-500 dark:text-slate-400">Remotive Keywords:</span>{' '}
                   {derivedTargets.remotiveKeywords.join(' · ')}
                 </div>
+                {profile.enable_internshala && (
+                  <div className="text-amber-700 dark:text-amber-300">
+                    <span className="text-slate-500 dark:text-slate-400">Internshala (Opt-In):</span>{' '}
+                    {derivedTargets.internshalaSlugs.join(', ')}
+                  </div>
+                )}
               </div>
             )}
 

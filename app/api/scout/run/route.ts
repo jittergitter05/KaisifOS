@@ -9,8 +9,8 @@ export const maxDuration = 60;
 export async function GET() {
   return NextResponse.json({
     sources: [
-      { id: 'internshala', name: 'Internshala Jobs', type: 'Target Hub Fresher Board', free: true },
-      { id: 'career_pages', name: 'Direct Company Career Pages', type: 'Official Career Portals (JSON-LD & ATS Embeds)', free: true },
+      { id: 'workday', name: 'Workday CXS Direct ATS', type: 'Enterprise Indian MNC Career Boards', free: true },
+      { id: 'career_pages', name: 'Direct Company Career Pages (incl. Keka & Darwinbox)', type: 'Official Career Portals (JSON-LD & ATS Embeds)', free: true },
       { id: 'greenhouse', name: 'Greenhouse Direct ATS', type: 'Direct Company ATS', free: true },
       { id: 'ashby', name: 'Ashby Direct ATS', type: 'Direct Company ATS', free: true },
       { id: 'lever', name: 'Lever Direct ATS', type: 'Direct Company ATS', free: true },
@@ -22,6 +22,7 @@ export async function GET() {
       { id: 'himalayas', name: 'Himalayas Public API', type: 'Global Remote Board', free: true },
       { id: 'arbeitnow', name: 'Arbeitnow Visa Board', type: 'EU & Visa-Sponsored', free: true },
       { id: 'themuse', name: 'TheMuse Public API', type: 'Entry/Mid Tech & GTM', free: true },
+      { id: 'webhook_clipper', name: 'Alert Email Webhook & 1-Click Clipper', type: 'Naukri / LinkedIn / Wellfound Ingestion', free: true },
       ...(process.env.FREEHIRE_API_URL
         ? [{ id: 'freehire', name: 'FreeHire Custom Endpoint', type: 'Custom ATS Feed', free: true }]
         : []),

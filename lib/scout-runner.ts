@@ -9,6 +9,7 @@ import {
   fetchWorkableBoards,
   fetchSmartRecruitersBoards,
   fetchRecruiteeBoards,
+  fetchWorkdayBoards,
   enrichThinJobDescriptions,
 } from './career-scraper';
 import {
@@ -696,6 +697,7 @@ export async function executeLiveScoutRun(options?: {
     workable?: string[];
     smartrecruiters?: string[];
     recruitee?: string[];
+    workday?: Array<string | { tenant: string; site: string; host?: string; company?: string }>;
     career_urls?: string[];
   };
 }): Promise<ScoutRunSummary> {
@@ -886,10 +888,16 @@ export async function executeLiveScoutRun(options?: {
     profile.ats_companies?.recruitee ||
     DEFAULT_ATS_COMPANIES.recruitee ||
     [];
+  const workdayBoards =
+    options?.customBoards?.workday ||
+    profile.ats_companies?.workday ||
+    DEFAULT_ATS_COMPANIES.workday ||
+    [];
   const careerUrls =
     options?.customBoards?.career_urls ||
     profile.career_urls ||
     DEFAULT_CAREER_URLS;
+  const enableInternshala = profile.enable_internshala === true;
 
   const sourceHealth: Record<string, SourceHealthMetric> = {};
 
@@ -903,6 +911,7 @@ export async function executeLiveScoutRun(options?: {
     workable,
     smartRecruiters,
     recruitee,
+    workdayJobs,
     remoteOk,
     remotive,
     himalayas,
@@ -913,7 +922,9 @@ export async function executeLiveScoutRun(options?: {
     seenJobIds,
     neonStateMap,
   ] = await Promise.all([
-    timedFetch('Internshala', () => fetchInternshalaHyderabad(profile), sourceHealth),
+    enableInternshala
+      ? timedFetch('Internshala', () => fetchInternshalaHyderabad(profile), sourceHealth)
+      : Promise.resolve([]),
     process.env.RAPIDAPI_KEY
       ? timedFetch('JSearch', () => fetchJSearchLive(profile), sourceHealth)
       : Promise.resolve([]),
@@ -924,6 +935,7 @@ export async function executeLiveScoutRun(options?: {
     timedFetch('Workable', () => fetchWorkableBoards(workableBoards), sourceHealth),
     timedFetch('SmartRecruiters', () => fetchSmartRecruitersBoards(smartRecruitersBoards), sourceHealth),
     timedFetch('Recruitee', () => fetchRecruiteeBoards(recruiteeBoards), sourceHealth),
+    timedFetch('Workday ATS', () => fetchWorkdayBoards(workdayBoards), sourceHealth),
     timedFetch('RemoteOK', () => fetchRemoteOK(remoteOkTags), sourceHealth),
     timedFetch('Remotive', () => fetchRemotive(remotiveCategories, remotiveKeywords), sourceHealth),
     timedFetch('Himalayas', () => fetchHimalayas(), sourceHealth),
@@ -951,6 +963,7 @@ export async function executeLiveScoutRun(options?: {
   // Order direct Career Pages & Direct ATS first so canonical deduplication prefers official URLs
   const rawCombined: RawScoutedJob[] = [
     ...careerPages,
+    ...workdayJobs,
     ...greenhouse,
     ...lever,
     ...ashby,
@@ -1396,14 +1409,15 @@ export async function executeLiveScoutRun(options?: {
   }
 
   const sourcesQueried = [
-    'Company Career Pages',
+    'Company Career Pages (incl. Keka & Darwinbox)',
+    'Workday Direct ATS',
     'Greenhouse Direct ATS',
     'Lever Direct ATS',
     'Ashby Direct ATS',
     'Workable Direct ATS',
     'SmartRecruiters Direct ATS',
     'Recruitee Direct ATS',
-    'Internshala Jobs',
+    ...(enableInternshala ? ['Internshala Jobs'] : []),
     'RemoteOK API',
     'Remotive API',
     'Himalayas API',

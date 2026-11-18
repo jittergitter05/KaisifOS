@@ -10,31 +10,35 @@ export function cn(...inputs: ClassValue[]) {
 
 export const SOURCE_FILTER_OPTIONS = [
   'Company Career Page',
+  'Workday ATS',
   'Greenhouse ATS',
   'Lever ATS',
   'Ashby ATS',
   'Workable ATS',
   'SmartRecruiters ATS',
   'Recruitee ATS',
+  'Webhook / Clipper',
   'FreeHire API',
   'Himalayas',
-  'Internshala',
   'RemoteOK',
   'Remotive',
   'Arbeitnow',
   'TheMuse',
   'Evaluated',
   'JSearch',
+  'Internshala',
 ] as const;
 
 export function detectSource(id: string): string {
   if (id.startsWith('career_')) return 'Company Career Page';
+  if (id.startsWith('workday_')) return 'Workday ATS';
   if (id.startsWith('greenhouse_')) return 'Greenhouse ATS';
   if (id.startsWith('lever_')) return 'Lever ATS';
   if (id.startsWith('ashby_')) return 'Ashby ATS';
   if (id.startsWith('workable_')) return 'Workable ATS';
   if (id.startsWith('smartrecruiters_')) return 'SmartRecruiters ATS';
   if (id.startsWith('recruitee_')) return 'Recruitee ATS';
+  if (id.startsWith('webhook_') || id.startsWith('clipper_')) return 'Webhook / Clipper';
   if (id.startsWith('freehire_')) return 'FreeHire API';
   if (id.startsWith('himalayas_')) return 'Himalayas';
   if (id.startsWith('arbeitnow_')) return 'Arbeitnow';
@@ -266,12 +270,22 @@ export function deriveDynamicSearchParams(profile?: {
   if (remotiveCategories.size === 0) remotiveCategories.add('product');
 
   const remotiveKeywords = roles.slice(0, 4).map((r) => r.toLowerCase());
+  const workdaySearchTerms = Array.from(
+    new Set(
+      roles
+        .flatMap((r) => r.toLowerCase().split(/\W+/))
+        .filter((w) =>
+          ['product', 'marketing', 'growth', 'analyst', 'associate', 'founder', 'engineer', 'data'].includes(w)
+        )
+    )
+  ).slice(0, 4);
 
   return {
     internshalaSlugs: Array.from(slugSet).slice(0, 5),
     remoteOkTags: Array.from(remoteOkTags).slice(0, 5),
     remotiveCategories: Array.from(remotiveCategories).slice(0, 4),
     remotiveKeywords,
+    workdaySearchTerms: workdaySearchTerms.length > 0 ? workdaySearchTerms : ['product', 'growth'],
   };
 }
 

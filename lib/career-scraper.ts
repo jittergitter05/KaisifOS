@@ -1,5 +1,9 @@
 import { validateSafePublicUrl } from './utils';
 import { decodeAndStripHtml } from './eligibility';
+import {
+  parseWorkdayBoardTarget,
+  type WorkdayBoardTarget,
+} from './profile-presets';
 
 export interface ScrapedCareerJob {
   id: string;
@@ -58,6 +62,7 @@ export function detectEmbeddedAtsBoards(html: string): {
   workable: string[];
   smartrecruiters: string[];
   recruitee: string[];
+  workday: WorkdayBoardTarget[];
 } {
   const gh = new Set<string>();
   const lv = new Set<string>();
@@ -65,6 +70,7 @@ export function detectEmbeddedAtsBoards(html: string): {
   const wk = new Set<string>();
   const sr = new Set<string>();
   const rc = new Set<string>();
+  const wdMap = new Map<string, WorkdayBoardTarget>();
 
   for (const m of html.matchAll(/boards(?:-api)?\.greenhouse\.io\/(?:v1\/boards\/)?([a-z0-9_-]+)/gi)) {
     if (m[1] && !['embed', 'v1', 'assets'].includes(m[1].toLowerCase())) gh.add(m[1].toLowerCase());
@@ -84,6 +90,14 @@ export function detectEmbeddedAtsBoards(html: string): {
   for (const m of html.matchAll(/([a-z0-9-]+)\.recruitee\.com/gi)) {
     if (m[1] && m[1].toLowerCase() !== 'www') rc.add(m[1].toLowerCase());
   }
+  for (const m of html.matchAll(
+    /https?:\/\/([a-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com\/(?:[a-z]{2}-[A-Z]{2}\/)?([a-zA-Z0-9_-]+)/gi
+  )) {
+    const parsed = parseWorkdayBoardTarget({ tenant: m[1], host: m[2], site: m[3] });
+    if (parsed) {
+      wdMap.set(`${parsed.tenant}::${parsed.site}`, parsed);
+    }
+  }
 
   return {
     greenhouse: Array.from(gh),
@@ -92,6 +106,7 @@ export function detectEmbeddedAtsBoards(html: string): {
     workable: Array.from(wk),
     smartrecruiters: Array.from(sr),
     recruitee: Array.from(rc),
+    workday: Array.from(wdMap.values()),
   };
 }
 
@@ -593,6 +608,253 @@ export async function fetchRecruiteeBoards(boards: string[]): Promise<CareerFetc
   return { jobs: results, failedBoards, truncatedBoards };
 }
 
+export function extractWorkdayCxsJobs(
+  data: any,
+  origin: string,
+  tenant: string,
+  site: string,
+  companyName: string
+): ScrapedCareerJob[] {
+  const postings = Array.isArray(data?.jobPostings) ? data.jobPostings : [];
+  if (postings.length === 0) return [];
+
+  const sorted = [...postings]
+    .sort(
+      (a: any, b: any) =>
+        scoreBoardPostingPriority(String(b.title || ''), String(b.locationsText || '')) -
+        scoreBoardPostingPriority(String(a.title || ''), String(a.locationsText || ''))
+    )
+    .slice(0, 12);
+
+  return sorted
+    .filter((item: any) => item?.title && item?.externalPath)
+    .map((item: any) => {
+      const extPath = String(item.externalPath).startsWith('/')
+        ? String(item.externalPath)
+        : `/${String(item.externalPath)}`;
+      const applyUrl = `${origin}/${encodeURIComponent(site)}${extPath}`;
+      const postedOn = item.postedOn ? `Posted: ${String(item.postedOn)}. ` : '';
+      const bulletFields = Array.isArray(item.bulletFields) ? item.bulletFields.join(' · ') : '';
+      const loc = String(item.locationsText || 'Hyderabad / India').trim();
+      return {
+        id: `workday_${tenant}_${stableShortHash(`${tenant}::${site}::${extPath}`)}`,
+        title: String(item.title).trim(),
+        company: companyName,
+        location: loc,
+        salary: 'Direct Workday ATS',
+        description: `${String(item.title).trim()} at ${companyName} (${loc}). ${postedOn}${bulletFields}`.trim(),
+        url: applyUrl,
+        source: 'Workday ATS',
+      };
+    });
+}
+
+export async function fetchWorkdayBoards(
+  boards: Array<string | WorkdayBoardTarget>,
+  options?: { searchText?: string; maxBoards?: number }
+): Promise<CareerFetchResult> {
+  const results: ScrapedCareerJob[] = [];
+  const failedBoards: string[] = [];
+  const parsedTargets: WorkdayBoardTarget[] = [];
+  const seenTargets = new Set<string>();
+
+  for (const raw of boards || []) {
+    const parsed = parseWorkdayBoardTarget(raw);
+    if (!parsed) continue;
+    const key = `${parsed.tenant}::${parsed.site}`;
+    if (seenTargets.has(key)) continue;
+    seenTargets.add(key);
+    parsedTargets.push(parsed);
+  }
+
+  const maxBoards = options?.maxBoards ?? MAX_BOARDS_PER_SOURCE;
+  const activeTargets = parsedTargets.slice(0, maxBoards);
+  const truncatedBoards = Math.max(0, parsedTargets.length - activeTargets.length);
+
+  await Promise.all(
+    activeTargets.map(async (target) => {
+      const host = target.host || 'wd5';
+      const origin = `https://${target.tenant}.${host}.myworkdayjobs.com`;
+      const endpoint = `${origin}/wday/cxs/${encodeURIComponent(target.tenant)}/${encodeURIComponent(
+        target.site
+      )}/jobs`;
+      const companyName = target.company || slugToTitleCase(target.tenant);
+
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            Origin: origin,
+            Referer: `${origin}/${target.site}`,
+            'User-Agent': 'KaisifOS-CareerCrawler/1.0 (+https://github.com)',
+          },
+          body: JSON.stringify({
+            appliedFacets: {},
+            limit: 20,
+            offset: 0,
+            searchText: options?.searchText || '',
+          }),
+          signal: AbortSignal.timeout(7000),
+        });
+
+        if (!res.ok) {
+          failedBoards.push(`${target.tenant} (${res.status})`);
+          return;
+        }
+
+        const data = await res.json();
+        const jobs = extractWorkdayCxsJobs(data, origin, target.tenant, target.site, companyName);
+        if (jobs.length === 0) return;
+
+        // Fetch full job descriptions for the top 5 priority postings per Workday board
+        const topForDetail = jobs.slice(0, 5);
+        await Promise.all(
+          topForDetail.map(async (job) => {
+            try {
+              const escapedOrigin = origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const escapedSite = encodeURIComponent(target.site).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const jobPathMatch = job.url.match(
+                new RegExp(`^${escapedOrigin}/${escapedSite}(/.+)$`)
+              );
+              const extPath = jobPathMatch?.[1];
+              if (!extPath) return;
+              const detailUrl = `${origin}/wday/cxs/${encodeURIComponent(
+                target.tenant
+              )}/${encodeURIComponent(target.site)}${extPath}`;
+              const dRes = await fetch(detailUrl, {
+                headers: {
+                  Accept: 'application/json',
+                  'User-Agent': 'KaisifOS-CareerCrawler/1.0 (+https://github.com)',
+                },
+                signal: AbortSignal.timeout(4500),
+              });
+              if (!dRes.ok) return;
+              const dJson = await dRes.json();
+              const info = dJson?.jobPostingInfo;
+              if (info?.jobDescription) {
+                const fullDesc = stripHtml(String(info.jobDescription));
+                if (fullDesc.length >= 20) {
+                  job.description = (
+                    fullDesc.length > job.description.length
+                      ? fullDesc
+                      : `${job.description} ${fullDesc}`
+                  ).substring(0, 12000);
+                }
+              }
+              if (info?.location) {
+                job.location = String(info.location).trim() || job.location;
+              }
+            } catch {
+              // Keep summary listing on detail fetch timeout
+            }
+          })
+        );
+
+        results.push(...jobs);
+      } catch (err) {
+        failedBoards.push(`${target.tenant} (${(err as Error).message.slice(0, 24)})`);
+      }
+    })
+  );
+
+  return { jobs: results, failedBoards, truncatedBoards };
+}
+
+export function extractKekaOrDarwinboxJobs(
+  html: string,
+  baseUrl: string,
+  fallbackCompany?: string
+): ScrapedCareerJob[] {
+  const jobs: ScrapedCareerJob[] = [];
+  const seen = new Set<string>();
+  const company = fallbackCompany || inferCompanyFromUrl(baseUrl);
+  const isKeka = /kekacdn|keka\.com|keka-jobs/i.test(html) || /keka/i.test(baseUrl);
+  const isDarwinbox = /darwinbox|darwinboxcdn/i.test(html) || /darwinbox/i.test(baseUrl);
+  if (!isKeka && !isDarwinbox) return jobs;
+
+  // 1. Embedded JSON blocks inside script tags or API payloads
+  const jsonPatterns = [
+    /"title"\s*:\s*"([^"]{4,110})"[^}]{0,400}?"(?:jobUrl|applyUrl|url|slug|id)"\s*:\s*"?([a-zA-Z0-9/._?=&:-]{2,200})"?/gi,
+    /"jobTitle"\s*:\s*"([^"]{4,110})"[^}]{0,400}?"(?:jobId|url|slug|id)"\s*:\s*"?([a-zA-Z0-9/._?=&:-]{2,200})"?/gi,
+  ];
+  for (const regex of jsonPatterns) {
+    for (const match of html.matchAll(regex)) {
+      const title = stripHtml(match[1] || '').trim();
+      const ref = (match[2] || '').trim();
+      if (!title || title.length < 4) continue;
+      if (/\b(home|about|contact|privacy|terms|careers)\b/i.test(title)) continue;
+      const windowSlice = html.slice(Math.max(0, (match.index ?? 0) - 120), (match.index ?? 0) + 520);
+      const locMatch = windowSlice.match(/"(?:location|city|locationName)"\s*:\s*"([^"]{2,60})"/i);
+      const loc = locMatch?.[1]?.trim() || 'Hyderabad / India';
+      let url = baseUrl;
+      if (/^https?:\/\//i.test(ref)) {
+        url = ref;
+      } else if (ref.startsWith('/')) {
+        try {
+          url = new URL(ref, baseUrl).toString();
+        } catch {
+          url = baseUrl;
+        }
+      } else {
+        url = `${baseUrl.replace(/\/$/, '')}#job=${encodeURIComponent(ref)}`;
+      }
+      const key = `${title.toLowerCase()}::${url}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      jobs.push({
+        id: `career_${stableShortHash(`${url}::${title}`)}`,
+        title,
+        company,
+        location: loc,
+        salary: isDarwinbox ? 'Darwinbox Portal' : 'Keka Portal',
+        description: `${title} opening on ${company} ${isDarwinbox ? 'Darwinbox' : 'Keka'} careers portal (${loc}).`,
+        url,
+        source: 'Company Career Page',
+      });
+      if (jobs.length >= 15) return jobs;
+    }
+  }
+
+  // 2. Keka / Darwinbox portal links (`*.keka.com/careers/jobdetails/...` or `*.darwinbox.in/ms/candidate/careers/...`)
+  const portalAnchorRegex = /<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  for (const match of html.matchAll(portalAnchorRegex)) {
+    const href = (match[1] || '').trim();
+    const label = stripHtml(match[2] || '').replace(/\s+/g, ' ').trim();
+    if (!label || label.length < 5 || label.length > 110) continue;
+    if (!/(jobdetails|candidate\/careers|openings|requisition|jobs\/view)/i.test(href)) continue;
+    let absUrl = baseUrl;
+    try {
+      absUrl = new URL(href, baseUrl).toString();
+    } catch {
+      continue;
+    }
+    const key = `${label.toLowerCase()}::${absUrl}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const snippet = stripHtml(
+      html.slice(Math.max(0, (match.index ?? 0) - 160), (match.index ?? 0) + 320)
+    );
+    const cityMatch = snippet.match(
+      /\b(Hyderabad|Telangana|Bengaluru|Bangalore|Mumbai|Pune|Chennai|Noida|Gurugram|India|Remote|Hybrid)\b/i
+    );
+    jobs.push({
+      id: `career_${stableShortHash(absUrl)}`,
+      title: label,
+      company,
+      location: cityMatch ? cityMatch[1] : 'Hyderabad / India',
+      salary: isDarwinbox ? 'Darwinbox Portal' : 'Keka Portal',
+      description: `${label} opening listed on ${company} official portal (${absUrl}).`,
+      url: absUrl,
+      source: 'Company Career Page',
+    });
+    if (jobs.length >= 15) break;
+  }
+
+  return jobs;
+}
+
 export async function fetchCompanyCareerPages(careerUrls: string[]): Promise<CareerFetchResult> {
   const results: ScrapedCareerJob[] = [];
   const failedBoards: string[] = [];
@@ -634,6 +896,12 @@ export async function fetchCompanyCareerPages(careerUrls: string[]): Promise<Car
           return;
         }
 
+        const kdJobs = extractKekaOrDarwinboxJobs(html, check.url.toString(), companyName);
+        if (kdJobs.length > 0) {
+          results.push(...kdJobs);
+          return;
+        }
+
         const embedded = detectEmbeddedAtsBoards(html);
         if (embedded.workable.length > 0) {
           const wkRes = await fetchWorkableBoards(embedded.workable.slice(0, 2));
@@ -642,6 +910,10 @@ export async function fetchCompanyCareerPages(careerUrls: string[]): Promise<Car
         if (embedded.recruitee.length > 0) {
           const rcRes = await fetchRecruiteeBoards(embedded.recruitee.slice(0, 2));
           results.push(...rcRes.jobs);
+        }
+        if (embedded.workday.length > 0) {
+          const wdRes = await fetchWorkdayBoards(embedded.workday.slice(0, 2), { maxBoards: 2 });
+          results.push(...wdRes.jobs);
         }
 
         const anchorJobs = extractCareerPageAnchors(html, check.url.toString(), companyName);

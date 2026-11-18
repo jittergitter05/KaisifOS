@@ -17,6 +17,7 @@
     "Hyderabad"
   ],
   "open_to_relocation": false,
+  "enable_internshala": false,
   "relocation_preference": {
     "willing": false,
     "requirements": [
@@ -94,6 +95,32 @@
     ],
     "recruitee": [
       "framer"
+    ],
+    "workday": [
+      {
+        "tenant": "salesforce",
+        "site": "External_Career_Site",
+        "host": "wd12",
+        "company": "Salesforce"
+      },
+      {
+        "tenant": "servicenow",
+        "site": "Careers",
+        "host": "wd1",
+        "company": "ServiceNow"
+      },
+      {
+        "tenant": "nvidia",
+        "site": "NVIDIAExternalCareerSite",
+        "host": "wd5",
+        "company": "NVIDIA"
+      },
+      {
+        "tenant": "adobe",
+        "site": "external_experienced",
+        "host": "wd5",
+        "company": "Adobe"
+      }
     ]
   },
   "career_urls": [
