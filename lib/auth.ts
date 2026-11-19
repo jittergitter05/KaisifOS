@@ -11,6 +11,16 @@ export function isCustomAuthConfigured(): boolean {
 }
 
 /**
+ * Returns true when an operator configured only one of ADMIN_USER or ADMIN_PASS.
+ * In this misconfigured state, authentication MUST fail closed instead of falling back to open mode.
+ */
+export function hasPartialAuthConfig(): boolean {
+  const hasUser = Boolean(process.env.ADMIN_USER && process.env.ADMIN_USER.trim() !== '');
+  const hasPass = Boolean(process.env.ADMIN_PASS && process.env.ADMIN_PASS.trim() !== '');
+  return hasUser !== hasPass;
+}
+
+/**
  * Constant-time string comparison to prevent timing side-channel attacks on HMAC tokens
  * and credential verification in Edge and Node runtimes.
  */
@@ -58,13 +68,14 @@ export async function signToken(): Promise<string> {
  * Verifies if the provided token matches the expected HMAC signature using constant-time comparison.
  */
 export async function verifyToken(token: string | undefined): Promise<boolean> {
-  if (!token) return false;
+  if (!token || hasPartialAuthConfig()) return false;
   const expectedToken = await signToken();
   return constantTimeEqual(token, expectedToken);
 }
 
 /**
  * Checks whether a request is authorized.
+ * - If only one of ADMIN_USER or ADMIN_PASS is set, fails CLOSED for security.
  * - If custom ADMIN_USER & ADMIN_PASS are set in environment variables, requires a valid HMAC cookie.
  * - If running in a fresh fork / local environment without custom .env credentials, allows direct
  *   operator access unless the user explicitly locked the session via Sign Out.
@@ -73,6 +84,9 @@ export async function isAuthorizedRequest(
   authCookieValue: string | undefined,
   lockedCookieValue?: string | undefined
 ): Promise<boolean> {
+  if (hasPartialAuthConfig()) {
+    return false;
+  }
   if (await verifyToken(authCookieValue)) {
     return true;
   }
@@ -80,6 +94,53 @@ export async function isAuthorizedRequest(
     return true;
   }
   return false;
+}
+
+/**
+ * Verifies that a cookie-authenticated mutating browser request originates from the same host.
+ * Supports reverse proxies (Cloud Run / nginx / Vercel) via X-Forwarded-Host as well as Host,
+ * protecting mutating endpoints even when cookies use SameSite=None inside embedded HTTPS iframes.
+ */
+export function isSameOriginRequest(headers: Headers): boolean {
+  const secFetchSite = (headers.get('sec-fetch-site') || '').trim().toLowerCase();
+  if (secFetchSite === 'cross-site') {
+    return false;
+  }
+
+  const allowedHosts = new Set<string>();
+  const rawHost = (headers.get('host') || '').trim().toLowerCase();
+  if (rawHost) allowedHosts.add(rawHost);
+
+  const rawForwardedHost = (headers.get('x-forwarded-host') || '')
+    .split(',')[0]
+    ?.trim()
+    .toLowerCase();
+  if (rawForwardedHost) allowedHosts.add(rawForwardedHost);
+
+  const origin = headers.get('origin');
+  if (origin && origin !== 'null') {
+    try {
+      const originHost = new URL(origin).host.toLowerCase();
+      return allowedHosts.size > 0 && allowedHosts.has(originHost);
+    } catch {
+      return false;
+    }
+  }
+  if (origin === 'null') {
+    return false;
+  }
+
+  const referer = headers.get('referer');
+  if (referer) {
+    try {
+      const refererHost = new URL(referer).host.toLowerCase();
+      return allowedHosts.size > 0 && allowedHosts.has(refererHost);
+    } catch {
+      return false;
+    }
+  }
+
+  return secFetchSite === 'same-origin' || secFetchSite === 'none' || !secFetchSite;
 }
 
 /**

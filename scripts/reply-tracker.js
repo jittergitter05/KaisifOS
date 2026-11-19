@@ -6,7 +6,15 @@ import {
   isNeonPostgresConfigured,
   getNeonAppliedJobs,
   updateNeonJobFields,
+  sanitizePostgresErrorMessage,
 } from '../lib/neon-db.js';
+
+function redactSensitiveTrace(raw) {
+  return sanitizePostgresErrorMessage(raw)
+    .replace(/https?:\/\/discord(?:app)?\.com\/api\/webhooks\/\d+\/[A-Za-z0-9._-]+/gi, 'https://discord.com/api/webhooks/[REDACTED]')
+    .replace(/Bearer\s+[A-Za-z0-9._\-~+/]+=*/gi, 'Bearer [REDACTED]')
+    .replace(/\b(AIza[0-9A-Za-z_\-]{20,}|gsk_[0-9A-Za-z_\-]{16,}|sk-or-v1-[0-9A-Za-z_\-]{16,}|sk-[0-9A-Za-z_\-]{20,})\b/g, '[REDACTED_KEY]');
+}
 
 dotenv.config();
 
@@ -59,14 +67,17 @@ async function sendDiscordAlert(content) {
   if (!webhookUrl) return;
 
   try {
-    await fetch(webhookUrl, {
+    const res = await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: content.substring(0, 2000) }),
       signal: AbortSignal.timeout(8000),
     });
+    if (!res.ok) {
+      console.error(`[Discord] Alert returned HTTP ${res.status}`);
+    }
   } catch (err) {
-    console.error('[Discord] Alert failed:', err.message);
+    console.error('[Discord] Alert failed:', redactSensitiveTrace(err?.message || err));
   }
 }
 
@@ -233,6 +244,7 @@ async function main() {
         colBValues = latestColB.data.values || [];
       }
 
+      const alertedKeys = new Set();
       for (const hit of hits) {
         if (neonConfigured && (hit.canonicalKey || hit.id)) {
           await updateNeonJobFields(
@@ -272,14 +284,17 @@ async function main() {
           }
         }
 
-        const alertMsg = `📩 REPLY DETECTED\nCompany: ${hit.company}\nFrom: ${hit.from}\nSubject: ${hit.subject}\nDate: ${hit.dateStr}\n→ Update your tracker and respond within 2 hours.`;
-        await sendDiscordAlert(alertMsg);
+        const dedupAlertKey = `${String(hit.company || '').trim().toLowerCase()}::${String(hit.subject || '').trim().toLowerCase()}`;
+        if (!alertedKeys.has(dedupAlertKey)) {
+          alertedKeys.add(dedupAlertKey);
+          const alertMsg = `📩 REPLY DETECTED\nCompany: ${hit.company}\nFrom: ${hit.from}\nSubject: ${hit.subject}\nDate: ${hit.dateStr}\n→ Update your tracker and respond within 2 hours.`;
+          await sendDiscordAlert(alertMsg);
+        }
       }
     }
   } catch (error) {
-    const errorMessage = error.stack || error.message || String(error);
-    const safeError = errorMessage.substring(0, 1500);
-    console.error(`[Reply Tracker Error] ${errorMessage}`);
+    const safeError = redactSensitiveTrace(error?.stack || error?.message || String(error));
+    console.error(`[Reply Tracker Error] ${safeError}`);
     const payload = `🚨 **Reply Tracker Failed** 🚨\n\n**Error Trace:**\n\`\`\`js\n${safeError}\n\`\`\``;
     await sendDiscordAlert(payload);
     process.exit(1);

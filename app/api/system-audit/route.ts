@@ -245,7 +245,70 @@ export async function GET() {
     },
   ];
 
+  const discordConfigured = Boolean(process.env.DISCORD_WEBHOOK_URL?.trim());
+  const llmConfigured = geminiConfigured || groqConfigured || openRouterConfigured;
+  const authConfigured = isCustomAuthConfigured();
+
+  const readinessChecklist = [
+    {
+      id: 'auth-lockdown',
+      label: 'Operator Auth Lockdown (ADMIN_USER + ADMIN_PASS)',
+      status: authConfigured ? 'pass' : 'warn',
+      detail: authConfigured
+        ? 'HMAC-SHA256 login gate active with constant-time verification and CSRF origin checks.'
+        : 'Running in Open Local Operator Mode. Set ADMIN_USER and ADMIN_PASS in .env before public deployment.',
+    },
+    {
+      id: 'neon-postgres',
+      label: 'Shared Neon Serverless Postgres Persistence',
+      status: neonConfigured ? 'pass' : 'warn',
+      detail: neonConfigured
+        ? 'DATABASE_URL active with canonical cross-source deduplication, follow-up cadence timestamps, and reply intelligence columns.'
+        : 'Using local/Sheets fallback. Configure DATABASE_URL for zero-loss cloud persistence.',
+    },
+    {
+      id: 'free-llm-chain',
+      label: 'Free 4-Tier AI Scoring & ATS Tailor Chain',
+      status: llmConfigured ? 'pass' : 'warn',
+      detail: llmConfigured
+        ? `Live LLM tier configured (${geminiConfigured ? 'Gemini' : groqConfigured ? 'Groq' : 'OpenRouter'}) with deterministic retry-safe fallback.`
+        : 'No LLM API key detected — running strictly on Deterministic Rubric v3.2 + Grounded Tailor Engine.',
+    },
+    {
+      id: 'webhook-secret',
+      label: 'Ingestion & Reply Webhook Bearer Secret',
+      status: ingestWebhookConfigured ? 'pass' : 'warn',
+      detail: ingestWebhookConfigured
+        ? 'INGEST_WEBHOOK_SECRET configured with constant-time SHA-256 Bearer verification for Apps Script automation.'
+        : 'Set INGEST_WEBHOOK_SECRET in .env to authorize Google Apps Script job-alert & Gmail reply push webhooks.',
+    },
+    {
+      id: 'discord-alerts',
+      label: 'Discord Real-Time Interview & Scout Alerts',
+      status: discordConfigured ? 'pass' : 'warn',
+      detail: discordConfigured
+        ? 'DISCORD_WEBHOOK_URL configured — instant notifications enabled for high-match roles and recruiter replies.'
+        : 'Optional: add DISCORD_WEBHOOK_URL for push alerts on INTERVIEW invites and daily high-conviction matches.',
+    },
+    {
+      id: 'consumer-gmail-reply-webhook',
+      label: 'Consumer @gmail.com Reply Intelligence Endpoint',
+      status: ingestWebhookConfigured ? 'pass' : 'warn',
+      detail: ingestWebhookConfigured
+        ? 'GET/POST /api/ingest/reply ready — auto-classifies INTERVIEW / REPLIED / REJECTED while filtering automated application receipts.'
+        : 'Endpoint live at /api/ingest/reply; configure INGEST_WEBHOOK_SECRET and paste the Apps Script below to automate consumer Gmail tracking.',
+    },
+  ];
+
   const auditFindings = [
+    {
+      id: 'ARCH-05',
+      layer: 'Reply Intelligence, Follow-Up Cadence, People Finder & Grounded ATS Tailor Studio',
+      before: 'Consumer @gmail.com replies required manual stage updates; applied roles lacked Day-5/11 follow-up tracking; hiring managers required manual LinkedIn searches; resume bullets had no JD tailoring studio.',
+      after:
+        'Added /api/ingest/reply (filtering AUTO_ACK receipts), Day-5/11/21 cadence + >14d stale expiry bulk archival, 1-click persona Boolean LinkedIn People Finder, and zero-fabrication /api/tailor studio with Blob .md/.html export.',
+      status: 'VERIFIED',
+    },
     {
       id: 'ARCH-04',
       layer: 'Canonical Cross-Source Deduplication, Positive Geo Allowlist & Retry-Safe LLM Queue',
@@ -267,7 +330,7 @@ export async function GET() {
       layer: 'SSRF, CSV Injection, & Redirect-Pinned Security Perimeter',
       before: 'Open redirects, private IP URL bridges, formula injection in CSV export, and unthrottled AI/login endpoints.',
       after:
-        'Redirect host pinning on Drive, validateSafePublicUrl on FREEHIRE_API_URL, RFC4180 + formula escaping in CSV, and sliding-window IP rate limits on auth/evaluate/prep.',
+        'Redirect host pinning on Drive, validateSafePublicUrl on FREEHIRE_API_URL, RFC4180 + formula escaping in CSV, and sliding-window IP rate limits on auth/evaluate/prep/tailor/ingest.',
       status: 'VERIFIED',
     },
     {
@@ -282,10 +345,12 @@ export async function GET() {
 
   return NextResponse.json({
     timestamp: new Date().toISOString(),
-    authConfigured: isCustomAuthConfigured(),
+    authConfigured,
     neonConfigured,
     freehireBridgeConfigured,
     ingestWebhookConfigured,
+    discordConfigured,
+    llmConfigured,
     storageMode: neonConfigured
       ? 'neon-postgres'
       : isCloudSheetsConfigured() && !stats.cloud_error
@@ -303,6 +368,7 @@ export async function GET() {
       ? 'OpenRouter Llama 3.3 70B (:free)'
       : 'Deterministic 4-Pillar Rubric v3.2',
     stats,
+    readinessChecklist,
     envChecks,
     failoverChains,
     auditFindings,

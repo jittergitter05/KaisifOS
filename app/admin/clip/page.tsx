@@ -16,7 +16,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { copyToClipboardSafe } from '@/lib/utils';
+import { copyToClipboardSafe, safeExternalUrl } from '@/lib/utils';
 
 interface IngestedOutcome {
   id: string;
@@ -544,11 +544,11 @@ export default function ClipJobPage() {
                         {item.engineUsed || item.evaluationStatus}
                       </div>
                     </div>
-                    {item.url && (
+                    {safeExternalUrl(item.url) !== '#' && (
                       <a
-                        href={item.url}
+                        href={safeExternalUrl(item.url)}
                         target="_blank"
-                        rel="noreferrer"
+                        rel="noopener noreferrer"
                         className="p-2 rounded-md border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-emerald-600 dark:hover:text-emerald-400"
                         aria-label="Open original posting"
                       >

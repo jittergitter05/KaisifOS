@@ -4,6 +4,8 @@ import {
   DEFAULT_OPERATOR_USER,
   DEFAULT_OPERATOR_KEY,
   isCustomAuthConfigured,
+  hasPartialAuthConfig,
+  isSameOriginRequest,
   constantTimeEqual,
   getCookieSecurityOptions,
 } from '@/lib/auth';
@@ -17,12 +19,27 @@ export async function GET() {
   const profile = await getCandidateProfileAsync();
   return NextResponse.json({
     customAuthConfigured: isCustomAuthConfigured(),
+    partialAuthMisconfigured: hasPartialAuthConfig(),
     brandName: profile.system_name || siteConfig.name,
   });
 }
 
 export async function POST(req: NextRequest) {
   try {
+    if (!isSameOriginRequest(req.headers)) {
+      return NextResponse.json({ error: 'Cross-origin login request blocked.' }, { status: 403 });
+    }
+
+    if (hasPartialAuthConfig()) {
+      return NextResponse.json(
+        {
+          error:
+            'Authentication is misconfigured: set BOTH ADMIN_USER and ADMIN_PASS (or remove both for local fork mode).',
+        },
+        { status: 503 }
+      );
+    }
+
     const ip = extractClientIp(req.headers);
     const limitResult = checkRateLimit(`auth:login:${ip}`, 15, 5 * 60 * 1000);
     if (!limitResult.allowed) {

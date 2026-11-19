@@ -9,6 +9,7 @@ import {
 import {
   extractHighSignalJdContext,
   parseLooseJSON,
+  redactSecrets,
   SKILL_SYNONYMS,
   ROLE_SYNONYMS,
 } from './utils';
@@ -137,7 +138,7 @@ function markLlmProviderFailure(name: LlmProviderName, err: unknown): void {
     return;
   }
   b.failures += 1;
-  b.lastReason = msg.slice(0, 60);
+  b.lastReason = redactSecrets(msg, 60);
   if (b.failures >= LLM_TRIP_THRESHOLD) {
     b.openUntil = Date.now() + LLM_COOLDOWN_MS;
   }
@@ -313,8 +314,9 @@ export async function generateStructuredJSONWithLLM<T = Record<string, unknown>>
       chainStatus.gemini = 'invalid-json';
     } catch (err) {
       markLlmProviderFailure('gemini', err);
-      chainStatus.gemini = `failed: ${(err as Error).message.slice(0, 60)}`;
-      console.warn('[LLM JSON Helper] Gemini fallback triggered:', (err as Error).message);
+      const safeMsg = redactSecrets((err as Error).message, 60);
+      chainStatus.gemini = `failed: ${safeMsg}`;
+      console.warn('[LLM JSON Helper] Gemini fallback triggered:', safeMsg);
     }
   } else if (ai && geminiBreaker.open) {
     chainStatus.gemini = `cooldown-open (${geminiBreaker.waitSec}s)`;
@@ -355,8 +357,9 @@ export async function generateStructuredJSONWithLLM<T = Record<string, unknown>>
       chainStatus.groq = 'invalid-json';
     } catch (err) {
       markLlmProviderFailure('groq', err);
-      chainStatus.groq = `failed: ${(err as Error).message.slice(0, 60)}`;
-      console.warn('[LLM JSON Helper] Groq fallback triggered:', (err as Error).message);
+      const safeMsg = redactSecrets((err as Error).message, 60);
+      chainStatus.groq = `failed: ${safeMsg}`;
+      console.warn('[LLM JSON Helper] Groq fallback triggered:', safeMsg);
     }
   } else if (process.env.GROQ_API_KEY && !process.env.GROQ_API_KEY.startsWith('xai-') && groqBreaker.open) {
     chainStatus.groq = `cooldown-open (${groqBreaker.waitSec}s)`;
@@ -388,8 +391,9 @@ export async function generateStructuredJSONWithLLM<T = Record<string, unknown>>
         }
       } catch (err) {
         lastOrErr = err;
-        chainStatus.openrouter = `failed (${m.id}): ${(err as Error).message.slice(0, 48)}`;
-        console.warn(`[LLM JSON Helper] OpenRouter (${m.id}) fallback triggered:`, (err as Error).message);
+        const safeMsg = redactSecrets((err as Error).message, 48);
+        chainStatus.openrouter = `failed (${m.id}): ${safeMsg}`;
+        console.warn(`[LLM JSON Helper] OpenRouter (${m.id}) fallback triggered:`, safeMsg);
       }
     }
     if (lastOrErr) {
@@ -967,19 +971,17 @@ Return JSON with exact evidence-first key order:
       ? Math.min(48, subscoreSum)
       : subscoreSum;
 
-    // Anti-hallucination verification on matched_skills against candidate profile AND job text
+    // Anti-hallucination verification on matched_skills against candidate profile
     const rawMatched = strArrOr(parsed.matched_skills, baseline.matched_skills).slice(0, 8);
     const verifiedMatched: string[] = [];
     const ungroundedTransfers: string[] = [];
     const profileCorpus = `${(profile.skills || []).join(' ')} ${(profile.key_metrics || []).join(' ')}`.toLowerCase();
-    const jobCorpus = `${job.title} ${cleanDescription}`.toLowerCase();
 
     for (const sk of rawMatched) {
       const inProfile =
         (profile.skills || []).some((ps) => matchesSkillWithSynonyms(sk.toLowerCase(), ps)) ||
         hasWholeToken(profileCorpus, sk.toLowerCase());
-      const inJobOrProfile = inProfile && (matchesSkillWithSynonyms(jobCorpus, sk) || inProfile);
-      if (inJobOrProfile) {
+      if (inProfile) {
         verifiedMatched.push(sk);
       } else {
         ungroundedTransfers.push(sk);

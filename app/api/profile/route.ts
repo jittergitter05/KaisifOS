@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { isAuthorizedRequest } from '@/lib/auth';
+import { isAuthorizedRequest, isSameOriginRequest } from '@/lib/auth';
 import {
   FORK_PROFILE_TEMPLATES,
   CandidateProfile,
@@ -11,7 +11,8 @@ import {
   parseWorkdayBoardTarget,
   type WorkdayBoardTarget,
 } from '@/lib/profile';
-import { validateSafePublicUrl } from '@/lib/utils';
+import { sanitizeHttpUrl, validateSafePublicUrl } from '@/lib/utils';
+import { checkRateLimit, extractClientIp } from '@/lib/rate-limit';
 import { siteConfig } from '@/config/site';
 
 function sanitizeStringArray(val: unknown, fallback: string[] = []): string[] {
@@ -39,6 +40,18 @@ export async function GET(request: NextRequest) {
 
   try {
     const profile = await getCandidateProfileAsync();
+    if (isPublic) {
+      // Return only non-PII public display fields (never email, salary floors, private ATS targets, or synthesizer URL)
+      return NextResponse.json({
+        system_name: profile.system_name || siteConfig.name,
+        name: profile.name,
+        experience_level: profile.experience_level,
+        portfolio: sanitizeHttpUrl(profile.portfolio, 300),
+        key_metrics: Array.isArray(profile.key_metrics) ? profile.key_metrics.slice(0, 4) : [],
+        target_roles: Array.isArray(profile.target_roles) ? profile.target_roles.slice(0, 6) : [],
+        target_cities: Array.isArray(profile.target_cities) ? profile.target_cities.slice(0, 6) : [],
+      });
+    }
     return NextResponse.json(profile);
   } catch (e) {
     console.error('[Profile] Read error:', e);
@@ -47,6 +60,19 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  if (!isSameOriginRequest(request.headers)) {
+    return NextResponse.json({ error: 'Cross-origin request blocked.' }, { status: 403 });
+  }
+
+  const ip = extractClientIp(request.headers);
+  const limit = checkRateLimit(`profile:write:${ip}`, 30, 5 * 60 * 1000);
+  if (!limit.allowed) {
+    return NextResponse.json(
+      { error: `Rate limit exceeded. Retry in ${limit.retryAfterSeconds}s.` },
+      { status: 429, headers: { 'Retry-After': String(limit.retryAfterSeconds) } }
+    );
+  }
+
   const cookieStore = cookies();
   const authCookie = cookieStore.get('kaisifos_auth')?.value;
   const lockedCookie = cookieStore.get('kaisifos_locked')?.value;
@@ -163,15 +189,14 @@ export async function POST(request: NextRequest) {
       experience_level: String(body.experience_level ?? current.experience_level ?? 'Fresher / Entry Level')
         .trim()
         .slice(0, 120),
-      portfolio: String(body.portfolio ?? current.portfolio ?? '').trim().slice(0, 300),
+      portfolio: sanitizeHttpUrl(body.portfolio ?? current.portfolio ?? '', 300),
       key_metrics: sanitizeStringArray(body.key_metrics, current.key_metrics),
       skills: sanitizeStringArray(body.skills, current.skills),
       languages: sanitizeStringArray(body.languages, current.languages),
-      resume_synthesizer_url: String(
-        body.resume_synthesizer_url ?? current.resume_synthesizer_url ?? ''
-      )
-        .trim()
-        .slice(0, 300),
+      resume_synthesizer_url: sanitizeHttpUrl(
+        body.resume_synthesizer_url ?? current.resume_synthesizer_url ?? '',
+        300
+      ),
       ats_companies: {
         greenhouse: sanitizeStringArray(
           body.ats_companies?.greenhouse,

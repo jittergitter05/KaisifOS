@@ -1,12 +1,27 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { isAuthorizedRequest } from '@/lib/auth';
+import { isAuthorizedRequest, isSameOriginRequest } from '@/lib/auth';
 import { getCandidateProfileAsync } from '@/lib/profile';
 import { parseResumeInput } from '@/lib/resume-parser';
+import { checkRateLimit, extractClientIp } from '@/lib/rate-limit';
+import { redactSecrets } from '@/lib/utils';
 
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB limit
 
 export async function POST(req: NextRequest) {
+  if (!isSameOriginRequest(req.headers)) {
+    return NextResponse.json({ error: 'Cross-origin request blocked.' }, { status: 403 });
+  }
+
+  const ip = extractClientIp(req.headers);
+  const limit = checkRateLimit(`profile:parse-resume:${ip}`, 15, 5 * 60 * 1000);
+  if (!limit.allowed) {
+    return NextResponse.json(
+      { error: `Rate limit exceeded. Retry in ${limit.retryAfterSeconds}s.` },
+      { status: 429, headers: { 'Retry-After': String(limit.retryAfterSeconds) } }
+    );
+  }
+
   const cookieStore = cookies();
   const authCookie = cookieStore.get('kaisifos_auth')?.value;
   const lockedCookie = cookieStore.get('kaisifos_locked')?.value;
@@ -90,9 +105,10 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json(result);
   } catch (err) {
-    console.error('[Resume Parser API] Error:', err);
+    const safeMsg = redactSecrets((err as Error)?.message || 'Failed to parse resume parameters.', 240);
+    console.error('[Resume Parser API] Error:', safeMsg);
     return NextResponse.json(
-      { error: (err as Error).message || 'Failed to parse resume parameters.' },
+      { error: safeMsg },
       { status: 500 }
     );
   }

@@ -32,7 +32,11 @@ import {
   Columns3,
   Table2,
   Sparkles,
+  Clock,
+  Archive,
+  MailCheck,
 } from 'lucide-react';
+import { computeJobFreshnessAndCadence } from '@/lib/outreach-engine';
 import {
   Table,
   TableBody,
@@ -67,6 +71,11 @@ interface JobRow {
   evaluationStatus?: 'LLM_SCORED' | 'DETERMINISTIC_ONLY' | 'REJECTED_GATE';
   needsLlmRetry?: boolean;
   sourcesSeen?: Array<{ source: string; url: string; id?: string; seenAt?: string }>;
+  appliedAt?: string | null;
+  lastFollowUpAt?: string | null;
+  followUpCount?: number;
+  lastReplySummary?: string;
+  lastReplyClassification?: string;
 }
 
 const KANBAN_STAGES = [
@@ -95,7 +104,7 @@ function predictReplyLikelihood(job: JobRow): number {
 
 function isStale(job: JobRow, thresholdDays = 7): boolean {
   if (job.status !== 'APPLIED') return false;
-  const parsed = parseIsoDateTimestamp(job.date);
+  const parsed = parseIsoDateTimestamp(job.appliedAt || job.date);
   if (Number.isNaN(parsed)) return false;
   const days = Math.floor((Date.now() - parsed) / (1000 * 60 * 60 * 24));
   return days >= thresholdDays;
@@ -179,6 +188,9 @@ export default function TrackerPage() {
   const [sourceFilter, setSourceFilter] = useState('ALL');
   const [minScoreFilter, setMinScoreFilter] = useState<number>(0);
   const [staleOnly, setStaleOnly] = useState(false);
+  const [needsFollowUpOnly, setNeedsFollowUpOnly] = useState(false);
+  const [staleNewOnly, setStaleNewOnly] = useState(false);
+  const [archivingStale, setArchivingStale] = useState(false);
   const [slaThresholdDays, setSlaThresholdDays] = useState<number>(7);
   const [sortField, setSortField] = useState<'date' | 'score' | 'company'>('date');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -256,6 +268,11 @@ export default function TrackerPage() {
                   rich?.evaluationStatus || (needsLlmRetry ? 'DETERMINISTIC_ONLY' : 'LLM_SCORED'),
                 needsLlmRetry,
                 sourcesSeen: Array.isArray(rich?.sourcesSeen) ? rich.sourcesSeen : undefined,
+                appliedAt: rich?.appliedAt ?? null,
+                lastFollowUpAt: rich?.lastFollowUpAt ?? null,
+                followUpCount: Number(rich?.followUpCount || 0),
+                lastReplySummary: rich?.lastReplySummary || '',
+                lastReplyClassification: rich?.lastReplyClassification || '',
               } as JobRow;
             })
             .filter((j: JobRow) => j.title !== 'Title' && j.id);
@@ -402,6 +419,16 @@ export default function TrackerPage() {
     [jobs]
   );
 
+  const followUpDueJobs = useMemo(
+    () => jobs.filter((j) => computeJobFreshnessAndCadence(j).isFollowUpDue),
+    [jobs]
+  );
+
+  const staleNewJobs = useMemo(
+    () => jobs.filter((j) => computeJobFreshnessAndCadence(j).isStaleNew),
+    [jobs]
+  );
+
   const filteredJobs = useMemo(() => {
     let result = filter === 'ALL' ? jobs : jobs.filter((j) => j.status === filter);
     if (viewMode === 'retry') {
@@ -415,6 +442,12 @@ export default function TrackerPage() {
     }
     if (staleOnly) {
       result = result.filter((j) => isStale(j, slaThresholdDays));
+    }
+    if (needsFollowUpOnly) {
+      result = result.filter((j) => computeJobFreshnessAndCadence(j).isFollowUpDue);
+    }
+    if (staleNewOnly) {
+      result = result.filter((j) => computeJobFreshnessAndCadence(j).isStaleNew);
     }
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
@@ -447,11 +480,53 @@ export default function TrackerPage() {
     sourceFilter,
     minScoreFilter,
     staleOnly,
+    needsFollowUpOnly,
+    staleNewOnly,
     slaThresholdDays,
     sortField,
     sortDir,
     searchQuery,
   ]);
+
+  const archiveAllStaleNew = async () => {
+    if (staleNewJobs.length === 0 || archivingStale) return;
+    setArchivingStale(true);
+    setActionError(null);
+    const staleIds = new Set(staleNewJobs.map((j) => j.id));
+    const snapshot = [...jobs];
+    setJobs((prev) =>
+      prev.map((j) => (staleIds.has(j.id) ? { ...j, status: 'ARCHIVED' } : j))
+    );
+    try {
+      const res = await fetch('/api/sheet-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'batch_update',
+          status: 'ARCHIVED',
+          targets: staleNewJobs.map((j) => ({
+            id: j.id,
+            canonicalKey: j.canonicalKey,
+            rowId: j.rowId,
+          })),
+        }),
+      });
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        throw new Error(errData?.error || `Archive stale failed (HTTP ${res.status}).`);
+      }
+      setStaleNewOnly(false);
+    } catch (e) {
+      setJobs(snapshot);
+      setActionError((e as Error).message || 'Failed to archive stale roles.');
+    } finally {
+      setArchivingStale(false);
+    }
+  };
 
   const bulkUpdateStatus = async (newStatus: string) => {
     const targets = jobs.filter((j) => selectedJobIds.has(j.id));
@@ -1120,10 +1195,57 @@ export default function TrackerPage() {
                   >
                     <Sparkles className="h-3.5 w-3.5" /> Pending LLM Retry ({pendingRetryCount})
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNeedsFollowUpOnly(!needsFollowUpOnly);
+                      setStaleNewOnly(false);
+                      setFilter('ALL');
+                    }}
+                    className={`px-3 py-1.5 rounded text-xs font-medium inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      needsFollowUpOnly
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-white dark:bg-[#0B0F17] text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    <Clock className="h-3.5 w-3.5" /> Needs Follow-Up ({followUpDueJobs.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStaleNewOnly(!staleNewOnly);
+                      setNeedsFollowUpOnly(false);
+                      setFilter('ALL');
+                    }}
+                    className={`px-3 py-1.5 rounded text-xs font-medium inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      staleNewOnly
+                        ? 'bg-amber-600 text-white'
+                        : 'bg-white dark:bg-[#0B0F17] text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    <Archive className="h-3.5 w-3.5" /> Stale &gt;14d ({staleNewJobs.length})
+                  </button>
                 </div>
-                <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
-                  Canonical company-title-geo deduplication active
-                </span>
+                <div className="flex items-center gap-2">
+                  {staleNewJobs.length > 0 && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={archivingStale}
+                      onClick={archiveAllStaleNew}
+                      className="h-7 px-2.5 text-[11px] font-mono bg-amber-50 dark:bg-amber-950/40 border-amber-300 dark:border-amber-700/70 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50 whitespace-nowrap"
+                    >
+                      <Archive className="h-3 w-3 mr-1" />
+                      {archivingStale
+                        ? 'Archiving...'
+                        : `Archive All Stale (${staleNewJobs.length})`}
+                    </Button>
+                  )}
+                  <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400 hidden xl:inline">
+                    Canonical company-title-geo deduplication active
+                  </span>
+                </div>
               </div>
 
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1508,6 +1630,7 @@ export default function TrackerPage() {
                       filteredJobs.map((job, idx) => {
                         const prediction = predictReplyLikelihood(job);
                         const stale = isStale(job, slaThresholdDays);
+                        const cadence = computeJobFreshnessAndCadence(job);
                         const isSelected = selectedJobIds.has(job.id);
                         const isFocused = focusedRow === idx;
                         const isExpanded = expandedRow === idx;
@@ -1568,6 +1691,26 @@ export default function TrackerPage() {
                                       {job.needsLlmRetry && (
                                         <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-50 text-amber-800 border border-amber-300 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-800/60 shrink-0">
                                           Retry Queue
+                                        </span>
+                                      )}
+                                      {cadence.isFollowUpDue && (
+                                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-800 border border-blue-200 dark:bg-blue-950/60 dark:text-blue-300 dark:border-blue-800/60 shrink-0">
+                                          {cadence.cadenceStage === 'DUE_BUMP_1'
+                                            ? 'Bump #1 Due'
+                                            : cadence.cadenceStage === 'DUE_BUMP_2'
+                                            ? 'Bump #2 Due'
+                                            : 'Cooling'}
+                                        </span>
+                                      )}
+                                      {cadence.isStaleNew && (
+                                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-50 text-amber-800 border border-amber-200 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-800/60 shrink-0">
+                                          Stale {cadence.ageDays}d
+                                        </span>
+                                      )}
+                                      {job.lastReplyClassification && (
+                                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-50 text-emerald-800 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800/60 inline-flex items-center gap-0.5 shrink-0">
+                                          <MailCheck className="h-2.5 w-2.5" />
+                                          {job.lastReplyClassification.replace(/_/g, ' ')}
                                         </span>
                                       )}
                                     </div>

@@ -855,6 +855,157 @@ export function extractKekaOrDarwinboxJobs(
   return jobs;
 }
 
+const MAX_PUBLIC_FETCH_BYTES = 2 * 1024 * 1024; // 2 MB cap prevents memory DoS
+
+async function readTextCapped(res: Response, maxBytes = MAX_PUBLIC_FETCH_BYTES): Promise<string> {
+  if (!res.body || typeof res.body.getReader !== 'function') {
+    const text = await res.text();
+    return text.slice(0, maxBytes);
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        const remaining = maxBytes - total;
+        if (remaining <= 0) {
+          await reader.cancel().catch(() => {});
+          break;
+        }
+        chunks.push(value.byteLength > remaining ? value.slice(0, remaining) : value);
+        total += Math.min(value.byteLength, remaining);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder('utf-8', { fatal: false }).decode(merged);
+}
+
+/**
+ * Fetches a public URL using manual redirect handling so every HTTP 3xx redirect target
+ * is re-validated against SSRF rules (prevents 302-to-metadata/loopback bypasses).
+ */
+export async function safePublicFetch(
+  rawUrl: string,
+  options?: {
+    headers?: Record<string, string>;
+    timeoutMs?: number;
+    maxRedirects?: number;
+    maxBytes?: number;
+  }
+): Promise<{
+  ok: boolean;
+  status: number;
+  finalUrl: string;
+  contentType: string;
+  text: string;
+  error?: string;
+}> {
+  const maxRedirects = options?.maxRedirects ?? 3;
+  const timeoutMs = options?.timeoutMs ?? 7000;
+  const maxBytes = options?.maxBytes ?? MAX_PUBLIC_FETCH_BYTES;
+
+  let currentUrl = rawUrl;
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    const check = validateSafePublicUrl(currentUrl, { allowLocalDev: false });
+    if (!check.ok || !check.url) {
+      return {
+        ok: false,
+        status: 0,
+        finalUrl: currentUrl,
+        contentType: '',
+        text: '',
+        error: check.reason || 'Blocked unsafe URL',
+      };
+    }
+
+    const res = await fetch(check.url.toString(), {
+      headers: options?.headers,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    const status = typeof res.status === 'number' ? res.status : res.ok ? 200 : 500;
+
+    if (status >= 300 && status < 400) {
+      const location = res.headers?.get?.('location') || null;
+      if (!location) {
+        return {
+          ok: false,
+          status,
+          finalUrl: check.url.toString(),
+          contentType: '',
+          text: '',
+          error: `Redirect (${status}) missing Location header`,
+        };
+      }
+      if (hop === maxRedirects) {
+        return {
+          ok: false,
+          status,
+          finalUrl: check.url.toString(),
+          contentType: '',
+          text: '',
+          error: 'Too many redirects',
+        };
+      }
+      try {
+        currentUrl = new URL(location, check.url).toString();
+      } catch {
+        return {
+          ok: false,
+          status,
+          finalUrl: check.url.toString(),
+          contentType: '',
+          text: '',
+          error: 'Malformed redirect target',
+        };
+      }
+      continue;
+    }
+
+    const contentType = (res.headers?.get?.('content-type') || '').toLowerCase();
+    if (!res.ok) {
+      return {
+        ok: false,
+        status,
+        finalUrl: check.url.toString(),
+        contentType,
+        text: '',
+        error: `HTTP ${status}`,
+      };
+    }
+
+    const text = await readTextCapped(res, maxBytes);
+    return {
+      ok: true,
+      status,
+      finalUrl: check.url.toString(),
+      contentType,
+      text,
+    };
+  }
+
+  return {
+    ok: false,
+    status: 0,
+    finalUrl: currentUrl,
+    contentType: '',
+    text: '',
+    error: 'Redirect loop terminated',
+  };
+}
+
 export async function fetchCompanyCareerPages(careerUrls: string[]): Promise<CareerFetchResult> {
   const results: ScrapedCareerJob[] = [];
   const failedBoards: string[] = [];
@@ -870,33 +1021,35 @@ export async function fetchCompanyCareerPages(careerUrls: string[]): Promise<Car
       }
 
       try {
-        const res = await fetch(check.url.toString(), {
+        const fetched = await safePublicFetch(check.url.toString(), {
           headers: {
             'User-Agent': 'KaisifOS-CareerCrawler/1.0 (+https://github.com)',
             Accept: 'text/html,application/xhtml+xml',
           },
-          signal: AbortSignal.timeout(7000),
+          timeoutMs: 7000,
+          maxRedirects: 3,
         });
-        if (!res.ok) {
-          failedBoards.push(`${check.url.hostname} (${res.status})`);
+        if (!fetched.ok) {
+          failedBoards.push(`${check.url.hostname} (${fetched.error || fetched.status})`);
           return;
         }
-        const html = await res.text();
-        const companyName = inferCompanyFromUrl(check.url.toString());
+        const html = fetched.text;
+        const resolvedUrl = fetched.finalUrl;
+        const companyName = inferCompanyFromUrl(resolvedUrl);
 
-        const ldJobs = extractJsonLdJobPostings(html, check.url.toString(), companyName);
+        const ldJobs = extractJsonLdJobPostings(html, resolvedUrl, companyName);
         if (ldJobs.length > 0) {
           results.push(...ldJobs);
           return;
         }
 
-        const nextDataJobs = extractNextDataJobPostings(html, check.url.toString(), companyName);
+        const nextDataJobs = extractNextDataJobPostings(html, resolvedUrl, companyName);
         if (nextDataJobs.length > 0) {
           results.push(...nextDataJobs);
           return;
         }
 
-        const kdJobs = extractKekaOrDarwinboxJobs(html, check.url.toString(), companyName);
+        const kdJobs = extractKekaOrDarwinboxJobs(html, resolvedUrl, companyName);
         if (kdJobs.length > 0) {
           results.push(...kdJobs);
           return;
@@ -916,7 +1069,7 @@ export async function fetchCompanyCareerPages(careerUrls: string[]): Promise<Car
           results.push(...wdRes.jobs);
         }
 
-        const anchorJobs = extractCareerPageAnchors(html, check.url.toString(), companyName);
+        const anchorJobs = extractCareerPageAnchors(html, resolvedUrl, companyName);
         if (anchorJobs.length > 0) {
           results.push(...anchorJobs);
         }
@@ -947,27 +1100,38 @@ export async function enrichThinJobDescriptions<T extends { description: string;
       remaining -= 1;
 
       try {
-        const res = await fetch(check.url.toString(), {
+        const fetched = await safePublicFetch(check.url.toString(), {
           headers: {
             'User-Agent': 'KaisifOS-CareerCrawler/1.0 (+https://github.com)',
             Accept: 'text/html,application/xhtml+xml',
           },
-          signal: AbortSignal.timeout(5500),
+          timeoutMs: 5500,
+          maxRedirects: 3,
         });
-        if (!res.ok) return;
-        const ctype = (res.headers.get('content-type') || '').toLowerCase();
-        if (ctype.includes('json')) {
-          const jData = await res.json().catch(() => null);
+        if (!fetched.ok) return;
+        if (fetched.contentType.includes('json')) {
+          let jData: Record<string, unknown> | null = null;
+          try {
+            jData = JSON.parse(fetched.text);
+          } catch {
+            jData = null;
+          }
           const candidateDesc = decodeAndStripHtml(
-            jData?.descriptionPlain || jData?.descriptionHtml || jData?.description || jData?.content || ''
+            String(
+              jData?.descriptionPlain ||
+                jData?.descriptionHtml ||
+                jData?.description ||
+                jData?.content ||
+                ''
+            )
           );
           if (candidateDesc.length > job.description.length) {
             job.description = candidateDesc.substring(0, 12000);
           }
           return;
         }
-        const html = await res.text();
-        const ld = extractJsonLdJobPostings(html, check.url.toString(), job.company);
+        const html = fetched.text;
+        const ld = extractJsonLdJobPostings(html, fetched.finalUrl, job.company);
         if (ld.length > 0 && ld[0].description.length > job.description.length) {
           job.description = ld[0].description.substring(0, 12000);
           return;

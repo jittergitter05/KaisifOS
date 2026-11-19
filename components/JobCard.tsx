@@ -3,19 +3,34 @@ import React, { useState } from 'react';
 import MetricBar from './MetricBar';
 import StatusBadge, { ALL_STATUSES } from './StatusBadge';
 import { Button } from './ui/button';
-import { Copy, Check, ArrowUpRight, BookOpen, RefreshCw, Link2 } from 'lucide-react';
+import {
+  Copy,
+  Check,
+  ArrowUpRight,
+  BookOpen,
+  RefreshCw,
+  Link2,
+  Users,
+  Clock,
+  MailCheck,
+} from 'lucide-react';
 import {
   deriveJobPillarBreakdown,
   safeExternalUrl,
   extractExternalHost,
   copyToClipboardSafe,
 } from '@/lib/utils';
+import {
+  buildPeopleSearchLinks,
+  computeJobFreshnessAndCadence,
+} from '@/lib/outreach-engine';
 
 export interface JobData {
   rowId?: number;
   Date: string;
   Title: string;
   Company: string;
+  location?: string;
   Score: number;
   Reasons: string;
   Gap: string;
@@ -23,6 +38,11 @@ export interface JobData {
   DM: string;
   ResumeAngle: string;
   Status?: string;
+  appliedAt?: string | null;
+  lastFollowUpAt?: string | null;
+  followUpCount?: number;
+  lastReplySummary?: string;
+  lastReplyClassification?: string;
 }
 
 interface PrepData {
@@ -95,6 +115,18 @@ export default function JobCard({
   const pillars = deriveJobPillarBreakdown({ score: job.Score, reasons: job.Reasons });
   const externalUrl = safeExternalUrl(job.URL);
   const applyHost = extractExternalHost(job.URL);
+  const peopleLinks = buildPeopleSearchLinks({
+    title: job.Title,
+    company: job.Company,
+    location: job.location,
+  });
+  const cadence = computeJobFreshnessAndCadence({
+    date: job.Date,
+    status: job.Status,
+    appliedAt: job.appliedAt,
+    lastFollowUpAt: job.lastFollowUpAt,
+    followUpCount: job.followUpCount,
+  });
 
   return (
     <div className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800/90 rounded-xl p-6 transition-colors hover:border-slate-300 dark:hover:border-slate-700">
@@ -102,6 +134,12 @@ export default function JobCard({
         <div>
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400 mb-1">
             <span className="font-medium text-slate-800 dark:text-slate-200">{job.Company}</span>
+            {job.location && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono text-slate-600 dark:text-slate-300">{job.location}</span>
+              </>
+            )}
             <span aria-hidden="true">·</span>
             <span className="font-mono tabular-nums">{job.Date}</span>
             <span aria-hidden="true">·</span>
@@ -110,9 +148,31 @@ export default function JobCard({
               {pillars.seniority.earned}/15 · Comp/Geo {pillars.compGeo.earned}/15
             </span>
           </div>
-          <h3 className="text-lg font-display font-semibold text-slate-900 dark:text-white tracking-tight">
-            {job.Title}
-          </h3>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-lg font-display font-semibold text-slate-900 dark:text-white tracking-tight">
+              {job.Title}
+            </h3>
+            {cadence.isStaleNew && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono bg-amber-50 text-amber-800 border border-amber-200 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-800/60">
+                <Clock className="h-3 w-3" /> Stale {cadence.ageDays}d
+              </span>
+            )}
+            {cadence.isFollowUpDue && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono bg-blue-50 text-blue-800 border border-blue-200 dark:bg-blue-950/60 dark:text-blue-300 dark:border-blue-800/60">
+                <Clock className="h-3 w-3" />
+                {cadence.cadenceStage === 'DUE_BUMP_1'
+                  ? 'Bump #1 Due'
+                  : cadence.cadenceStage === 'DUE_BUMP_2'
+                  ? 'Bump #2 Due'
+                  : 'Cooling / Ghosted'}
+              </span>
+            )}
+            {job.lastReplyClassification && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono bg-emerald-50 text-emerald-800 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800/60">
+                <MailCheck className="h-3 w-3" /> {job.lastReplyClassification.replace('_', ' ')}
+              </span>
+            )}
+          </div>
         </div>
 
         <div className="flex items-center gap-3 shrink-0">
@@ -173,7 +233,7 @@ export default function JobCard({
         <div className="space-y-4">
           <div>
             <div className="text-xs font-medium text-amber-600 dark:text-amber-400/90 mb-1">
-              Identified Risk & Mitigation Angle
+              Identified Risk &amp; Mitigation Angle
             </div>
             <p className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed">
               {job.Gap || 'No critical blockers detected; emphasize shipped AI & GTM metrics.'}
@@ -239,6 +299,30 @@ export default function JobCard({
         </div>
       )}
 
+      {/* 1-Click LinkedIn People Finder */}
+      <div className="pt-3 pb-1 flex flex-wrap items-center gap-2 text-xs">
+        <span className="inline-flex items-center gap-1 text-[11px] font-mono text-slate-500 dark:text-slate-400 mr-1">
+          <Users className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+          People Finder:
+        </span>
+        {peopleLinks.map((link) => (
+          <a
+            key={link.role}
+            href={link.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={`LinkedIn Boolean search for ${link.personaHint}`}
+            className="px-2.5 py-1 rounded-md text-[11px] font-mono bg-slate-100 dark:bg-slate-800/80 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 inline-flex items-center gap-1 transition-colors whitespace-nowrap"
+          >
+            {link.label.replace('Find ', '')}{' '}
+            <span className="text-slate-400 dark:text-slate-500 hidden sm:inline">
+              ({link.personaHint.split('/')[0].trim()})
+            </span>
+            <ArrowUpRight className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+          </a>
+        ))}
+      </div>
+
       {showPrep && (
         <div className="mt-4 bg-slate-50 dark:bg-[#0B0F17] rounded-lg p-4 space-y-3 text-xs border-t border-slate-200 dark:border-slate-800">
           {loadingPrep ? (
@@ -264,7 +348,7 @@ export default function JobCard({
               </div>
               <div className="border-t border-slate-200 dark:border-slate-800 pt-2.5">
                 <div className="font-semibold text-blue-600 dark:text-blue-400 mb-1">
-                  Day-3 & Day-7 Recruiter Follow-Up Sequence
+                  Day-3 &amp; Day-7 Recruiter Follow-Up Sequence
                 </div>
                 <p className="text-slate-700 dark:text-slate-300 leading-relaxed">
                   <strong className="text-slate-900 dark:text-white">Day 3:</strong>{' '}
@@ -315,7 +399,7 @@ export default function JobCard({
               size="sm"
               className="text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-500 border-0 whitespace-nowrap shrink-0"
             >
-              <a href={externalUrl} target="_blank" rel="noreferrer">
+              <a href={externalUrl} target="_blank" rel="noopener noreferrer">
                 Apply on {applyHost || 'Company Site'} <ArrowUpRight className="ml-1.5 h-3.5 w-3.5" />
               </a>
             </Button>

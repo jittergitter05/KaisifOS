@@ -1,10 +1,53 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { isAuthorizedRequest } from '@/lib/auth';
+import { isAuthorizedRequest, isSameOriginRequest } from '@/lib/auth';
 import { executeLiveScoutRun } from '@/lib/scout-runner';
+import { parseWorkdayBoardTarget, type WorkdayBoardTarget } from '@/lib/profile';
+import { checkRateLimit, extractClientIp } from '@/lib/rate-limit';
+import { redactSecrets, validateSafePublicUrl } from '@/lib/utils';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
+
+function sanitizeSlugArray(val: unknown): string[] | undefined {
+  if (!Array.isArray(val)) return undefined;
+  return val
+    .map((s) => String(s ?? '').trim().toLowerCase())
+    .filter((s) => /^[a-z0-9][a-z0-9._-]{0,62}$/.test(s))
+    .slice(0, 12);
+}
+
+function sanitizeCustomBoards(raw: unknown) {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const obj = raw as Record<string, unknown>;
+
+  let workday: WorkdayBoardTarget[] | undefined;
+  if (Array.isArray(obj.workday)) {
+    workday = obj.workday
+      .map((item) => parseWorkdayBoardTarget(item))
+      .filter((w): w is WorkdayBoardTarget => Boolean(w))
+      .slice(0, 12);
+  }
+
+  let careerUrls: string[] | undefined;
+  if (Array.isArray(obj.career_urls)) {
+    careerUrls = obj.career_urls
+      .map((u) => String(u ?? '').trim())
+      .filter((u) => validateSafePublicUrl(u, { allowLocalDev: false }).ok)
+      .slice(0, 12);
+  }
+
+  return {
+    greenhouse: sanitizeSlugArray(obj.greenhouse),
+    lever: sanitizeSlugArray(obj.lever),
+    ashby: sanitizeSlugArray(obj.ashby),
+    workable: sanitizeSlugArray(obj.workable),
+    smartrecruiters: sanitizeSlugArray(obj.smartrecruiters),
+    recruitee: sanitizeSlugArray(obj.recruitee),
+    workday,
+    career_urls: careerUrls,
+  };
+}
 
 export async function GET() {
   return NextResponse.json({
@@ -31,6 +74,19 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  if (!isSameOriginRequest(req.headers)) {
+    return NextResponse.json({ error: 'Cross-origin request blocked.' }, { status: 403 });
+  }
+
+  const ip = extractClientIp(req.headers);
+  const limit = checkRateLimit(`scout:run:${ip}`, 8, 5 * 60 * 1000);
+  if (!limit.allowed) {
+    return NextResponse.json(
+      { error: `Scout rate limit exceeded. Retry in ${limit.retryAfterSeconds}s.` },
+      { status: 429, headers: { 'Retry-After': String(limit.retryAfterSeconds) } }
+    );
+  }
+
   const cookieStore = cookies();
   const authCookie = cookieStore.get('kaisifos_auth')?.value;
   const lockedCookie = cookieStore.get('kaisifos_locked')?.value;
@@ -41,24 +97,26 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
     const minScoreToCommit =
-      typeof body.minScoreToCommit === 'number'
+      typeof body.minScoreToCommit === 'number' && Number.isFinite(body.minScoreToCommit)
         ? Math.min(100, Math.max(0, body.minScoreToCommit))
         : 80;
     const maxToEvaluate =
-      typeof body.maxToEvaluate === 'number' ? Math.min(12, Math.max(2, body.maxToEvaluate)) : 6;
+      typeof body.maxToEvaluate === 'number' && Number.isFinite(body.maxToEvaluate)
+        ? Math.min(12, Math.max(2, body.maxToEvaluate))
+        : 6;
 
     const summary = await executeLiveScoutRun({
       minScoreToCommit,
       maxToEvaluate,
-      customBoards: body.customBoards,
+      customBoards: sanitizeCustomBoards(body.customBoards),
       mode: body.mode === 'retry_pending' ? 'retry_pending' : 'live_sweep',
     });
 
     return NextResponse.json(summary);
-  } catch (err: any) {
-    const message = err?.message || 'Scout execution failed';
+  } catch (err: unknown) {
+    const message = redactSecrets((err as Error)?.message || 'Scout execution failed', 240);
     const isReadOnly = /read-only|GOOGLE_SHEET_ID|persisting/i.test(message);
-    console.error('[Scout Run API] Error:', err);
+    console.error('[Scout Run API] Error:', message);
     return NextResponse.json(
       { error: message },
       { status: isReadOnly ? 503 : 500 }

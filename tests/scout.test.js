@@ -1242,4 +1242,311 @@ Skills: SQL, Python, GTM Strategy`;
       );
     });
   });
+
+  describe('Security & Reliability Hardening Suite', () => {
+    it('enforces proxy-aware same-origin CSRF checks while supporting X-Forwarded-Host', async () => {
+      const { isSameOriginRequest } = await import('../lib/auth');
+
+      const directSame = new Headers({
+        host: 'localhost:3000',
+        origin: 'http://localhost:3000',
+        'sec-fetch-site': 'same-origin',
+      });
+      expect(isSameOriginRequest(directSame)).toBe(true);
+
+      const proxiedSame = new Headers({
+        host: 'localhost:3000',
+        'x-forwarded-host': 'kaisifos.run.app, internal-proxy',
+        origin: 'https://kaisifos.run.app',
+        'sec-fetch-site': 'same-origin',
+      });
+      expect(isSameOriginRequest(proxiedSame)).toBe(true);
+
+      const crossOrigin = new Headers({
+        host: 'kaisifos.run.app',
+        origin: 'https://evil.example.com',
+      });
+      expect(isSameOriginRequest(crossOrigin)).toBe(false);
+
+      const crossSiteHeader = new Headers({
+        host: 'kaisifos.run.app',
+        origin: 'https://kaisifos.run.app',
+        'sec-fetch-site': 'cross-site',
+      });
+      expect(isSameOriginRequest(crossSiteHeader)).toBe(false);
+
+      const nullOrigin = new Headers({
+        host: 'kaisifos.run.app',
+        origin: 'null',
+      });
+      expect(isSameOriginRequest(nullOrigin)).toBe(false);
+    });
+
+    it('fails closed when only one of ADMIN_USER or ADMIN_PASS is configured', async () => {
+      const { hasPartialAuthConfig, isAuthorizedRequest } = await import('../lib/auth');
+      const prevUser = process.env.ADMIN_USER;
+      const prevPass = process.env.ADMIN_PASS;
+      try {
+        delete process.env.ADMIN_USER;
+        process.env.ADMIN_PASS = 'strong-only-pass';
+        expect(hasPartialAuthConfig()).toBe(true);
+        expect(await isAuthorizedRequest(undefined, undefined)).toBe(false);
+      } finally {
+        if (prevUser === undefined) delete process.env.ADMIN_USER;
+        else process.env.ADMIN_USER = prevUser;
+        if (prevPass === undefined) delete process.env.ADMIN_PASS;
+        else process.env.ADMIN_PASS = prevPass;
+      }
+    });
+
+    it('blocks extended SSRF vectors including loopback subnets, CGNAT, IPv6-mapped IPv4, and credentialed URLs', async () => {
+      const { validateSafePublicUrl, sanitizeHttpUrl, safeExternalUrl, redactSecrets } = await import(
+        '../lib/utils'
+      );
+
+      const blockedUrls = [
+        'http://127.0.0.2/admin',
+        'http://0.0.0.0:3000/api/health',
+        'http://100.64.0.1/tailscale',
+        'http://169.254.1.1/link-local',
+        'http://[::ffff:127.0.0.1]/loopback',
+        'http://[::ffff:169.254.169.254]/latest/meta-data',
+        'http://service.internal/secret',
+        'https://user:pass@careers.example.com/jobs',
+        'http://localhost:3000/api/profile',
+      ];
+      for (const bad of blockedUrls) {
+        expect(validateSafePublicUrl(bad, { allowLocalDev: false }).ok).toBe(false);
+      }
+
+      expect(validateSafePublicUrl('https://careers.razorpay.com/jobs', { allowLocalDev: false }).ok).toBe(true);
+      expect(sanitizeHttpUrl('javascript:alert(1)')).toBe('');
+      expect(sanitizeHttpUrl('data:text/html,<script>alert(1)</script>')).toBe('');
+      expect(sanitizeHttpUrl('https://user:pass@example.com')).toBe('');
+      expect(sanitizeHttpUrl('https://portjitterglitter.vercel.app')).toBe(
+        'https://portjitterglitter.vercel.app/'
+      );
+      expect(safeExternalUrl('javascript:alert(1)')).toBe('#');
+
+      const scrubbed = redactSecrets(
+        'Failed connecting postgresql://user:supersecret@ep-123.neon.tech/neondb with Bearer eyJhbGci.123 and AIzaSyD1234567890abcdefghij123456'
+      );
+      expect(scrubbed).not.toContain('supersecret');
+      expect(scrubbed).not.toContain('eyJhbGci');
+      expect(scrubbed).not.toContain('AIzaSyD');
+      expect(scrubbed).toContain('[REDACTED]');
+    });
+
+    it('safePublicFetch blocks HTTP 302 redirects pointing to cloud metadata or loopback hosts', async () => {
+      const { safePublicFetch } = await import('../lib/career-scraper');
+      const origFetch = global.fetch;
+      const calledUrls = [];
+
+      global.fetch = vi.fn(async (url) => {
+        calledUrls.push(String(url));
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'http://169.254.169.254/latest/meta-data/iam/security-credentials/' },
+        });
+      });
+
+      try {
+        const res = await safePublicFetch('https://careers.example.com/redirect-trap');
+        expect(res.ok).toBe(false);
+        expect(res.error).toMatch(/Blocked private or metadata/i);
+        expect(calledUrls).toHaveLength(1);
+        expect(calledUrls[0]).toBe('https://careers.example.com/redirect-trap');
+      } finally {
+        global.fetch = origFetch;
+      }
+    });
+  });
+
+  describe('Practicality Upgrades Suite (Reply Intelligence, Cadence, People Finder & ATS Tailor)', () => {
+    it('generates persona-tailored LinkedIn People Boolean search URLs across role archetypes', async () => {
+      const { buildPeopleSearchLinks } = await import('../lib/outreach-engine');
+
+      const apmLinks = buildPeopleSearchLinks({
+        title: 'Associate Product Manager',
+        company: 'Razorpay Software Pvt. Ltd.',
+        location: 'Hyderabad, India',
+      });
+      expect(apmLinks).toHaveLength(3);
+      expect(apmLinks[0].role).toBe('hiring_manager');
+      expect(decodeURIComponent(apmLinks[0].url)).toContain('"Razorpay Software"');
+      expect(decodeURIComponent(apmLinks[0].url)).toContain('VP Product');
+      expect(decodeURIComponent(apmLinks[0].url)).toContain('Hyderabad');
+
+      const founderLinks = buildPeopleSearchLinks({
+        title: "Founder's Associate",
+        company: 'Zepto',
+        location: 'Remote, India',
+      });
+      expect(founderLinks[0].personaHint).toContain('Founder');
+      expect(decodeURIComponent(founderLinks[0].url)).toContain('Chief of Staff');
+
+      const pmmLinks = buildPeopleSearchLinks({
+        title: 'Product Marketing Manager',
+        company: 'Darwinbox',
+        location: 'Hyderabad',
+      });
+      expect(pmmLinks[0].personaHint).toContain('PMM');
+      expect(decodeURIComponent(pmmLinks[1].url)).toContain('Talent Acquisition');
+      expect(decodeURIComponent(pmmLinks[2].url)).toContain('Product Marketing');
+    });
+
+    it('computes >14d stale NEW expiry and Day-5 / Day-11 / Day-21 follow-up cadence stages accurately', async () => {
+      const { computeJobFreshnessAndCadence, generateFollowUpDraft } = await import(
+        '../lib/outreach-engine'
+      );
+      const nowMs = new Date('2026-11-25T12:00:00Z').getTime();
+
+      // 16-day old NEW listing -> stale
+      const staleNew = computeJobFreshnessAndCadence(
+        { date: '2026-11-09', status: 'NEW' },
+        nowMs
+      );
+      expect(staleNew.isStaleNew).toBe(true);
+      expect(staleNew.ageDays).toBeGreaterThanOrEqual(15);
+
+      // Day 6 APPLIED with 0 follow-ups -> DUE_BUMP_1
+      const bump1 = computeJobFreshnessAndCadence(
+        { date: '2026-11-19', appliedAt: '2026-11-19T12:00:00Z', status: 'APPLIED', followUpCount: 0 },
+        nowMs
+      );
+      expect(bump1.isFollowUpDue).toBe(true);
+      expect(bump1.cadenceStage).toBe('DUE_BUMP_1');
+
+      // Day 12 APPLIED with 1 follow-up 6 days ago -> DUE_BUMP_2
+      const bump2 = computeJobFreshnessAndCadence(
+        {
+          date: '2026-11-13',
+          appliedAt: '2026-11-13T12:00:00Z',
+          lastFollowUpAt: '2026-11-19T12:00:00Z',
+          status: 'APPLIED',
+          followUpCount: 1,
+        },
+        nowMs
+      );
+      expect(bump2.isFollowUpDue).toBe(true);
+      expect(bump2.cadenceStage).toBe('DUE_BUMP_2');
+
+      // Day 23 APPLIED with 2 follow-ups -> COOLING_GHOSTED
+      const cooling = computeJobFreshnessAndCadence(
+        {
+          date: '2026-11-02',
+          appliedAt: '2026-11-02T12:00:00Z',
+          lastFollowUpAt: '2026-11-14T12:00:00Z',
+          status: 'APPLIED',
+          followUpCount: 2,
+        },
+        nowMs
+      );
+      expect(cooling.isFollowUpDue).toBe(true);
+      expect(cooling.cadenceStage).toBe('COOLING_GHOSTED');
+
+      // Follow-up draft stays grounded in candidate key_metrics
+      const draft1 = generateFollowUpDraft(
+        { title: 'Associate Product Manager', company: 'Razorpay', resumeAngle: 'Funnel telemetry' },
+        validProfile,
+        1
+      );
+      expect(draft1.dm).toContain('Razorpay');
+      expect(draft1.dm).toContain(validProfile.key_metrics[0]);
+    });
+
+    it('classifies recruiter emails accurately while ignoring automated receipts and matching active company domains', async () => {
+      const { classifyRecruiterEmail, matchEmailToActiveJobs } = await import(
+        '../lib/reply-intelligence'
+      );
+
+      // 1. Auto-acknowledgement must NOT mutate stage
+      const autoAck = classifyRecruiterEmail({
+        from: 'No-Reply <noreply@greenhouse-mail.io>',
+        subject: 'Thank you for applying to Razorpay!',
+        snippet: 'We have received your application for Associate Product Manager. This is an automated email.',
+      });
+      expect(autoAck.classification).toBe('AUTO_ACK');
+      expect(autoAck.targetStage).toBeNull();
+
+      // 2. Interview invite -> INTERVIEW
+      const invite = classifyRecruiterEmail({
+        from: 'Priya Sharma <priya@razorpay.com>',
+        subject: 'Interview Invitation: Associate Product Manager @ Razorpay',
+        snippet: 'We would love to schedule an interview! Please pick a slot on https://calendly.com/priya/30min',
+      });
+      expect(invite.classification).toBe('INTERVIEW_INVITE');
+      expect(invite.targetStage).toBe('INTERVIEW');
+
+      // 3. Rejection -> REJECTED
+      const rejection = classifyRecruiterEmail({
+        from: 'Talent Team <careers@zepto.com>',
+        subject: 'Update on your Growth Analyst application',
+        snippet: 'Unfortunately, we have decided not to move forward with your application at this time.',
+      });
+      expect(rejection.classification).toBe('REJECTION');
+      expect(rejection.targetStage).toBe('REJECTED');
+
+      // 4. Human recruiter screening reply -> REPLIED
+      const humanReply = classifyRecruiterEmail({
+        from: 'Ananya <ananya@darwinbox.com>',
+        subject: 'Re: Associate Product Manager at Darwinbox',
+        snippet: 'Hi Kaisif, thanks for reaching out. Could you share your expected CTC and notice period?',
+      });
+      expect(humanReply.classification).toBe('RECRUITER_REPLY');
+      expect(humanReply.targetStage).toBe('REPLIED');
+
+      // 5. Active job matching ignores generic ATS/freemail domains and matches exact corporate domain
+      const activeJobs = [
+        { id: 'gh_1', title: 'Associate Product Manager', company: 'Razorpay', status: 'APPLIED' },
+        { id: 'gh_2', title: 'Growth Analyst', company: 'Zepto', status: 'APPLIED' },
+      ];
+      const matched = matchEmailToActiveJobs(
+        {
+          from: 'Priya <priya@razorpay.com>',
+          subject: 'Next steps for Associate Product Manager',
+        },
+        activeJobs
+      );
+      expect(matched).toHaveLength(1);
+      expect(matched[0].company).toBe('Razorpay');
+
+      const genericSenderNoCompany = matchEmailToActiveJobs(
+        {
+          from: 'random@gmail.com',
+          subject: 'Hello from a newsletter',
+        },
+        activeJobs
+      );
+      expect(genericSenderNoCompany).toHaveLength(0);
+    });
+
+    it('generates zero-fabrication grounded ATS Tailor Briefs and clean Markdown exports', async () => {
+      const { buildDeterministicTailorPack, formatTailorPackAsMarkdown } = await import(
+        '../lib/tailor-engine'
+      );
+
+      const job = {
+        title: 'Associate Product Manager',
+        company: 'Darwinbox',
+        location: 'Hyderabad, India',
+        reasons: 'Strong SEO, GA4, and Python EDA alignment',
+        gap: 'Need enterprise B2B SaaS exposure',
+        resumeAngle: 'Lead with AI workflow automation & funnel lift',
+        description: 'Own product roadmap, GA4 funnel analytics, SQL cohorts, and A/B testing in Hyderabad.',
+      };
+
+      const pack = buildDeterministicTailorPack(job, validProfile);
+      expect(pack.tailored_bullets.length).toBeGreaterThanOrEqual(2);
+      expect(pack.tailored_bullets[0].grounded_proof).toBe(validProfile.key_metrics[0]);
+      expect(pack.ats_keywords_matched.some((k) => /ga4|seo|python/i.test(k))).toBe(true);
+      expect(pack.cover_note_body).toContain(validProfile.name);
+      expect(pack.cover_note_body).toContain('Darwinbox');
+
+      const md = formatTailorPackAsMarkdown(pack, job);
+      expect(md).toContain('# ATS Tailor Brief — Associate Product Manager @ Darwinbox');
+      expect(md).toContain('Grounded Proof:');
+      expect(md).toContain('Day 5 Bump #1:');
+    });
+  });
 });

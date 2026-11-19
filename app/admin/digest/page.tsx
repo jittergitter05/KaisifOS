@@ -14,6 +14,9 @@ import {
   Radar,
   ArrowUpRight,
   Sparkles,
+  Clock,
+  Send,
+  Users,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -24,6 +27,11 @@ import {
   extractExternalHost,
   copyToClipboardSafe,
 } from '@/lib/utils';
+import {
+  buildPeopleSearchLinks,
+  computeJobFreshnessAndCadence,
+  generateFollowUpDraft,
+} from '@/lib/outreach-engine';
 
 export default function DigestPage() {
   const [jobs, setJobs] = useState<
@@ -50,6 +58,8 @@ export default function DigestPage() {
   const [daysWindow, setDaysWindow] = useState<number>(14);
   const [sourceFilter, setSourceFilter] = useState<string>('ALL');
   const [copiedReport, setCopiedReport] = useState(false);
+  const [copiedFollowUpKey, setCopiedFollowUpKey] = useState<string | null>(null);
+  const [markingFollowUpId, setMarkingFollowUpId] = useState<string | null>(null);
   const [auditJob, setAuditJob] = useState<AuditableJob | null>(null);
 
   const fetchDigest = useCallback(() => {
@@ -99,6 +109,11 @@ export default function DigestPage() {
                 source: detectSource(id),
                 needsLlmRetry,
                 sourcesSeen: Array.isArray(rich?.sourcesSeen) ? rich.sourcesSeen : undefined,
+                appliedAt: rich?.appliedAt ?? null,
+                lastFollowUpAt: rich?.lastFollowUpAt ?? null,
+                followUpCount: Number(rich?.followUpCount || 0),
+                lastReplySummary: rich?.lastReplySummary || '',
+                lastReplyClassification: rich?.lastReplyClassification || '',
               };
             })
             .filter((j: JobData) => j.Title !== 'Title' && Boolean(j.Date));
@@ -191,6 +206,70 @@ export default function DigestPage() {
     } catch (e) {
       setJobs(prev);
       setActionError((e as Error).message || 'Failed to save status change.');
+    }
+  };
+
+  const followUpQueue = useMemo(() => {
+    return jobs
+      .map((job) => ({
+        job,
+        cadence: computeJobFreshnessAndCadence({
+          date: job.Date,
+          status: job.Status,
+          appliedAt: job.appliedAt,
+          lastFollowUpAt: job.lastFollowUpAt,
+          followUpCount: job.followUpCount,
+        }),
+      }))
+      .filter((entry) => entry.cadence.isFollowUpDue)
+      .sort((a, b) => (b.cadence.daysSinceApplied ?? 0) - (a.cadence.daysSinceApplied ?? 0));
+  }, [jobs]);
+
+  const handleMarkFollowUpSent = async (job: (typeof jobs)[number]) => {
+    setMarkingFollowUpId(job.id);
+    setActionError(null);
+    try {
+      const res = await fetch('/api/sheet-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: job.id,
+          canonicalKey: job.canonicalKey,
+          rowId: job.rowId,
+          markFollowUpSent: true,
+        }),
+      });
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.error || `Failed to mark follow-up sent (HTTP ${res.status})`);
+      }
+      setJobs((prev) =>
+        prev.map((j) =>
+          j.id === job.id
+            ? {
+                ...j,
+                followUpCount: (Number(j.followUpCount) || 0) + 1,
+                lastFollowUpAt: new Date().toISOString(),
+              }
+            : j
+        )
+      );
+    } catch (e) {
+      setActionError((e as Error).message || 'Unable to log follow-up bump.');
+    } finally {
+      setMarkingFollowUpId(null);
+    }
+  };
+
+  const copyFollowUpDraft = async (text: string, key: string) => {
+    const ok = await copyToClipboardSafe(text);
+    if (ok) {
+      setCopiedFollowUpKey(key);
+      setTimeout(() => setCopiedFollowUpKey(null), 1800);
     }
   };
 
@@ -498,6 +577,99 @@ export default function DigestPage() {
           </div>
         )}
 
+        {/* Follow-Up Action Queue (Day 5 / Day 11 Bumps) */}
+        {!loading && followUpQueue.length > 0 && (
+          <section className="bg-white dark:bg-[#111827] border border-blue-200 dark:border-blue-800/70 rounded-xl overflow-hidden">
+            <div className="px-5 py-3.5 border-b border-blue-200/80 dark:border-blue-800/60 bg-blue-50/70 dark:bg-blue-950/30 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Clock className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                <h2 className="text-sm font-display font-semibold text-slate-900 dark:text-white">
+                  Follow-Up Action Queue (Day 5 / Day 11 Cadence)
+                </h2>
+              </div>
+              <span className="text-xs font-mono tabular-nums text-blue-700 dark:text-blue-300">
+                {followUpQueue.length} active application{followUpQueue.length === 1 ? '' : 's'} due
+              </span>
+            </div>
+            <div className="divide-y divide-slate-200 dark:divide-slate-800/80">
+              {followUpQueue.map(({ job, cadence }) => {
+                const bumpNum: 1 | 2 = (job.followUpCount || 0) >= 1 ? 2 : 1;
+                const draft = generateFollowUpDraft(
+                  { title: job.Title, company: job.Company, resumeAngle: job.ResumeAngle },
+                  {},
+                  bumpNum
+                );
+                const hmLink = buildPeopleSearchLinks({
+                  title: job.Title,
+                  company: job.Company,
+                  location: job.location,
+                })[0];
+
+                return (
+                  <div key={job.id} className="p-4 sm:px-5 space-y-2.5 text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <span className="font-semibold text-slate-900 dark:text-white">
+                          {job.Company}
+                        </span>{' '}
+                        <span className="text-slate-400">·</span>{' '}
+                        <span className="text-slate-700 dark:text-slate-300">{job.Title}</span>
+                      </div>
+                      <span className="px-2 py-0.5 rounded font-mono text-[11px] bg-blue-50 text-blue-800 border border-blue-200 dark:bg-blue-950/60 dark:text-blue-300 dark:border-blue-800/60">
+                        {cadence.nextActionLabel}
+                      </span>
+                    </div>
+                    <p className="text-slate-700 dark:text-slate-300 bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded p-2.5 leading-relaxed">
+                      {draft.dm}
+                    </p>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <a
+                        href={hmLink.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[11px] font-mono text-emerald-600 dark:text-emerald-400 hover:underline inline-flex items-center gap-1"
+                      >
+                        <Users className="h-3.5 w-3.5" /> {hmLink.label} ({hmLink.personaHint}){' '}
+                        <ArrowUpRight className="h-3 w-3" />
+                      </a>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => copyFollowUpDraft(draft.dm, job.id)}
+                          className="h-7 px-2.5 text-xs bg-white dark:bg-[#0B0F17] border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200"
+                        >
+                          {copiedFollowUpKey === job.id ? (
+                            <>
+                              <Check className="h-3 w-3 mr-1 text-emerald-600" /> Copied Bump #
+                              {bumpNum}
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="h-3 w-3 mr-1" /> Copy Bump #{bumpNum}
+                            </>
+                          )}
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          disabled={markingFollowUpId === job.id}
+                          onClick={() => handleMarkFollowUpSent(job)}
+                          className="h-7 px-2.5 text-xs bg-blue-600 hover:bg-blue-500 text-white"
+                        >
+                          <Send className="h-3 w-3 mr-1" />
+                          {markingFollowUpId === job.id ? 'Logging...' : 'Mark Follow-Up Sent'}
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
         {loading ? (
           <div className="space-y-4">
             {Array.from({ length: 3 }).map((_, idx) => (
@@ -628,6 +800,11 @@ export default function DigestPage() {
                                 source: job.source,
                                 needsLlmRetry: job.needsLlmRetry,
                                 sourcesSeen: job.sourcesSeen,
+                                appliedAt: job.appliedAt,
+                                lastFollowUpAt: job.lastFollowUpAt,
+                                followUpCount: job.followUpCount,
+                                lastReplySummary: job.lastReplySummary,
+                                lastReplyClassification: job.lastReplyClassification,
                               })
                             }
                             className="text-[11px] font-mono text-emerald-600 dark:text-emerald-400 hover:underline inline-flex items-center gap-1 cursor-pointer"

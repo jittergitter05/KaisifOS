@@ -6,6 +6,7 @@ import { buildCanonicalJobKey, getSourceUrlPriority, parseIsoDateTimestamp } fro
 import {
   isNeonPostgresConfigured,
   getNeonPipelineJobs,
+  getNeonAppliedJobs,
   upsertNeonCanonicalJob,
   updateNeonJobFields,
   batchUpdateNeonJobStage,
@@ -15,6 +16,7 @@ import {
 export {
   isNeonPostgresConfigured,
   getNeonPipelineJobs,
+  getNeonAppliedJobs,
   upsertNeonCanonicalJob,
   updateNeonJobFields,
   batchUpdateNeonJobStage,
@@ -41,6 +43,11 @@ export interface StoredJobRecord {
   evaluationStatus?: string;
   needsLlmRetry?: boolean;
   sourcesSeen?: Array<{ source: string; url: string; id?: string; seenAt?: string }>;
+  appliedAt?: string | null;
+  lastFollowUpAt?: string | null;
+  followUpCount?: number;
+  lastReplySummary?: string;
+  lastReplyClassification?: string;
 }
 
 export type RuntimeStorageMode = 'custom-dir' | 'local-disk' | 'ephemeral-tmp' | 'read-only';
@@ -467,6 +474,9 @@ export interface JobFieldPatch {
   reasons?: string;
   evaluationStatus?: string;
   needsLlmRetry?: boolean;
+  markFollowUpSent?: boolean;
+  lastReplySummary?: string;
+  lastReplyClassification?: string;
 }
 
 export async function updateCloudSheetRowFields(
@@ -780,7 +790,12 @@ export function updateLocalJobRow(
     }
 
     if (idx < 0 || idx >= raw.length) return false;
-    if (patch.status !== undefined) raw[idx].status = sanitizePlainField(patch.status, 40);
+    if (patch.status !== undefined) {
+      raw[idx].status = sanitizePlainField(patch.status, 40);
+      if (raw[idx].status === 'APPLIED' && !raw[idx].appliedAt) {
+        raw[idx].appliedAt = new Date().toISOString();
+      }
+    }
     if (patch.dm !== undefined) raw[idx].dm = sanitizePlainField(patch.dm, 1500);
     if (patch.emailDraft !== undefined) {
       raw[idx].emailDraft = sanitizePlainField(patch.emailDraft, 2000);
@@ -798,6 +813,16 @@ export function updateLocalJobRow(
     }
     if (patch.needsLlmRetry !== undefined) {
       raw[idx].needsLlmRetry = Boolean(patch.needsLlmRetry);
+    }
+    if (patch.markFollowUpSent) {
+      raw[idx].lastFollowUpAt = new Date().toISOString();
+      raw[idx].followUpCount = (Number(raw[idx].followUpCount) || 0) + 1;
+    }
+    if (patch.lastReplySummary !== undefined) {
+      raw[idx].lastReplySummary = sanitizePlainField(patch.lastReplySummary, 500);
+    }
+    if (patch.lastReplyClassification !== undefined) {
+      raw[idx].lastReplyClassification = sanitizePlainField(patch.lastReplyClassification, 60);
     }
     return writeRuntimeJsonFile('jobs-store.json', raw).ok;
   } catch (e) {
@@ -831,6 +856,9 @@ export function batchUpdateLocalJobRows(
       }
       if (idx >= 0 && idx < raw.length) {
         raw[idx].status = cleanStatus;
+        if (cleanStatus === 'APPLIED' && !raw[idx].appliedAt) {
+          raw[idx].appliedAt = new Date().toISOString();
+        }
         updatedCount += 1;
       }
     }
@@ -970,6 +998,11 @@ export async function getAllSheetRows(): Promise<{
           evaluationStatus: j.evaluationStatus,
           needsLlmRetry: j.needsLlmRetry,
           sourcesSeen: j.sourcesSeen,
+          appliedAt: j.appliedAt,
+          lastFollowUpAt: j.lastFollowUpAt,
+          followUpCount: j.followUpCount,
+          lastReplySummary: j.lastReplySummary,
+          lastReplyClassification: j.lastReplyClassification,
         }));
         const dataRows = richRecords.map((item) => [
           item.date || new Date().toISOString().split('T')[0],

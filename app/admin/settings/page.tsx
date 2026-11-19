@@ -39,18 +39,28 @@ interface AuditFinding {
   status: string;
 }
 
+interface ReadinessCheck {
+  id: string;
+  label: string;
+  status: 'pass' | 'warn';
+  detail: string;
+}
+
 interface SystemAuditResponse {
   timestamp: string;
   authConfigured?: boolean;
   neonConfigured?: boolean;
   freehireBridgeConfigured?: boolean;
   ingestWebhookConfigured?: boolean;
+  discordConfigured?: boolean;
+  llmConfigured?: boolean;
   storageMode: 'neon-postgres' | 'cloud-sheets' | 'local-store';
   persistenceMode?: 'neon-postgres' | 'cloud-sheets' | 'local-disk' | 'ephemeral-tmp' | 'read-only';
   ephemeralFallback?: boolean;
   resolvedDataDir?: string;
   cloudError?: string;
   aiEngine: string;
+  readinessChecklist?: ReadinessCheck[];
   envChecks: EnvCheck[];
   failoverChains?: FailoverChain[];
   auditFindings?: AuditFinding[];
@@ -103,6 +113,11 @@ export default function SettingsPage() {
     [origin]
   );
 
+  const replyWebhookUrl = useMemo(
+    () => `${origin || 'https://your-app-domain'}/api/ingest/reply`,
+    [origin]
+  );
+
   const bookmarkletHref = useMemo(() => {
     const clipEndpoint = `${origin || 'https://your-app-domain'}/admin/clip#payload=`;
     return `javascript:(function(){var h=location.href,t=document.title||'',s=(window.getSelection&&window.getSelection().toString())||'',b=(document.body&&document.body.innerText||'').replace(/\\s+/g,' ').slice(0,5500);var p=JSON.stringify({url:h,title:t.split('|')[0].split(' - ')[0].trim(),description:s||b});window.location.href=${JSON.stringify(clipEndpoint)}+encodeURIComponent(p);})();`;
@@ -137,6 +152,61 @@ function forwardJobAlertsToKaisifOS() {
   });
 }`,
     [webhookUrl]
+  );
+
+  const replyTrackerAppsScript = useMemo(
+    () => `// Consumer @gmail.com Recruiter Reply Tracker (Zero Google Workspace / Paid DWD Required)
+// 1. Open script.google.com -> paste below -> add Script Property INGEST_WEBHOOK_SECRET
+// 2. Add a time-driven trigger every 30 minutes (or hourly) for syncRecruiterRepliesToKaisifOS
+function syncRecruiterRepliesToKaisifOS() {
+  var secret = PropertiesService.getScriptProperties().getProperty('INGEST_WEBHOOK_SECRET');
+  if (!secret) throw new Error('Missing INGEST_WEBHOOK_SECRET Script Property');
+
+  var activeRes = UrlFetchApp.fetch('${replyWebhookUrl}', {
+    method: 'get',
+    headers: { Authorization: 'Bearer ' + secret },
+    muteHttpExceptions: true
+  });
+  if (activeRes.getResponseCode() !== 200) return;
+  var activeData = JSON.parse(activeRes.getContentText() || '{}');
+  var companies = activeData.companies || [];
+  if (!companies.length) return;
+
+  var syncedLabel = GmailApp.getUserLabelByName('KaisifOS-Reply-Synced') || GmailApp.createLabel('KaisifOS-Reply-Synced');
+  var queryCompanies = companies.slice(0, 25).map(function (c) { return '"' + c.replace(/"/g, '') + '"'; }).join(' OR ');
+  var threads = GmailApp.search('in:inbox newer_than:14d -label:KaisifOS-Reply-Synced (' + queryCompanies + ')', 0, 20);
+  if (!threads.length) return;
+
+  var messagesPayload = [];
+  var threadMap = [];
+  threads.forEach(function (thread) {
+    var msgs = thread.getMessages();
+    var latest = msgs[msgs.length - 1];
+    if (!latest) return;
+    messagesPayload.push({
+      from: latest.getFrom(),
+      subject: latest.getSubject(),
+      snippet: (latest.getPlainBody() || '').slice(0, 800),
+      body: (latest.getPlainBody() || '').slice(0, 4500),
+      date: latest.getDate().toISOString(),
+      messageId: latest.getId()
+    });
+    threadMap.push(thread);
+  });
+
+  var postRes = UrlFetchApp.fetch('${replyWebhookUrl}', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + secret },
+    payload: JSON.stringify({ messages: messagesPayload }),
+    muteHttpExceptions: true
+  });
+
+  if (postRes.getResponseCode() >= 200 && postRes.getResponseCode() < 300) {
+    threadMap.forEach(function (t) { t.addLabel(syncedLabel); });
+  }
+}`,
+    [replyWebhookUrl]
   );
 
   const copySnippet = async (key: string, text: string) => {
@@ -313,6 +383,44 @@ function forwardJobAlertsToKaisifOS() {
               </div>
             </div>
           </div>
+        )}
+
+        {/* Production Lockdown & Automation Readiness Scoreboard */}
+        {audit?.readinessChecklist && audit.readinessChecklist.length > 0 && (
+          <section className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
+            <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0D131F] flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                <h2 className="text-sm font-display font-semibold text-slate-900 dark:text-white">
+                  Production Lockdown &amp; Automation Readiness Checklist
+                </h2>
+              </div>
+              <span className="text-xs font-mono tabular-nums px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60">
+                {audit.readinessChecklist.filter((c) => c.status === 'pass').length} /{' '}
+                {audit.readinessChecklist.length} Ready
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:gap-px bg-slate-200/70 dark:bg-slate-800/70">
+              {audit.readinessChecklist.map((item) => (
+                <div
+                  key={item.id}
+                  className="bg-white dark:bg-[#111827] p-4 flex items-start gap-3 text-xs"
+                >
+                  {item.status === 'pass' ? (
+                    <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertCircle className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                  )}
+                  <div className="space-y-1 min-w-0">
+                    <div className="font-medium text-slate-900 dark:text-white">{item.label}</div>
+                    <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+                      {item.detail}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
         )}
 
         {audit?.failoverChains && audit.failoverChains.length > 0 && (
@@ -494,6 +602,52 @@ function forwardJobAlertsToKaisifOS() {
               </div>
               <pre className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded p-3 text-[11px] font-mono text-slate-700 dark:text-slate-300 overflow-x-auto leading-relaxed">
                 {appsScriptSnippet}
+              </pre>
+            </div>
+
+            <div className="bg-slate-50 dark:bg-[#0B0F17] border border-emerald-200 dark:border-emerald-800/60 rounded-md p-4 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <span className="font-medium text-slate-900 dark:text-white">
+                    Consumer @gmail.com Recruiter Reply Tracker (Google Apps Script)
+                  </span>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                    Works on standard free <span className="font-mono">@gmail.com</span> accounts.
+                    Pulls active Applied/Outreach companies from{' '}
+                    <span className="font-mono">GET /api/ingest/reply</span>, classifies incoming
+                    replies into <span className="font-mono">INTERVIEW</span> /{' '}
+                    <span className="font-mono">REPLIED</span> /{' '}
+                    <span className="font-mono">REJECTED</span> while ignoring automated
+                    acknowledgements, and updates Neon + Discord.
+                  </p>
+                </div>
+                <div className="flex items-center gap-3 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => copySnippet('reply_url', replyWebhookUrl)}
+                    className="text-[11px] font-mono text-slate-600 dark:text-slate-300 hover:underline cursor-pointer"
+                  >
+                    {copiedKey === 'reply_url' ? 'URL Copied' : 'Copy Endpoint'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => copySnippet('reply_script', replyTrackerAppsScript)}
+                    className="text-[11px] font-mono text-emerald-600 dark:text-emerald-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    {copiedKey === 'reply_script' ? (
+                      <>
+                        <Check className="h-3 w-3" /> Copied
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-3 w-3" /> Copy Reply Script
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+              <pre className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded p-3 text-[11px] font-mono text-slate-700 dark:text-slate-300 overflow-x-auto leading-relaxed">
+                {replyTrackerAppsScript}
               </pre>
             </div>
           </div>

@@ -40,6 +40,11 @@ export interface NeonPipelineJob {
   evaluationStatus: string;
   needsLlmRetry: boolean;
   sourcesSeen: NeonSourceRef[];
+  appliedAt?: string | null;
+  lastFollowUpAt?: string | null;
+  followUpCount?: number;
+  lastReplySummary?: string;
+  lastReplyClassification?: string;
 }
 
 export interface NeonJobUpsertInput {
@@ -106,6 +111,7 @@ export function getNeonAppliedJobs(limit?: number): Promise<Array<{
   id: string;
   title: string;
   company: string;
+  status: string;
 }>>;
 export function upsertNeonCanonicalJob(
   record: NeonJobUpsertInput
@@ -125,6 +131,9 @@ export function updateNeonJobFields(
     reasons?: string;
     evaluationStatus?: string;
     needsLlmRetry?: boolean;
+    markFollowUpSent?: boolean;
+    lastReplySummary?: string;
+    lastReplyClassification?: string;
   }
 ): Promise<boolean>;
 export function batchUpdateNeonJobStage(

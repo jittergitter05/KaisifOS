@@ -1,12 +1,27 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { isAuthorizedRequest } from '@/lib/auth';
+import { isAuthorizedRequest, isSameOriginRequest } from '@/lib/auth';
 import { executeLiveScoutRun } from '@/lib/scout-runner';
+import { checkRateLimit, extractClientIp } from '@/lib/rate-limit';
+import { redactSecrets } from '@/lib/utils';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
+  if (!isSameOriginRequest(req.headers)) {
+    return NextResponse.json({ error: 'Cross-origin request blocked.' }, { status: 403 });
+  }
+
+  const ip = extractClientIp(req.headers);
+  const limit = checkRateLimit(`scout:live:${ip}`, 8, 5 * 60 * 1000);
+  if (!limit.allowed) {
+    return NextResponse.json(
+      { error: `Scout rate limit exceeded. Retry in ${limit.retryAfterSeconds}s.` },
+      { status: 429, headers: { 'Retry-After': String(limit.retryAfterSeconds) } }
+    );
+  }
+
   const cookieStore = cookies();
   const authCookie = cookieStore.get('kaisifos_auth')?.value;
   const lockedCookie = cookieStore.get('kaisifos_locked')?.value;
@@ -44,9 +59,9 @@ export async function POST(req: NextRequest) {
       warnings: summary.warnings,
     });
   } catch (err) {
-    const message = (err as Error)?.message || 'Live scout run failed';
+    const message = redactSecrets((err as Error)?.message || 'Live scout run failed', 240);
     const isReadOnly = /read-only|GOOGLE_SHEET_ID|persisting/i.test(message);
-    console.error('[Live Scout API] Error:', err);
+    console.error('[Live Scout API] Error:', message);
     return NextResponse.json(
       { error: message },
       { status: isReadOnly ? 503 : 500 }

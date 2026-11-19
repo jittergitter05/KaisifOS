@@ -57,9 +57,48 @@ export function safeExternalUrl(rawUrl: string | undefined | null): string {
   if (!rawUrl || typeof rawUrl !== 'string') return '#';
   const trimmed = rawUrl.trim();
   if (/^https?:\/\//i.test(trimmed)) {
-    return trimmed;
+    try {
+      const parsed = new URL(trimmed);
+      if ((parsed.protocol === 'https:' || parsed.protocol === 'http:') && !parsed.username && !parsed.password) {
+        return parsed.toString();
+      }
+    } catch {
+      return '#';
+    }
   }
   return '#';
+}
+
+/**
+ * Sanitizes an optional stored HTTP/HTTPS URL (returns '' for javascript:, data:, file:, or malformed URLs).
+ */
+export function sanitizeHttpUrl(rawUrl: unknown, maxLen = 500): string {
+  if (typeof rawUrl !== 'string') return '';
+  const trimmed = rawUrl.trim().slice(0, maxLen);
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || parsed.username || parsed.password) {
+      return '';
+    }
+    return parsed.toString().slice(0, maxLen);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Scrubs connection strings, API keys, webhook tokens, and bearer secrets from error strings before logging or returning.
+ */
+export function redactSecrets(input: unknown, maxLen = 400): string {
+  const raw = String(input ?? '');
+  return raw
+    .replace(/postgres(?:ql)?:\/\/[^\s"'`]+/gi, 'postgresql://[REDACTED]')
+    .replace(/https?:\/\/discord(?:app)?\.com\/api\/webhooks\/\d+\/[A-Za-z0-9._-]+/gi, 'https://discord.com/api/webhooks/[REDACTED]')
+    .replace(/Bearer\s+[A-Za-z0-9._\-~+/]+=*/gi, 'Bearer [REDACTED]')
+    .replace(/\b(AIza[0-9A-Za-z_\-]{20,}|gsk_[0-9A-Za-z_\-]{16,}|sk-or-v1-[0-9A-Za-z_\-]{16,}|sk-[0-9A-Za-z_\-]{20,}|ghp_[0-9A-Za-z]{20,})\b/g, '[REDACTED_KEY]')
+    .replace(/(password|pwd|token|secret|api_?key|authorization)\s*[:=]\s*[^\s&"',;]+/gi, '$1=[REDACTED]')
+    .slice(0, maxLen);
 }
 
 /**
@@ -96,8 +135,38 @@ export function sanitizeCsvCell(val: unknown): string {
   return `"${safe.replace(/"/g, '""')}"`;
 }
 
+function decodeIpv6MappedIpv4(host: string): string | null {
+  const dotted = host.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i);
+  if (dotted) return dotted[1];
+  const hex = host.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+  if (hex) {
+    const hi = parseInt(hex[1], 16);
+    const lo = parseInt(hex[2], 16);
+    return `${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`;
+  }
+  return null;
+}
+
+function isPrivateOrReservedIpv4(ip: string): { isLoopback: boolean; isPrivate: boolean } {
+  const parts = ip.split('.').map((p) => Number(p));
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+    return { isLoopback: false, isPrivate: false };
+  }
+  const [a, b] = parts;
+  const isLoopback = a === 127;
+  const isPrivate =
+    a === 0 || // 0.0.0.0/8
+    a === 10 || // 10.0.0.0/8
+    (a === 100 && b >= 64 && b <= 127) || // 100.64.0.0/10 CGNAT / Tailscale
+    (a === 169 && b === 254) || // 169.254.0.0/16 Link-local & Cloud Metadata
+    (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
+    (a === 192 && b === 168) || // 192.168.0.0/16
+    a >= 224; // Multicast & reserved
+  return { isLoopback, isPrivate };
+}
+
 /**
- * Validates optional external HTTP/HTTPS endpoints (such as FREEHIRE_API_URL) against SSRF risks.
+ * Validates optional external HTTP/HTTPS endpoints (career pages, apply links, FREEHIRE_API_URL) against SSRF risks.
  */
 export function validateSafePublicUrl(
   rawUrl: string,
@@ -114,25 +183,36 @@ export function validateSafePublicUrl(
     return { ok: false, reason: `Disallowed URL scheme: ${parsed.protocol}` };
   }
 
-  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (parsed.username || parsed.password) {
+    return { ok: false, reason: 'Blocked URL containing embedded credentials' };
+  }
+
+  const rawHost = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const mappedIpv4 = decodeIpv6MappedIpv4(rawHost);
+  const ipCheck = isPrivateOrReservedIpv4(mappedIpv4 || rawHost);
+
   const isLocalHost =
-    host === 'localhost' ||
-    host === '127.0.0.1' ||
-    host === '::1' ||
-    host.endsWith('.local');
+    rawHost === 'localhost' ||
+    rawHost.endsWith('.localhost') ||
+    rawHost === '::1' ||
+    rawHost === '0:0:0:0:0:0:0:1' ||
+    rawHost.endsWith('.local') ||
+    ipCheck.isLoopback;
 
   const isMetadataOrPrivate =
-    host === '169.254.169.254' ||
-    host === 'metadata.google.internal' ||
-    host.startsWith('10.') ||
-    host.startsWith('192.168.') ||
-    /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
-    host.startsWith('fc') ||
-    host.startsWith('fd') ||
-    host.startsWith('fe80:');
+    ipCheck.isPrivate ||
+    rawHost === '::' ||
+    rawHost === '0:0:0:0:0:0:0:0' ||
+    rawHost === 'metadata.goog' ||
+    rawHost === 'metadata.google.internal' ||
+    rawHost.endsWith('.internal') ||
+    /^f[cd][0-9a-f]{2}:/i.test(rawHost) ||
+    /^fe[89ab][0-9a-f]:/i.test(rawHost);
 
-  if (isMetadataOrPrivate || (isLocalHost && !options?.allowLocalDev && process.env.NODE_ENV === 'production')) {
-    return { ok: false, reason: `Blocked private or metadata endpoint host: ${host}` };
+  const allowLocalHostNow = Boolean(options?.allowLocalDev && process.env.NODE_ENV !== 'production');
+
+  if (isMetadataOrPrivate || (isLocalHost && !allowLocalHostNow)) {
+    return { ok: false, reason: `Blocked private or metadata endpoint host: ${rawHost}` };
   }
 
   if (process.env.NODE_ENV === 'production' && parsed.protocol !== 'https:' && !isLocalHost) {

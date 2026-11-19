@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { isAuthorizedRequest } from '@/lib/auth';
+import { isAuthorizedRequest, isSameOriginRequest } from '@/lib/auth';
 import {
   getAllSheetRows,
   getPublicStats,
@@ -20,7 +20,8 @@ import {
   getNeonTelemetrySummary,
   sanitizePlainField,
 } from '@/lib/sheets';
-import { buildCanonicalJobKey, detectSource } from '@/lib/utils';
+import { buildCanonicalJobKey, detectSource, sanitizeHttpUrl } from '@/lib/utils';
+import { checkRateLimit, extractClientIp } from '@/lib/rate-limit';
 
 const ALLOWED_STATUSES = new Set([
   'NEW',
@@ -86,6 +87,19 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  if (!isSameOriginRequest(request.headers)) {
+    return NextResponse.json({ error: 'Cross-origin request blocked.' }, { status: 403 });
+  }
+
+  const ip = extractClientIp(request.headers);
+  const limit = checkRateLimit(`sheet-sync:write:${ip}`, 120, 5 * 60 * 1000);
+  if (!limit.allowed) {
+    return NextResponse.json(
+      { error: `Rate limit exceeded. Retry in ${limit.retryAfterSeconds}s.` },
+      { status: 429, headers: { 'Retry-After': String(limit.retryAfterSeconds) } }
+    );
+  }
+
   const cookieStore = cookies();
   const authCookie = cookieStore.get('kaisifos_auth')?.value;
   const lockedCookie = cookieStore.get('kaisifos_locked')?.value;
@@ -193,7 +207,7 @@ export async function POST(request: NextRequest) {
       const companyStr = sanitizePlainField(job.company || 'Unknown Company', 160);
       const locationStr = sanitizePlainField(job.location || '', 120);
       const idStr = sanitizePlainField(job.id || `manual_${Date.now()}`, 120);
-      const urlStr = sanitizePlainField(job.url || '', 500);
+      const urlStr = sanitizeHttpUrl(job.url || '', 500);
       const canonicalKey = buildCanonicalJobKey(companyStr, titleStr, locationStr);
 
       const record = {
@@ -289,7 +303,23 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const { id, canonicalKey, rowId, status, dm, emailDraft, resumeAngle, gap, score, reasons, evaluationStatus, needsLlmRetry } = body;
+    const {
+      id,
+      canonicalKey,
+      rowId,
+      status,
+      dm,
+      emailDraft,
+      resumeAngle,
+      gap,
+      score,
+      reasons,
+      evaluationStatus,
+      needsLlmRetry,
+      markFollowUpSent,
+      lastReplySummary,
+      lastReplyClassification,
+    } = body;
     const targetId = typeof id === 'string' && id.trim() ? id.trim().slice(0, 120) : undefined;
     const targetCanonicalKey =
       typeof canonicalKey === 'string' && canonicalKey.trim()
@@ -332,6 +362,13 @@ export async function POST(request: NextRequest) {
           ? (evaluationStatus as 'LLM_SCORED' | 'DETERMINISTIC_ONLY' | 'REJECTED_GATE')
           : undefined,
       needsLlmRetry: typeof needsLlmRetry === 'boolean' ? needsLlmRetry : undefined,
+      markFollowUpSent: markFollowUpSent === true ? true : undefined,
+      lastReplySummary:
+        lastReplySummary !== undefined ? sanitizePlainField(lastReplySummary, 500) : undefined,
+      lastReplyClassification:
+        lastReplyClassification !== undefined
+          ? sanitizePlainField(lastReplyClassification, 60)
+          : undefined,
     };
 
     let neonUpdated = false;

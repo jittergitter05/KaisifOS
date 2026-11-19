@@ -12,16 +12,28 @@ import {
   BookOpen,
   AlertTriangle,
   Save,
+  Users,
+  Sparkles,
+  Download,
+  FileText,
+  Clock,
+  MailCheck,
+  Send,
 } from 'lucide-react';
 import { Button } from './ui/button';
 import StatusBadge from './StatusBadge';
-
+import {
+  buildPeopleSearchLinks,
+  computeJobFreshnessAndCadence,
+  generateFollowUpDraft,
+} from '@/lib/outreach-engine';
 import {
   deriveJobPillarBreakdown,
   safeExternalUrl,
   extractExternalHost,
   copyToClipboardSafe,
 } from '@/lib/utils';
+
 export { deriveJobPillarBreakdown };
 
 export interface AuditableJob {
@@ -45,6 +57,11 @@ export interface AuditableJob {
   evaluationStatus?: 'LLM_SCORED' | 'DETERMINISTIC_ONLY' | 'REJECTED_GATE';
   needsLlmRetry?: boolean;
   sourcesSeen?: Array<{ source: string; url: string; id?: string; seenAt?: string }>;
+  appliedAt?: string | null;
+  lastFollowUpAt?: string | null;
+  followUpCount?: number;
+  lastReplySummary?: string;
+  lastReplyClassification?: string;
 }
 
 interface PrepPackResult {
@@ -52,6 +69,131 @@ interface PrepPackResult {
   screening_questions: Array<{ question: string; answer_framework: string }>;
   follow_up_sequence: { day_3_nudge: string; day_7_value_add: string };
   engine_used: string;
+}
+
+interface TailorPackPayload {
+  tailored_summary: string;
+  tailored_bullets: Array<{
+    bullet: string;
+    grounded_proof: string;
+    jd_alignment: string;
+  }>;
+  ats_keywords_matched: string[];
+  ats_keywords_to_prep: string[];
+  cover_note_subject: string;
+  cover_note_body: string;
+  followup_bump_1: string;
+  followup_bump_2: string;
+  engine_used: string;
+}
+
+function escapeHtml(raw: string): string {
+  return String(raw || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function buildTailorMarkdownClient(pack: TailorPackPayload, job: AuditableJob): string {
+  const lines = [
+    `# ATS Tailor Brief — ${job.title} @ ${job.company}`,
+    job.location ? `**Location:** ${job.location}` : '',
+    job.url ? `**Apply URL:** ${job.url}` : '',
+    `**Engine:** ${pack.engine_used}`,
+    '',
+    '## Tailored ATS Summary',
+    pack.tailored_summary,
+    '',
+    '## Grounded STAR Resume Bullets (Zero-Fabrication)',
+    ...pack.tailored_bullets.map(
+      (b, idx) =>
+        `${idx + 1}. ${b.bullet}\n   - *Grounded Proof:* ${b.grounded_proof}\n   - *JD Alignment:* ${b.jd_alignment}`
+    ),
+    '',
+    '## ATS Keywords Matched',
+    pack.ats_keywords_matched.join(' · '),
+    '',
+    ...(pack.ats_keywords_to_prep.length > 0
+      ? ['## Keywords to Address Honestly in Interview', pack.ats_keywords_to_prep.join(' · '), '']
+      : []),
+    '## Concise Hiring Manager Cover Note',
+    `**Subject:** ${pack.cover_note_subject}`,
+    '',
+    pack.cover_note_body,
+    '',
+    '## Follow-Up Cadence',
+    `- **Day 5 Bump #1:** ${pack.followup_bump_1}`,
+    `- **Day 11 Bump #2:** ${pack.followup_bump_2}`,
+  ];
+  return lines.filter((l) => l !== undefined).join('\n');
+}
+
+function buildTailorPrintableHtml(pack: TailorPackPayload, job: AuditableJob): string {
+  const bulletsHtml = pack.tailored_bullets
+    .map(
+      (b) => `<li>
+        <div class="bullet-text">${escapeHtml(b.bullet)}</div>
+        <div class="meta"><strong>Grounded Proof:</strong> ${escapeHtml(b.grounded_proof)} &middot; <strong>JD Alignment:</strong> ${escapeHtml(b.jd_alignment)}</div>
+      </li>`
+    )
+    .join('');
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>ATS Tailor Brief — ${escapeHtml(job.title)} @ ${escapeHtml(job.company)}</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #0f172a; max-width: 780px; margin: 32px auto; padding: 0 24px; line-height: 1.55; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { font-size: 12px; color: #475569; margin-bottom: 20px; font-family: ui-monospace, monospace; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: #047857; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; margin-top: 22px; }
+  ul { padding-left: 18px; }
+  li { margin-bottom: 12px; }
+  .bullet-text { font-size: 14px; font-weight: 500; }
+  .meta { font-size: 11px; color: #475569; margin-top: 3px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip { font-size: 11px; padding: 2px 8px; border-radius: 4px; background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+  .chip.prep { background: #fffbeb; color: #92400e; border-color: #fde68a; }
+  pre { white-space: pre-wrap; font-family: inherit; background: #f8fafc; padding: 12px; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 13px; }
+  @media print { body { margin: 12px; } }
+</style>
+</head>
+<body>
+  <h1>${escapeHtml(job.title)} &mdash; ${escapeHtml(job.company)}</h1>
+  <div class="sub">${escapeHtml(job.location || 'India / Remote')} &middot; Score ${job.score}/100 &middot; ${escapeHtml(pack.engine_used)}</div>
+  <h2>Tailored ATS Summary</h2>
+  <p>${escapeHtml(pack.tailored_summary)}</p>
+  <h2>Grounded STAR Resume Bullets</h2>
+  <ul>${bulletsHtml}</ul>
+  <h2>ATS Keywords Matched</h2>
+  <div class="chips">${pack.ats_keywords_matched.map((k) => `<span class="chip">${escapeHtml(k)}</span>`).join('')}</div>
+  ${
+    pack.ats_keywords_to_prep.length > 0
+      ? `<h2>Keywords to Prep Honestly</h2><div class="chips">${pack.ats_keywords_to_prep
+          .map((k) => `<span class="chip prep">${escapeHtml(k)}</span>`)
+          .join('')}</div>`
+      : ''
+  }
+  <h2>Cover Note</h2>
+  <p><strong>Subject:</strong> ${escapeHtml(pack.cover_note_subject)}</p>
+  <pre>${escapeHtml(pack.cover_note_body)}</pre>
+  <h2>Follow-Up Cadence</h2>
+  <p><strong>Day 5 Bump #1:</strong> ${escapeHtml(pack.followup_bump_1)}</p>
+  <p><strong>Day 11 Bump #2:</strong> ${escapeHtml(pack.followup_bump_2)}</p>
+</body>
+</html>`;
+}
+
+function triggerBlobDownload(content: string, filename: string, mimeType: string) {
+  const blob = new Blob([content], { type: mimeType });
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = objectUrl;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1200);
 }
 
 export default function JobAuditDrawer({
@@ -64,12 +206,13 @@ export default function JobAuditDrawer({
   onJobUpdated?: () => void;
 }) {
   const [localJob, setLocalJob] = useState<AuditableJob | null>(job);
-  const [copiedField, setCopiedField] = useState<'dm' | 'angle' | 'email' | 'nudge' | null>(null);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
   const [outreachTab, setOutreachTab] = useState<'dm' | 'email' | 'angle'>('dm');
   const [editableDm, setEditableDm] = useState('');
   const [editableEmail, setEditableEmail] = useState('');
   const [editableAngle, setEditableAngle] = useState('');
   const [savingOutreach, setSavingOutreach] = useState(false);
+  const [markingFollowUp, setMarkingFollowUp] = useState(false);
   const [rescoring, setRescoring] = useState(false);
   const [rescoreNote, setRescoreNote] = useState<string | null>(null);
   const [chainStatus, setChainStatus] = useState<Record<string, string> | null>(null);
@@ -78,6 +221,8 @@ export default function JobAuditDrawer({
   );
   const [prepPack, setPrepPack] = useState<PrepPackResult | null>(null);
   const [loadingPrep, setLoadingPrep] = useState(false);
+  const [tailorPack, setTailorPack] = useState<TailorPackPayload | null>(null);
+  const [loadingTailor, setLoadingTailor] = useState(false);
   const [drawerError, setDrawerError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -94,6 +239,7 @@ export default function JobAuditDrawer({
     setChainStatus(null);
     setSkillOverlap(null);
     setPrepPack(null);
+    setTailorPack(null);
     setDrawerError(null);
   }, [job]);
 
@@ -111,6 +257,29 @@ export default function JobAuditDrawer({
   const pillars = deriveJobPillarBreakdown(localJob);
   const externalUrl = safeExternalUrl(localJob.url);
   const applyHost = extractExternalHost(localJob.url);
+  const peopleLinks = buildPeopleSearchLinks({
+    title: localJob.title,
+    company: localJob.company,
+    location: localJob.location,
+  });
+  const cadence = computeJobFreshnessAndCadence({
+    date: localJob.date,
+    status: localJob.status,
+    appliedAt: localJob.appliedAt,
+    lastFollowUpAt: localJob.lastFollowUpAt,
+    followUpCount: localJob.followUpCount,
+  });
+  const nextBumpNumber: 1 | 2 = (localJob.followUpCount || 0) >= 1 ? 2 : 1;
+  const followUpDraft = generateFollowUpDraft(
+    {
+      title: localJob.title,
+      company: localJob.company,
+      resumeAngle: localJob.resumeAngle,
+    },
+    {},
+    nextBumpNumber
+  );
+
   const reasonItems = (localJob.reasons || '')
     .split('|')
     .map((r) => r.trim())
@@ -121,11 +290,45 @@ export default function JobAuditDrawer({
     localJob.evaluationStatus === 'DETERMINISTIC_ONLY' ||
     /Deterministic 4-Pillar Rubric/i.test(localJob.reasons);
 
-  const copyText = async (text: string, key: 'dm' | 'angle' | 'email' | 'nudge') => {
+  const copyText = async (text: string, key: string) => {
     const ok = await copyToClipboardSafe(text);
     if (ok) {
       setCopiedField(key);
       setTimeout(() => setCopiedField(null), 1800);
+    }
+  };
+
+  const handleMarkFollowUpSent = async () => {
+    setMarkingFollowUp(true);
+    setDrawerError(null);
+    setRescoreNote(null);
+    try {
+      const res = await fetch('/api/sheet-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: localJob.id,
+          canonicalKey: localJob.canonicalKey,
+          rowId: localJob.rowId,
+          markFollowUpSent: true,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.error || `Failed to log follow-up (HTTP ${res.status})`);
+      }
+      const nextCount = (Number(localJob.followUpCount) || 0) + 1;
+      setLocalJob({
+        ...localJob,
+        followUpCount: nextCount,
+        lastFollowUpAt: new Date().toISOString(),
+      });
+      setRescoreNote(`Follow-up Bump #${nextCount} logged to pipeline ledger.`);
+      if (onJobUpdated) onJobUpdated();
+    } catch (e) {
+      setDrawerError((e as Error).message || 'Unable to log follow-up bump.');
+    } finally {
+      setMarkingFollowUp(false);
     }
   };
 
@@ -281,10 +484,45 @@ export default function JobAuditDrawer({
     }
   };
 
+  const handleGenerateTailor = async () => {
+    setLoadingTailor(true);
+    setDrawerError(null);
+    try {
+      const res = await fetch('/api/tailor', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: localJob.title,
+          company: localJob.company,
+          location: localJob.location || '',
+          reasons: localJob.reasons,
+          gap: localJob.gap,
+          resumeAngle: localJob.resumeAngle,
+          description: `${localJob.title} at ${localJob.company}. Lead angle: ${localJob.resumeAngle}. Signals: ${localJob.reasons}`,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.error || `ATS Tailor failed (HTTP ${res.status}).`);
+      }
+      setTailorPack(await res.json());
+    } catch (e) {
+      setDrawerError((e as Error).message || 'Unable to generate grounded ATS Tailor Brief.');
+    } finally {
+      setLoadingTailor(false);
+    }
+  };
+
   const sourcesList =
     Array.isArray(localJob.sourcesSeen) && localJob.sourcesSeen.length > 0
       ? localJob.sourcesSeen
       : [{ source: localJob.source, url: localJob.url, id: localJob.id }];
+
+  const slugName = `${localJob.company}-${localJob.title}`
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 48);
 
   return (
     <div
@@ -332,7 +570,7 @@ export default function JobAuditDrawer({
                 <a
                   href={externalUrl}
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
                   className="inline-flex items-center gap-1 text-xs font-mono text-emerald-600 dark:text-emerald-400 hover:underline mt-1 break-all"
                 >
                   {externalUrl} <ArrowUpRight className="h-3 w-3 shrink-0" />
@@ -350,7 +588,7 @@ export default function JobAuditDrawer({
                         key={`${s.source}-${idx}`}
                         href={sHref}
                         target="_blank"
-                        rel="noreferrer"
+                        rel="noopener noreferrer"
                         className="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-emerald-500 inline-flex items-center gap-1"
                       >
                         {s.source} <ArrowUpRight className="h-2.5 w-2.5" />
@@ -390,7 +628,27 @@ export default function JobAuditDrawer({
             </div>
           )}
 
-          {/* Score Banner */}
+          {/* Last Recruiter Reply Intelligence Banner */}
+          {localJob.lastReplySummary && (
+            <div
+              className={`rounded-lg px-4 py-3 text-xs border space-y-1 ${
+                localJob.lastReplyClassification === 'INTERVIEW_INVITE'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/35 border-emerald-200 dark:border-emerald-800/70 text-emerald-900 dark:text-emerald-200'
+                  : localJob.lastReplyClassification === 'REJECTION'
+                  ? 'bg-rose-50 dark:bg-rose-950/35 border-rose-200 dark:border-rose-800/70 text-rose-900 dark:text-rose-200'
+                  : 'bg-blue-50 dark:bg-blue-950/35 border-blue-200 dark:border-blue-800/70 text-blue-900 dark:text-blue-200'
+              }`}
+            >
+              <div className="font-mono font-semibold inline-flex items-center gap-1.5">
+                <MailCheck className="h-3.5 w-3.5" />
+                Reply Intelligence ·{' '}
+                {(localJob.lastReplyClassification || 'RECRUITER_REPLY').replace(/_/g, ' ')}
+              </div>
+              <p className="leading-relaxed">{localJob.lastReplySummary}</p>
+            </div>
+          )}
+
+          {/* Score Banner & Primary Intelligence Actions */}
           <div className="bg-slate-50 dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-3">
             <div className="flex items-center justify-between gap-4">
               <div>
@@ -412,7 +670,7 @@ export default function JobAuditDrawer({
                     size="sm"
                     className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs h-8 px-3 whitespace-nowrap shrink-0"
                   >
-                    <a href={externalUrl} target="_blank" rel="noreferrer">
+                    <a href={externalUrl} target="_blank" rel="noopener noreferrer">
                       Apply ({applyHost || 'Direct'}) <ArrowUpRight className="h-3.5 w-3.5 ml-1" />
                     </a>
                   </Button>
@@ -450,6 +708,19 @@ export default function JobAuditDrawer({
                 type="button"
                 variant="outline"
                 size="sm"
+                onClick={handleGenerateTailor}
+                disabled={loadingTailor}
+                className="bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 text-emerald-800 dark:text-emerald-300 text-xs h-8 px-3 whitespace-nowrap shrink-0"
+              >
+                <Sparkles
+                  className={`h-3.5 w-3.5 mr-1.5 ${loadingTailor ? 'animate-spin' : ''}`}
+                />
+                {loadingTailor ? 'Tailoring ATS Brief...' : 'ATS Tailor Studio'}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
                 onClick={handleGeneratePrep}
                 disabled={loadingPrep}
                 className="bg-white dark:bg-[#0B0F17] border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 text-xs h-8 px-3 whitespace-nowrap shrink-0"
@@ -459,6 +730,260 @@ export default function JobAuditDrawer({
               </Button>
             </div>
           </div>
+
+          {/* 1-Click LinkedIn Boolean People Finder */}
+          <div className="bg-slate-50 dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-medium text-slate-900 dark:text-white inline-flex items-center gap-1.5">
+                <Users className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+                1-Click Hiring Manager &amp; Warm Referral Finder
+              </span>
+              <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
+                LinkedIn Boolean
+              </span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              {peopleLinks.map((link) => (
+                <a
+                  key={link.role}
+                  href={link.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="bg-white dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 hover:border-emerald-500 rounded-md p-2.5 transition-colors group"
+                >
+                  <div className="flex items-center justify-between gap-1 text-xs font-medium text-slate-900 dark:text-white group-hover:text-emerald-600 dark:group-hover:text-emerald-400">
+                    <span className="truncate">{link.label}</span>
+                    <ArrowUpRight className="h-3.5 w-3.5 shrink-0" />
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 mt-0.5 truncate">
+                    {link.personaHint}
+                  </div>
+                </a>
+              ))}
+            </div>
+          </div>
+
+          {/* Follow-Up Cadence Bar for APPLIED / OUTREACH_DRAFTED */}
+          {(localJob.status === 'APPLIED' || localJob.status === 'OUTREACH_DRAFTED') && (
+            <div className="bg-blue-50/70 dark:bg-blue-950/25 border border-blue-200 dark:border-blue-800/60 rounded-lg p-4 space-y-2.5 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium text-blue-900 dark:text-blue-200 inline-flex items-center gap-1.5">
+                  <Clock className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+                  Follow-Up Cadence · {cadence.daysSinceApplied ?? 0}d since applied ·{' '}
+                  {cadence.followUpCount} bump(s) sent
+                </span>
+                <span className="text-[11px] font-mono text-blue-700 dark:text-blue-300">
+                  {cadence.nextActionLabel}
+                </span>
+              </div>
+              <p className="text-xs text-slate-700 dark:text-slate-300 bg-white dark:bg-[#0B0F17] border border-blue-200/70 dark:border-blue-900/60 rounded p-2.5 leading-relaxed">
+                {followUpDraft.dm}
+              </p>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => copyText(followUpDraft.dm, 'cadence_bump')}
+                  className="bg-white dark:bg-[#0B0F17] border-blue-300 dark:border-blue-800 text-slate-800 dark:text-slate-200 text-xs h-7 px-2.5"
+                >
+                  {copiedField === 'cadence_bump' ? (
+                    <>
+                      <Check className="h-3 w-3 mr-1 text-emerald-600 dark:text-emerald-400" />{' '}
+                      Bump #{nextBumpNumber} Copied
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="h-3 w-3 mr-1" /> Copy Bump #{nextBumpNumber} Draft
+                    </>
+                  )}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={markingFollowUp}
+                  onClick={handleMarkFollowUpSent}
+                  className="bg-blue-600 hover:bg-blue-500 text-white text-xs h-7 px-2.5"
+                >
+                  <Send className="h-3 w-3 mr-1" />
+                  {markingFollowUp ? 'Logging...' : 'Mark Follow-Up Sent'}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* Grounded ATS Tailor Studio Panel */}
+          {tailorPack && (
+            <div className="bg-slate-50 dark:bg-[#111827] border border-emerald-300 dark:border-emerald-800/70 rounded-lg p-4 space-y-4 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800 pb-2.5">
+                <div>
+                  <div className="font-semibold text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1.5">
+                    <Sparkles className="h-3.5 w-3.5" /> Grounded ATS Tailor Studio
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 mt-0.5">
+                    Zero-Fabrication Proof Mapping · {tailorPack.engine_used}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      copyText(buildTailorMarkdownClient(tailorPack, localJob), 'tailor_all')
+                    }
+                    className="px-2 py-1 rounded text-[11px] font-mono bg-white dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-700 hover:border-emerald-500 text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    {copiedField === 'tailor_all' ? (
+                      <>
+                        <Check className="h-3 w-3 text-emerald-600" /> Copied
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-3 w-3" /> Copy All
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      triggerBlobDownload(
+                        buildTailorMarkdownClient(tailorPack, localJob),
+                        `ats-tailor-${slugName}.md`,
+                        'text/markdown;charset=utf-8;'
+                      )
+                    }
+                    className="px-2 py-1 rounded text-[11px] font-mono bg-white dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-700 hover:border-emerald-500 text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <Download className="h-3 w-3" /> .md
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      triggerBlobDownload(
+                        buildTailorPrintableHtml(tailorPack, localJob),
+                        `ats-tailor-${slugName}.html`,
+                        'text/html;charset=utf-8;'
+                      )
+                    }
+                    className="px-2 py-1 rounded text-[11px] font-mono bg-emerald-600 hover:bg-emerald-500 text-white inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <FileText className="h-3 w-3" /> Print HTML
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium text-slate-900 dark:text-white">
+                    Tailored ATS Summary
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => copyText(tailorPack.tailored_summary, 'tailor_summary')}
+                    className="text-[11px] font-mono text-emerald-600 dark:text-emerald-400 hover:underline cursor-pointer"
+                  >
+                    {copiedField === 'tailor_summary' ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+                <p className="text-slate-700 dark:text-slate-300 bg-white dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded p-2.5 leading-relaxed">
+                  {tailorPack.tailored_summary}
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <div className="font-medium text-slate-900 dark:text-white">
+                  Grounded STAR Resume Bullets
+                </div>
+                {tailorPack.tailored_bullets.map((item, idx) => (
+                  <div
+                    key={idx}
+                    className="bg-white dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded p-2.5 space-y-1.5"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-slate-800 dark:text-slate-200 leading-relaxed">
+                        • {item.bullet}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => copyText(item.bullet, `tb_${idx}`)}
+                        className="text-[10px] font-mono text-slate-500 hover:text-emerald-600 dark:hover:text-emerald-400 shrink-0 cursor-pointer"
+                      >
+                        {copiedField === `tb_${idx}` ? 'Copied' : 'Copy'}
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono">
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800/60">
+                        Proof: {item.grounded_proof}
+                      </span>
+                      <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700">
+                        JD: {item.jd_alignment}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <div className="text-[11px] font-mono text-emerald-700 dark:text-emerald-400 mb-1.5">
+                    ATS Keywords Matched
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {tailorPack.ats_keywords_matched.map((kw) => (
+                      <span
+                        key={kw}
+                        className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-50 text-emerald-800 border border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800/60"
+                      >
+                        {kw}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                {tailorPack.ats_keywords_to_prep.length > 0 && (
+                  <div>
+                    <div className="text-[11px] font-mono text-amber-700 dark:text-amber-400 mb-1.5">
+                      Prep Honestly (Not in Profile)
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {tailorPack.ats_keywords_to_prep.map((kw) => (
+                        <span
+                          key={kw}
+                          className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-50 text-amber-800 border border-amber-200 dark:bg-amber-950/50 dark:text-amber-300 dark:border-amber-800/60"
+                        >
+                          {kw}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-1.5 border-t border-slate-200 dark:border-slate-800 pt-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium text-slate-900 dark:text-white">
+                    Cover Note ·{' '}
+                    <span className="font-mono text-[11px] text-slate-500">
+                      {tailorPack.cover_note_subject}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      copyText(
+                        `Subject: ${tailorPack.cover_note_subject}\n\n${tailorPack.cover_note_body}`,
+                        'tailor_cover'
+                      )
+                    }
+                    className="text-[11px] font-mono text-emerald-600 dark:text-emerald-400 hover:underline shrink-0 cursor-pointer"
+                  >
+                    {copiedField === 'tailor_cover' ? 'Copied' : 'Copy Cover Note'}
+                  </button>
+                </div>
+                <pre className="whitespace-pre-wrap font-sans text-xs text-slate-700 dark:text-slate-300 bg-white dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded p-2.5 leading-relaxed">
+                  {tailorPack.cover_note_body}
+                </pre>
+              </div>
+            </div>
+          )}
 
           {chainStatus && (
             <div className="bg-slate-50 dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg px-4 py-2.5 text-[11px] font-mono text-slate-600 dark:text-slate-400 flex flex-wrap gap-x-4 gap-y-1">
@@ -618,7 +1143,7 @@ export default function JobAuditDrawer({
             <div className="bg-slate-50 dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-lg p-4">
               <div className="flex items-center gap-2 text-xs font-medium text-amber-600 dark:text-amber-400 mb-1.5">
                 <ShieldAlert className="h-3.5 w-3.5" />
-                <span>Identified Risk & Interview Mitigation</span>
+                <span>Identified Risk &amp; Interview Mitigation</span>
               </div>
               <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
                 {localJob.gap || 'No hard blockers identified; lead with quantified execution proof.'}
@@ -669,7 +1194,7 @@ export default function JobAuditDrawer({
                   </>
                 ) : (
                   <>
-                    <Copy className="h-3 w-3" /> CopyActive Draft
+                    <Copy className="h-3 w-3" /> Copy Active Draft
                   </>
                 )}
               </button>

@@ -1,7 +1,11 @@
 import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { isAuthorizedRequest, isCustomAuthConfigured } from '@/lib/auth';
+import {
+  isAuthorizedRequest,
+  isCustomAuthConfigured,
+  isSameOriginRequest,
+} from '@/lib/auth';
 import { getCandidateProfileAsync } from '@/lib/profile';
 import {
   ingestJobsIntoPipeline,
@@ -24,34 +28,6 @@ function verifyBearerWebhookSecret(authHeader: string | null): boolean {
   const expectedDigest = crypto.createHash('sha256').update(configuredSecret).digest();
   const providedDigest = crypto.createHash('sha256').update(provided).digest();
   return crypto.timingSafeEqual(expectedDigest, providedDigest);
-}
-
-function isSameOriginBrowserRequest(request: NextRequest): boolean {
-  const hostHeader = (request.headers.get('host') || '').toLowerCase();
-  const secFetchSite = (request.headers.get('sec-fetch-site') || '').toLowerCase();
-  if (secFetchSite === 'cross-site') return false;
-
-  const origin = request.headers.get('origin');
-  if (origin) {
-    try {
-      const originHost = new URL(origin).host.toLowerCase();
-      return Boolean(hostHeader && originHost === hostHeader);
-    } catch {
-      return false;
-    }
-  }
-
-  const referer = request.headers.get('referer');
-  if (referer) {
-    try {
-      const refererHost = new URL(referer).host.toLowerCase();
-      return Boolean(hostHeader && refererHost === hostHeader);
-    } catch {
-      return false;
-    }
-  }
-
-  return secFetchSite === 'same-origin' || secFetchSite === 'none' || !secFetchSite;
 }
 
 export async function GET() {
@@ -106,7 +82,7 @@ export async function POST(request: NextRequest) {
     if (!sessionOk) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
-    if (!isSameOriginBrowserRequest(request)) {
+    if (!isSameOriginRequest(request.headers)) {
       return NextResponse.json(
         { error: 'Cross-origin browser POST requires Authorization: Bearer <INGEST_WEBHOOK_SECRET>.' },
         { status: 403 }
